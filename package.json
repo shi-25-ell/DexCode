@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --config apps/web/vite.config.ts",
+    "dev": "concurrently --kill-others --names runtime,web --prefix-colors blue,magenta \"npm run dev:runtime\" \"npm run dev:web\"",
     "dev:runtime": "node --experimental-strip-types server.ts",
     "start": "node --experimental-strip-types server.ts",
     "build:web": "vite build --config apps/web/vite.config.ts",
     "dev:web": "vite --config apps/web/vite.config.ts",
     "lint": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p apps/web/tsconfig.build.json --noEmit",
     "test:web": "vitest run --config apps/web/vite.config.ts",
+    "test:dev": "node scripts/dev-smoke.mjs",
     "test": "node --experimental-strip-types --test packages/agent-core/*.test.ts packages/capability-registry/*.test.ts packages/conversation-view/*.test.ts packages/llm-client/*.test.ts packages/session-store/*.test.ts packages/workspace-manager/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit"
@@ -24,6 +25,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",

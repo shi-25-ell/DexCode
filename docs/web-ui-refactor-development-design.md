@@ -912,6 +912,8 @@ activeTaskId
 - 折叠交互：读取文件卡可展开经过裁剪与遮盖的原始结果，再次点击恢复紧凑态。
 - 响应式：390×844 下桌面 resize control 不存在，Drawer 可打开/关闭，历史标题和六项能力均可访问；工具设置页能返回原会话。
 - 自动化：`npm test` 25/25，`npm run test:web` 3/3，`npm run lint` 通过，`npm run build:web` 通过。
+- 开发入口回归修复：`npm run dev` 使用受控双进程同时启动 Runtime 与 Vite；`test:dev` 在隔离随机端口上验证 `/api/meta` 经代理返回 200。
+- 构建稳定性修复：Tailwind 使用 `source(none)` 并只注册 `apps/web/index.html` 与 `apps/web/src`；连续两次生产构建的 10 个产物 SHA-256 完全一致，`dist` 不再因扫描自身而变脏。
 - ToolOutcome 缺少可靠字段时应显示保守结果，不根据 JSON 猜测成功。
 - 上下文数据缺失时显示未知，不以看似精确的假百分比换取视觉完整。
 - 删除旧入口前保留一个可回退提交点；回退不得回滚已经写入的新 canonical Session facts。

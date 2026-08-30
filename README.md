@@ -132,6 +132,8 @@ LLM_PROVIDER=doubao
 | `LLM_CONTEXT_WINDOW` | 否 | 模型上下文窗口；未配置时 UI 不伪造使用率 |
 | `WORKSPACE_DIR` | 否 | 启动时默认加载的工作区目录 |
 | `PORT` | 否 | HTTP 服务端口，默认 `3000` |
+| `WEB_PORT` | 否 | Vite 开发服务器端口，默认 `5173`；占用时明确失败 |
+| `RUNTIME_ORIGIN` | 否 | Vite 开发代理目标；默认跟随 `PORT` |
 | `DEX_DISABLED_CAPABILITIES` | 否 | 要从产品外壳移除的能力 ID，逗号分隔 |
 | `VITE_BRAND_ICON_URL` | 否 | 前端构建时使用的品牌图标 URL |
 
@@ -222,9 +224,15 @@ npm run test:web
 # 关键链路测试
 npm test
 
-# 开发：两个终端分别启动 Runtime 与 Vite
-npm run dev:runtime
+# 开发：单命令同时启动 Runtime 与 Vite
 npm run dev
+
+# 也可以分别调试两个进程
+npm run dev:runtime
+npm run dev:web
+
+# 验证单命令开发入口及 API 代理
+npm run test:dev
 ```
 
 详细架构见 [`docs/架构.md`](docs/架构.md)，本轮重构计划和实际结果分别见 [`docs/core-refactor-plan.md`](docs/core-refactor-plan.md) 与 [`docs/core-refactor-implementation-report.md`](docs/core-refactor-implementation-report.md)。
