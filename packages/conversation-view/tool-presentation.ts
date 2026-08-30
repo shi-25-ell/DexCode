@@ -1,5 +1,5 @@
 import type { FileDiff, ToolPresentation, ToolViewStatus } from '../shared/types.ts';
-import { safeRawOutput } from './output-policy.ts';
+import { safeDisplayOutput } from './output-policy.ts';
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -87,7 +87,7 @@ export function presentTool(input: {
   const args = input.args ?? {};
   const details = descriptor(input.tool, args);
   const status = input.status ?? (input.result === undefined ? 'running' : outcomeStatus(input.result));
-  const raw = input.result === undefined ? { truncated: false } : safeRawOutput(input.result);
+  const raw = input.result === undefined ? { truncated: false } : safeDisplayOutput(input.result);
   const stat = diffStat(input.fileDiff);
   return {
     callRef: input.callRef,

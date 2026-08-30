@@ -154,7 +154,7 @@ export function WorkspacePicker({
                   onMouseDown={(event) => { event.preventDefault(); choose(suggestion.path); }}
                 >
                   {suggestion.source === 'recent' ? <FolderClock size={15} /> : <FolderSearch2 size={15} />}
-                  <span>{suggestion.path}</span>
+                  <span title={suggestion.path}>{suggestion.path}</span>
                   <small>{suggestion.source === 'recent' ? '最近项目' : '路径建议'}</small>
                 </li>
               ))}

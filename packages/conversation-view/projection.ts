@@ -1,5 +1,6 @@
 import type { Session, SessionLedgerRecord } from '../shared/types.ts';
 import type { ConversationItem, ConversationListItem, ConversationState, ConversationViewSnapshot, ContextUsageView } from './contracts.ts';
+import { safeDisplayOutput } from './output-policy.ts';
 import { conversationTitle } from './title.ts';
 
 function sessionState(session: Session): ConversationState {
@@ -34,6 +35,19 @@ function contextUsage(session: Session, limitTokens?: number): ContextUsageView 
   };
 }
 
+function readableStoredPresentation(presentation: Extract<SessionLedgerRecord, { type: 'tool_completed' }>['presentation']) {
+  if (!presentation.rawOutput) return presentation;
+  let value: unknown = presentation.rawOutput;
+  try { value = JSON.parse(presentation.rawOutput); } catch { /* already display text */ }
+  const output = safeDisplayOutput(value);
+  const { rawOutput: _rawOutput, ...rest } = presentation;
+  return {
+    ...rest,
+    ...(output.text ? { rawOutput: output.text } : {}),
+    ...((presentation.truncated || output.truncated) ? { truncated: true } : {}),
+  };
+}
+
 function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
   const items: ConversationItem[] = [];
   for (const record of records) {
@@ -42,7 +56,7 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
       if (message.role === 'user') items.push({ id: `message-${record.seq}`, kind: 'user', content: message.content });
       if (message.role === 'assistant' && message.content?.trim()) items.push({ id: `message-${record.seq}`, kind: 'assistant', content: message.content });
     } else if (record.type === 'tool_completed') {
-      items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: record.presentation });
+      items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: readableStoredPresentation(record.presentation) });
     } else if (record.type === 'run_terminal' && record.report.error) {
       items.push({ id: `error-${record.seq}`, kind: 'error', title: '本次运行未完成', message: record.report.error.message });
     }

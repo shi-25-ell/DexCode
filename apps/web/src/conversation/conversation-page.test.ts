@@ -22,7 +22,7 @@ describe('conversationReducer', () => {
     expect(initial.title).toBe('新会话');
   });
 
-  it('renders file stats and keeps raw output behind an explicit disclosure', () => {
+  it('renders file stats and keeps readable output behind an explicit disclosure', () => {
     render(createElement(ToolCard, { tool: {
       callRef: 'opaque-ref',
       category: 'file',
@@ -36,7 +36,7 @@ describe('conversationReducer', () => {
     expect(screen.getByText('+18')).toBeInTheDocument();
     expect(screen.getByText('−6')).toBeInTheDocument();
     expect(screen.queryByText('受控原始输出')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '修改文件，展开原始输出' }));
+    fireEvent.click(screen.getByRole('button', { name: '修改文件，展开输出内容' }));
     expect(screen.getByText('受控原始输出')).toBeInTheDocument();
     expect(screen.queryByText('opaque-ref')).not.toBeInTheDocument();
   });

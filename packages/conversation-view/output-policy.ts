@@ -16,6 +16,37 @@ function serialize(value: unknown): string {
   }, 2);
 }
 
+function readableContent(value: unknown, depth = 0): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return value.map((item) => readableContent(item, depth + 1)).filter(Boolean).join('\n\n');
+  if (typeof value !== 'object' || depth > 4) return String(value);
+
+  const object = value as Record<string, unknown>;
+  for (const key of ['content', 'text', 'output', 'message'] as const) {
+    if (key in object) {
+      const rendered = readableContent(object[key], depth + 1);
+      if (rendered) return rendered;
+    }
+  }
+  const streams = [
+    typeof object.stdout === 'string' && object.stdout ? object.stdout : '',
+    typeof object.stderr === 'string' && object.stderr ? `标准错误\n${object.stderr}` : '',
+  ].filter(Boolean);
+  if (streams.length) return streams.join('\n\n');
+
+  return Object.entries(object)
+    .filter(([key]) => !['ok', 'status'].includes(key))
+    .map(([key, item]) => {
+      const rendered = readableContent(item, depth + 1);
+      if (!rendered) return '';
+      return typeof item === 'object' && item !== null ? `${key}\n${rendered}` : `${key}: ${rendered}`;
+    })
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 export function safeRawOutput(value: unknown, maxChars = 64 * 1024, maxLines = 200): { text?: string; truncated: boolean } {
   let text: string;
   try {
@@ -38,4 +69,9 @@ export function safeRawOutput(value: unknown, maxChars = 64 * 1024, maxLines = 2
     truncated = true;
   }
   return { ...(text.trim() ? { text } : {}), truncated };
+}
+
+export function safeDisplayOutput(value: unknown, maxChars = 64 * 1024, maxLines = 200): { text?: string; truncated: boolean } {
+  const rendered = readableContent(value);
+  return rendered ? safeRawOutput(rendered, maxChars, maxLines) : { truncated: false };
 }

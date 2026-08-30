@@ -4,7 +4,7 @@ import type { Session } from '../shared/types.ts';
 import { projectConversation, projectConversationListItem } from './projection.ts';
 import { conversationTitle } from './title.ts';
 import { presentTool } from './tool-presentation.ts';
-import { safeRawOutput } from './output-policy.ts';
+import { safeDisplayOutput, safeRawOutput } from './output-policy.ts';
 
 test('conversation title uses the first question instead of an internal id', () => {
   assert.equal(conversationTitle('  ## 请帮我重构这个 Web 对话页面  '), '请帮我重构这个 Web 对话页面');
@@ -60,4 +60,42 @@ test('raw output hides structured and inline secrets before reaching Tool Cards'
   assert.doesNotMatch(inline, /secret-value|plain-secret/);
   assert.match(structured, /已隐藏/);
   assert.match(inline, /已隐藏/);
+});
+
+test('projection upgrades legacy JSON tool output into readable content', () => {
+  const now = new Date().toISOString();
+  const session: Session = {
+    sessionId: 'session-legacy-output',
+    scope: { kind: 'general' },
+    createdAt: now,
+    updatedAt: now,
+    messages: [{ role: 'user', content: '读取文件' }],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [{
+      seq: 1,
+      at: now,
+      runId: 'run-legacy',
+      type: 'tool_completed',
+      callId: 'call-legacy',
+      presentation: {
+        callRef: 'call-legacy',
+        category: 'read',
+        name: '读取文件',
+        status: 'succeeded',
+        summary: '读取完成',
+        rawOutput: JSON.stringify({ path: 'src/app.ts', content: '可读正文' }),
+      },
+    }],
+  };
+  const tool = projectConversation(session).items[0];
+  assert.equal(tool?.kind, 'tool');
+  if (tool?.kind === 'tool') assert.equal(tool.tool.rawOutput, '可读正文');
+});
+
+test('tool output renders common content and command streams instead of JSON envelopes', () => {
+  assert.equal(safeDisplayOutput({ path: 'src/app.ts', content: '第一行\n第二行' }).text, '第一行\n第二行');
+  assert.equal(safeDisplayOutput({ content: [{ type: 'text', text: 'MCP 第一段' }, { type: 'text', text: 'MCP 第二段' }] }).text, 'MCP 第一段\n\nMCP 第二段');
+  assert.equal(safeDisplayOutput({ status: 'succeeded', stdout: '测试通过', stderr: '一条警告' }).text, '测试通过\n\n标准错误\n一条警告');
+  assert.doesNotMatch(safeDisplayOutput({ content: 'token=secret-value' }).text ?? '', /secret-value/);
 });

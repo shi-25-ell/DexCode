@@ -11,7 +11,7 @@ export function ToolCard({ tool }: { tool: ToolPresentation }) {
   const hasDetails = Boolean(tool.rawOutput);
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen} className={`tool-card ${tool.status}`}>
-      <Collapsible.Trigger className="tool-card-trigger" disabled={!hasDetails} aria-label={`${tool.name}${hasDetails ? '，展开原始输出' : ''}`}>
+      <Collapsible.Trigger className="tool-card-trigger" disabled={!hasDetails} aria-label={`${tool.name}${hasDetails ? '，展开输出内容' : ''}`}>
         <span className="tool-icon"><ToolIcon size={16} strokeWidth={1.8} /></span>
         <span className="tool-main">
           <span className="tool-title-line">
@@ -28,7 +28,7 @@ export function ToolCard({ tool }: { tool: ToolPresentation }) {
       </Collapsible.Trigger>
       {hasDetails ? (
         <Collapsible.Content className="tool-output">
-          <div className="tool-output-heading">原始输出{tool.truncated ? ' · 已截断' : ''}</div>
+          <div className="tool-output-heading">输出内容{tool.truncated ? ' · 已截断' : ''}</div>
           <pre>{tool.rawOutput}</pre>
         </Collapsible.Content>
       ) : null}
