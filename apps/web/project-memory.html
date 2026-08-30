@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>项目知识 · DexCode</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="mcp-config-page">
+      <header class="mcp-config-header">
+        <div>
+          <p class="eyebrow">Project Memory</p>
+          <h1>项目知识</h1>
+          <p class="muted">编辑 <code>project-memory.md</code>。Agent 在每次任务开始时按相关性检索这份知识。</p>
+        </div>
+        <a class="ghost-button" href="/">返回主界面</a>
+      </header>
+
+      <section class="panel mcp-config-panel">
+        <div class="panel-header">
+          <div>
+            <h2>项目记忆</h2>
+            <span id="projectMemoryStatus" class="muted">加载中…</span>
+          </div>
+          <div class="project-memory-actions">
+            <button id="reloadProjectMemoryBtn" type="button" class="ghost-button">重载</button>
+            <button id="saveProjectMemoryBtn" type="button">保存</button>
+          </div>
+        </div>
+        <textarea id="projectMemoryEditor" class="project-memory-editor" spellcheck="false" placeholder="# 项目记忆"></textarea>
+      </section>
+    </div>
+
+    <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="/project-memory.js"></script>
+  </body>
+</html>

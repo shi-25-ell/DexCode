@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>版本快照 · DexCode</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="mcp-config-page">
+      <header class="mcp-config-header">
+        <div>
+          <p class="eyebrow">Snapshots</p>
+          <h1>版本快照</h1>
+          <p class="muted">为整个工作区目录拍快照,可一键回滚。回滚会覆盖当前工作区。</p>
+        </div>
+        <a class="ghost-button" href="/">返回主界面</a>
+      </header>
+
+      <section class="panel mcp-config-panel">
+        <div class="panel-header">
+          <div>
+            <h2>新建快照</h2>
+            <span class="muted">在大改前打个保护点</span>
+          </div>
+        </div>
+        <form id="snapshotCreateForm" class="whitelist-add-form">
+          <input id="snapshotNameInput" type="text" placeholder="快照名称(可选)" autocomplete="off" />
+          <input id="snapshotDescInput" type="text" placeholder="备注(可选)" autocomplete="off" />
+          <button type="submit" class="ghost-button">创建快照</button>
+        </form>
+      </section>
+
+      <section class="panel mcp-config-panel">
+        <div class="panel-header">
+          <div>
+            <h2>已有快照</h2>
+            <span id="versionStatus" class="muted">加载中…</span>
+          </div>
+          <button id="refreshVersionsBtn" type="button">刷新</button>
+        </div>
+        <div id="versionList" class="version-list"></div>
+      </section>
+    </div>
+
+    <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="/snapshots.js"></script>
+  </body>
+</html>

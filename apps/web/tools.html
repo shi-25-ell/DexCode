@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>工具管理 · DexCode</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="mcp-config-page">
+      <header class="mcp-config-header">
+        <div>
+          <p class="eyebrow">Toolchain</p>
+          <h1>工具管理</h1>
+          <p class="muted">查看每个内置/外部工具的调用统计、运行测试、查看日志,或临时禁用某个工具。</p>
+        </div>
+        <a class="ghost-button" href="/">返回主界面</a>
+      </header>
+
+      <section class="panel mcp-config-panel">
+        <div class="panel-header">
+          <div>
+            <h2>工具列表</h2>
+            <span id="toolStatus" class="muted">加载中…</span>
+          </div>
+          <button id="refreshToolsBtn" type="button">刷新</button>
+        </div>
+        <div id="toolList" class="version-list"></div>
+      </section>
+    </div>
+
+    <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="/tools.js"></script>
+  </body>
+</html>
