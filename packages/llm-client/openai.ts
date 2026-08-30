@@ -86,8 +86,21 @@ async function* sseData(body: ReadableStream<Uint8Array>): AsyncIterable<string>
   }
 }
 
-function httpFailure(status: number, statusText: string, retryAfter: string | null): ModelFailure {
+function isContextOverflowBody(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const raw = JSON.stringify(body).toLowerCase();
+  return [
+    'context_length_exceeded',
+    'context window',
+    'maximum context length',
+    'prompt is too long',
+    'input is too long',
+  ].some((marker) => raw.includes(marker));
+}
+
+function httpFailure(status: number, statusText: string, retryAfter: string | null, body?: unknown): ModelFailure {
   const common = { httpStatus: status, message: `LLM request failed: ${status} ${statusText}` };
+  if (isContextOverflowBody(body)) return { ...common, category: 'context_overflow', retryable: false };
   if (status === 401) return { ...common, category: 'authentication', retryable: false };
   if (status === 403) return { ...common, category: 'permission', retryable: false };
   if (status === 429) {
@@ -167,10 +180,12 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
     try {
       const response = await chatCompletions(payload(messages, options), signal);
       if (!response.ok) {
+        let errorBody: unknown;
+        try { errorBody = JSON.parse(await response.text()); } catch { errorBody = undefined; }
         yield {
           version: 1,
           type: 'turn_failed',
-          failure: httpFailure(response.status, response.statusText, response.headers.get('retry-after')),
+          failure: httpFailure(response.status, response.statusText, response.headers.get('retry-after'), errorBody),
         };
         return;
       }
@@ -253,5 +268,13 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
     }
   }
 
-  return { model, baseUrl, displayName: displayName ?? model, contextWindow, providerDisplayName, streamMessage };
+  return {
+    model,
+    baseUrl,
+    displayName: displayName ?? model,
+    contextWindow,
+    maxOutputTokens: defaults.max_tokens ?? 4096,
+    providerDisplayName,
+    streamMessage,
+  };
 }

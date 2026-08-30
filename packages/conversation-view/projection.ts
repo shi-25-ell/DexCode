@@ -21,18 +21,32 @@ export function projectConversationListItem(session: Session): ConversationListI
   };
 }
 
-function contextUsage(session: Session, limitTokens?: number): ContextUsageView {
-  const report = session.runReports?.at(-1);
-  const manifest = session.contextManifests?.at(-1);
-  const usedTokens = report?.latestInputTokens ?? manifest?.estimatedInputTokens;
-  const source = report?.latestInputTokens !== undefined ? 'provider' : usedTokens !== undefined ? 'estimated' : 'unknown';
-  return {
-    ...(usedTokens !== undefined ? { usedTokens } : {}),
-    ...(limitTokens !== undefined ? { limitTokens } : {}),
-    ...(usedTokens !== undefined && limitTokens ? { percentage: Math.min(100, Math.round(usedTokens / limitTokens * 100)) } : {}),
-    source,
-    ...(report ? { asOfTurn: report.modelTurnCount } : {}),
-  };
+function contextUsage(session: Session, contextWindow?: number): ContextUsageView {
+  const observed = [...(session.ledger ?? [])].reverse().find((record) => record.type === 'context_usage_observed');
+  if (observed?.type === 'context_usage_observed') return observed.usage;
+  const reportUsage = session.runReports?.at(-1)?.latestContextUsage;
+  if (reportUsage) return reportUsage;
+  const manifest = [...(session.contextManifests ?? [])].reverse().find((candidate) => candidate.version === 2);
+  if (manifest?.version === 2) {
+    const usedTokens = manifest.actualInputTokens ?? manifest.estimatedInputTokens;
+    const window = manifest.contextWindowTokens ?? contextWindow;
+    return {
+      usedTokens,
+      ...(window !== undefined ? {
+        contextWindowTokens: window,
+        percentage: Number((usedTokens / window * 100).toFixed(1)),
+      } : {}),
+      ...(manifest.hardLimitTokens !== undefined ? { hardLimitTokens: manifest.hardLimitTokens } : {}),
+      ...(manifest.targetTokens !== undefined ? { targetTokens: manifest.targetTokens } : {}),
+      source: manifest.actualInputTokens !== undefined ? 'provider' : manifest.tokenSource,
+      timing: manifest.actualInputTokens !== undefined ? 'last_request' : 'next_request',
+      asOfTurn: manifest.turn,
+      asOfAttempt: manifest.attempt,
+      breakdown: manifest.breakdown,
+      breakdownEstimated: true,
+    };
+  }
+  return { source: 'unknown', timing: 'next_request' };
 }
 
 function readableStoredPresentation(presentation: Extract<SessionLedgerRecord, { type: 'tool_completed' }>['presentation']) {
@@ -50,13 +64,27 @@ function readableStoredPresentation(presentation: Extract<SessionLedgerRecord, {
 
 function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
   const items: ConversationItem[] = [];
+  const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && record.tool === 'compact_context' ? [record.callId] : []));
   for (const record of records) {
     if (record.type === 'message') {
       const message = record.message;
       if (message.role === 'user') items.push({ id: `message-${record.seq}`, kind: 'user', content: message.content });
       if (message.role === 'assistant' && message.content?.trim()) items.push({ id: `message-${record.seq}`, kind: 'assistant', content: message.content });
     } else if (record.type === 'tool_completed') {
+      if (internalContextCalls.has(record.callId)) continue;
       items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: readableStoredPresentation(record.presentation) });
+    } else if (record.type === 'context_compaction_started') {
+      items.push({ id: `context-${record.operationRef}`, kind: 'context', context: { operationRef: record.operationRef, status: 'running' } });
+    } else if (record.type === 'context_compaction_completed') {
+      const existing = items.findIndex((item) => item.kind === 'context' && item.context.operationRef === record.presentation.operationRef);
+      const item = { id: `context-${record.presentation.operationRef}`, kind: 'context' as const, context: record.presentation };
+      if (existing >= 0) items[existing] = item;
+      else items.push(item);
+    } else if (record.type === 'context_compaction_failed') {
+      const existing = items.findIndex((item) => item.kind === 'context' && item.context.operationRef === record.operationRef);
+      const item = { id: `context-${record.operationRef}`, kind: 'context' as const, context: { operationRef: record.operationRef, status: 'failed' as const, reason: record.reason } };
+      if (existing >= 0) items[existing] = item;
+      else items.push(item);
     } else if (record.type === 'run_terminal' && record.report.error) {
       items.push({ id: `error-${record.seq}`, kind: 'error', title: '本次运行未完成', message: record.report.error.message });
     }
@@ -66,12 +94,17 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
 
 export function projectConversation(session: Session, options: { contextWindow?: number } = {}): ConversationViewSnapshot {
   const item = projectConversationListItem(session);
+  const items = projectLedger(session.ledger ?? []).map((entry) => (
+    entry.kind === 'context' && entry.context.status === 'running' && !session.activeTaskId
+      ? { ...entry, context: { ...entry.context, status: 'failed' as const, reason: 'interrupted' as const } }
+      : entry
+  ));
   return {
     ref: item.ref,
     title: item.title,
     state: item.state,
     updatedAt: item.updatedAt,
-    items: projectLedger(session.ledger ?? []),
+    items,
     contextUsage: contextUsage(session, options.contextWindow),
   };
 }

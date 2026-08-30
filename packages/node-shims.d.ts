@@ -123,6 +123,13 @@ declare module 'child_process' {
   };
 }
 
+declare module 'node:crypto' {
+  export function createHash(algorithm: string): {
+    update(value: string): { digest(encoding: 'hex'): string };
+    digest(encoding: 'hex'): string;
+  };
+}
+
 declare module 'node:child_process' {
   export { execFile, spawn } from 'child_process';
 }

@@ -1,7 +1,12 @@
 import type {
   ChatMessage,
   CompactionCheckpoint,
+  ContextActivity,
+  ContextArtifactRef,
   ContextManifest,
+  ContextPresentation,
+  ContextSummaryRecord,
+  ContextUsageSnapshot,
   RunReport,
   RunContext,
   Session,
@@ -58,7 +63,42 @@ export interface SessionRepository {
     userMessage: ChatMessage;
     context: RunContext;
   }): Promise<{ session: Session; created: boolean }>;
-  commitContext(input: { sessionId: string; runId: string; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }): Promise<Session>;
+  commitContext(input: {
+    sessionId: string;
+    runId: string;
+    manifest: ContextManifest;
+    checkpoint?: CompactionCheckpoint;
+    summaryRecord?: ContextSummaryRecord;
+    activity?: ContextActivity;
+  }): Promise<Session>;
+  beginContextCompaction(input: { sessionId: string; runId: string; operationRef: string }): Promise<void>;
+  failContextCompaction(input: {
+    sessionId: string;
+    runId: string;
+    operationRef: string;
+    reason: NonNullable<ContextPresentation['reason']>;
+  }): Promise<void>;
+  recordContextProviderUsage(input: {
+    sessionId: string;
+    runId: string;
+    manifestId: string;
+    actualInputTokens: number;
+    usage: ContextUsageSnapshot;
+  }): Promise<void>;
+  putContextArtifact(input: {
+    sessionId: string;
+    runId: string;
+    kind: ContextArtifactRef['kind'];
+    sourceRef: string;
+    content: string;
+  }): Promise<ContextArtifactRef>;
+  readContextArtifact(input: { sessionId: string; ref: string; offset?: number; limit?: number }): Promise<{
+    ref: string;
+    content: string;
+    offset: number;
+    nextOffset?: number;
+    totalChars: number;
+  }>;
   finishRun(input: FinishRunInput): Promise<{ session: Session; report: RunReport; committed: boolean }>;
   readProjectMemory(workspaceId?: string): Promise<string>;
 }

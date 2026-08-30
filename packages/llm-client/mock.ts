@@ -6,6 +6,7 @@ export function createMockModelClient(): ModelClient {
     baseUrl: 'mock://localhost',
     displayName: 'Mock Model',
     contextWindow: 128_000,
+    maxOutputTokens: 4096,
 
     async *streamMessage(_messages, _options) {
       const content = '[Mock LLM] No API credentials configured.';

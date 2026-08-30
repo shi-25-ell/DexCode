@@ -2,8 +2,6 @@ import { createSuccessResponse } from '../shared/index.ts';
 import type {
   AgentEvent,
   ChatMessage,
-  CompactionCheckpoint,
-  ContextManifest,
   RunReport,
   RunContext,
   Session,
@@ -14,8 +12,9 @@ import type {
 } from '../shared/types.ts';
 import type { ModelClient } from '../llm-client/index.ts';
 import { createExecutor } from './executor.ts';
-import type { ConfirmHook, ExecutorHooks, ExecutorSemanticHooks, LoopResult } from './executor.ts';
+import type { ConfirmHook, ExecutorHooks, ExecutorSemanticHooks, LoopResult, ReActLoopOptions } from './executor.ts';
 import type { SessionRepository } from './session-contracts.ts';
+import { createContextEngine, defaultContextPolicy, type ContextSection } from '../context-engine/index.ts';
 import { createExternalMcpRegistry } from '../mcp-client/index.ts';
 import {
   buildAvailableSkillsBlock,
@@ -51,15 +50,6 @@ type ContextManager = {
 
 type SkillRegistry = ReturnType<typeof createSkillRegistry>;
 
-function digest(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`;
-}
-
 function pairedMessages(messages: ChatMessage[]): ChatMessage[] {
   const knownCalls = new Set<string>();
   const result: ChatMessage[] = [];
@@ -76,85 +66,13 @@ function pairedMessages(messages: ChatMessage[]): ChatMessage[] {
   return result;
 }
 
-function messagePreview(message: ChatMessage): string {
-  if (message.role === 'assistant') {
-    const tools = message.tool_calls?.map((call) => call.function.name).join(', ');
-    return `assistant: ${(message.content ?? '').slice(0, 600)}${tools ? ` [tools: ${tools}]` : ''}`;
-  }
-  if (message.role === 'tool') return `tool(${message.name}): ${message.content.slice(0, 400)}`;
-  return `${message.role}: ${message.content.slice(0, 600)}`;
-}
-
-function projectHistory(runId: string, messages: ChatMessage[], maxEstimatedTokens = 12_000): {
-  messages: ChatMessage[];
-  manifest: ContextManifest;
-  checkpoint?: CompactionCheckpoint;
-} {
-  const paired = pairedMessages(messages);
-  const serialized = JSON.stringify(paired);
-  const estimated = Math.ceil(serialized.length / 4);
-  if (estimated <= maxEstimatedTokens) {
-    return {
-      messages: paired,
-      manifest: {
-        version: 1,
-        id: crypto.randomUUID(),
-        runId,
-        estimatedInputTokens: estimated,
-        selectedMessageCount: paired.length,
-        omittedMessageCount: 0,
-        requestDigest: digest(serialized),
-      },
-    };
-  }
-
-  const retainedCharBudget = Math.floor(maxEstimatedTokens * 4 * 0.65);
-  let retainedChars = 0;
-  let start = paired.length;
-  while (start > 0 && retainedChars < retainedCharBudget) {
-    start -= 1;
-    retainedChars += JSON.stringify(paired[start]).length;
-  }
-  while (start < paired.length && paired[start]?.role !== 'user') start += 1;
-  const retained = paired.slice(start);
-  const omitted = paired.slice(0, start);
-  const summary = omitted.map(messagePreview).join('\n').slice(0, 8_000);
-  const checkpoint: CompactionCheckpoint = {
-    version: 1,
-    id: crypto.randomUUID(),
-    sourceMessageCount: omitted.length,
-    sourceDigest: digest(JSON.stringify(omitted)),
-    summary,
-    strategyVersion: 'deterministic-summary-v1',
-  };
-  const checkpointMessage: SystemMessage = {
-    role: 'system',
-    content: `## Previous conversation checkpoint\n${summary}`,
-  };
-  const selected = [checkpointMessage, ...retained];
-  return {
-    messages: selected,
-    manifest: {
-      version: 1,
-      id: crypto.randomUUID(),
-      runId,
-      estimatedInputTokens: Math.ceil(JSON.stringify(selected).length / 4),
-      selectedMessageCount: retained.length,
-      omittedMessageCount: omitted.length,
-      requestDigest: digest(JSON.stringify(selected)),
-      checkpointId: checkpoint.id,
-    },
-    checkpoint,
-  };
-}
-
-function buildSystemPrompt(
+function buildSystemSections(
   context: PromptContext,
   projectMemory: string,
   taskSummaries: TaskSummary[],
   skillsBlock = '',
   scope: SessionScope = { kind: 'general' },
-): string {
+): ContextSection[] {
   const parts = [
     scope.kind === 'workspace'
       ? 'You are DexCode, a coding agent responsible for tasks in this Session workspace.'
@@ -170,19 +88,25 @@ function buildSystemPrompt(
     );
   }
   if (skillsBlock.trim()) parts.push('', skillsBlock.trim());
+  const sections: ContextSection[] = [{ source: 'systemPrompt', content: parts.join('\n') }];
   if (scope.kind === 'workspace') {
-    parts.push('', '## Workspace Summary', context.workspaceSummary || '(empty workspace)');
+    sections.push({ source: 'workspaceCode', content: `## Workspace Summary\n${context.workspaceSummary || '(empty workspace)'}` });
   }
   const memory = context.projectMemorySummary?.trim() || projectMemory.trim();
-  if (memory) parts.push('', '## Project Memory', memory);
+  if (memory) sections.push({ source: 'projectMemory', content: `## Project Memory\n${memory}` });
   const recent = taskSummaries.slice(-5);
   if (recent.length > 0) {
-    parts.push('', '## Recent Tasks');
+    const recentParts = ['## Recent Tasks'];
     for (const summary of recent) {
-      parts.push(`- [${summary.startedAt.slice(0, 10)}] ${summary.prompt}: ${summary.summary}`);
+      recentParts.push(`- [${summary.startedAt.slice(0, 10)}] ${summary.prompt}: ${summary.summary}`);
     }
+    sections.push({ source: 'systemPrompt', content: recentParts.join('\n') });
   }
-  return parts.join('\n');
+  return sections;
+}
+
+function buildSystemPrompt(...args: Parameters<typeof buildSystemSections>): string {
+  return buildSystemSections(...args).map((section) => section.content).join('\n\n');
 }
 
 function skillsBlock(registry: SkillRegistry | undefined, prompt: string): string {
@@ -220,6 +144,17 @@ export function createCodingAgent(
     ? { ...codingToolHost, isToolEnabled: () => false }
     : codingToolHost;
   const executor = createExecutor(effectiveToolHost, externalMcpRegistry, effectiveSkillRegistry);
+  const contextPolicy = defaultContextPolicy(modelClient);
+  const contextEngine = sessionRepository ? createContextEngine({
+    modelClient,
+    artifactRepository: sessionRepository,
+    lifecycle: {
+      loadSession: (sessionId) => sessionRepository.loadSession(sessionId),
+      beginContextCompaction: (input) => sessionRepository.beginContextCompaction(input),
+      failContextCompaction: (input) => sessionRepository.failContextCompaction(input),
+      recordContextProviderUsage: (input) => sessionRepository.recordContextProviderUsage(input),
+    },
+  }) : undefined;
 
   async function execute(
     runId: string,
@@ -228,8 +163,9 @@ export function createCodingAgent(
     hooks?: ConfirmHook | ExecutorHooks,
     signal?: AbortSignal,
     semantic?: ExecutorSemanticHooks,
+    context?: ReActLoopOptions['context'],
   ) {
-    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, signal, semantic });
+    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, signal, semantic, context });
   }
 
   async function runTask(
@@ -287,20 +223,22 @@ export function createCodingAgent(
             projectMemorySummary: '',
             contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
           };
-      const system: SystemMessage = {
-        role: 'system',
-        content: buildSystemPrompt(context, projectMemory, session.taskSummaries, skillsBlock(effectiveSkillRegistry, userPrompt), agentEnvironment.scope),
-      };
+      const systemSections = buildSystemSections(
+        context,
+        projectMemory,
+        session.taskSummaries,
+        skillsBlock(effectiveSkillRegistry, userPrompt),
+        agentEnvironment.scope,
+      );
       const historyMessages = options.prestarted
         && session.messages.at(-1)?.role === 'user'
         && session.messages.at(-1)?.content === userPrompt
         ? session.messages.slice(0, -1)
         : session.messages;
-      const history = projectHistory(runId, historyMessages);
-      await sessionRepository.commitContext({ sessionId, runId, manifest: history.manifest, checkpoint: history.checkpoint });
+      const canonicalMessages = pairedMessages([...historyMessages, user]);
       result = await execute(
         runId,
-        [system, ...history.messages, user],
+        canonicalMessages,
         onEvent,
         hooks,
         options.signal,
@@ -312,7 +250,22 @@ export function createCodingAgent(
             return sessionRepository.markToolStarted({ sessionId, runId, callId: call.id, tool: call.function.name, input }).then(() => undefined);
           },
           toolOutcome: (message, presentation) => sessionRepository.commitToolOutcome({ sessionId, runId, message, presentation }).then(() => undefined),
+          contextPrepared: (prepared) => sessionRepository.commitContext({
+            sessionId,
+            runId,
+            manifest: prepared.manifest,
+            ...(prepared.summaryRecord ? { summaryRecord: prepared.summaryRecord } : {}),
+            ...(prepared.activity ? { activity: prepared.activity } : {}),
+          }).then(() => undefined),
         },
+        contextEngine ? {
+          engine: contextEngine,
+          sessionId,
+          activeRequest: userPrompt,
+          systemSections,
+          policy: contextPolicy,
+          readArtifact: (input) => sessionRepository.readContextArtifact({ sessionId, ...input }),
+        } : undefined,
       );
     } catch (error) {
       result = {
@@ -327,6 +280,7 @@ export function createCodingAgent(
         modelTurnCount: 0,
         modelAttemptCount: 0,
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 },
+        contextSummaryUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         error: { code: 'RUN_INFRASTRUCTURE_FAILURE', message: error instanceof Error ? error.message : String(error) },
       };
     }
@@ -353,7 +307,9 @@ export function createCodingAgent(
       modelTurnCount: result.modelTurnCount,
       modelAttemptCount: result.modelAttemptCount,
       usage: result.usage,
+      contextSummaryUsage: result.contextSummaryUsage,
       ...(result.latestInputTokens !== undefined ? { latestInputTokens: result.latestInputTokens } : {}),
+      ...(result.latestContextUsage ? { latestContextUsage: result.latestContextUsage } : {}),
       toolsUsed: taskSummary.toolsUsed,
       filesModified: taskSummary.filesModified,
       ...(result.error ? { error: result.error } : {}),

@@ -5,6 +5,7 @@ import type { ConversationItem } from '../types';
 import { conversationReducer } from './conversation-page';
 import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
+import { ContextCard } from './context-card';
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-id' });
 
@@ -38,7 +39,7 @@ describe('conversationReducer', () => {
   });
 
   it('keeps one Tool Card per opaque call reference without rendering that ref as content', () => {
-    const initial = { items: [], contextUsage: { source: 'unknown' as const }, status: 'idle' as const, title: '新会话' };
+    const initial = { items: [], contextUsage: { source: 'unknown' as const, timing: 'next_request' as const }, status: 'idle' as const, title: '新会话' };
     const running = conversationReducer(initial, { type: 'tool', tool: { callRef: 'call_hidden', category: 'file', name: '修改文件', target: 'src/app.ts', status: 'running', summary: '正在执行…' } });
     const completed = conversationReducer(running, { type: 'tool', tool: { callRef: 'call_hidden', category: 'file', name: '修改文件', target: 'src/app.ts', status: 'succeeded', summary: '文件已更新', fileChange: { path: 'src/app.ts', additions: 18, deletions: 6 } } });
     expect(completed.items).toHaveLength(1);
@@ -47,7 +48,7 @@ describe('conversationReducer', () => {
   });
 
   it('does not create history state for an untouched draft', () => {
-    const initial = { items: [], contextUsage: { source: 'unknown' as const }, status: 'idle' as const, title: '新会话' };
+    const initial = { items: [], contextUsage: { source: 'unknown' as const, timing: 'next_request' as const }, status: 'idle' as const, title: '新会话' };
     expect(initial.items).toHaveLength(0);
     expect(initial.title).toBe('新会话');
   });
@@ -69,5 +70,27 @@ describe('conversationReducer', () => {
     fireEvent.click(screen.getByRole('button', { name: '修改文件，展开输出内容' }));
     expect(screen.getByText('受控原始输出')).toBeInTheDocument();
     expect(screen.queryByText('opaque-ref')).not.toBeInTheDocument();
+  });
+
+  it('updates one Context Card by operation ref and reports only actions that occurred', () => {
+    const initial = { items: [], contextUsage: { source: 'unknown' as const, timing: 'next_request' as const }, status: 'running' as const, title: '会话' };
+    const running = conversationReducer(initial, { type: 'context', context: { operationRef: 'context-1', status: 'running' } });
+    const completed = conversationReducer(running, { type: 'context', context: {
+      operationRef: 'context-1',
+      status: 'completed',
+      beforeTokens: 12_000,
+      afterTokens: 5_000,
+      archivedMessages: 18,
+      archivedConversationSegments: 4,
+      summarizedMessages: 0,
+      breakdown: { systemPrompt: 500, workspaceCode: 1_000, recentConversation: 2_000, toolResults: 500, projectMemory: 300, toolDefinitions: 500, other: 200 },
+    } });
+    expect(completed.items).toHaveLength(1);
+    expect(completed.items[0]).toMatchObject({ kind: 'context', context: { status: 'completed' } });
+
+    render(createElement(ContextCard, { context: (completed.items[0] as Extract<ConversationItem, { kind: 'context' }>).context }));
+    fireEvent.click(screen.getByRole('button', { name: /展开整理详情/ }));
+    expect(screen.getByText(/18 条历史消息已归档/)).toBeInTheDocument();
+    expect(screen.queryByText(/已生成对话摘要/)).not.toBeInTheDocument();
   });
 });

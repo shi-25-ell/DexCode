@@ -26,7 +26,9 @@ import type {
 } from '../skill-system/index.ts';
 import { captureFileDiff } from './file-diff.ts';
 import { presentTool } from '../conversation-view/tool-presentation.ts';
-import { LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitions.ts';
+import type { ContextEngine, ContextSection, PreparedContext } from '../context-engine/index.ts';
+import type { ContextPolicy, ContextUsageSnapshot } from '../shared/types.ts';
+import { CONTEXT_TOOL_DEFINITIONS, LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitions.ts';
 
 export type CodingToolHost = {
   readFile: (path: string) => Promise<unknown> | unknown;
@@ -63,6 +65,7 @@ export type ExecutorSemanticHooks = {
   assistantCommitted(message: AssistantMessage): Promise<void>;
   toolStarted(call: ToolCall): Promise<void>;
   toolOutcome(message: ToolResultMessage, presentation: import('../shared/types.ts').ToolPresentation): Promise<void>;
+  contextPrepared?(prepared: PreparedContext): Promise<void>;
 };
 export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
 export type TerminationReason =
@@ -86,6 +89,8 @@ export type LoopResult = {
   modelAttemptCount: number;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number; unknown: number };
   latestInputTokens?: number;
+  latestContextUsage?: ContextUsageSnapshot;
+  contextSummaryUsage: { inputTokens: number; outputTokens: number; totalTokens: number };
   error?: { code: string; message: string };
 };
 
@@ -96,6 +101,14 @@ export type ReActLoopOptions = {
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
   semantic?: ExecutorSemanticHooks;
+  context?: {
+    engine: ContextEngine;
+    sessionId: string;
+    activeRequest: string;
+    systemSections: ContextSection[];
+    policy: ContextPolicy;
+    readArtifact: (input: { ref: string; offset?: number; limit?: number }) => Promise<unknown>;
+  };
 };
 
 export type Executor = ReturnType<typeof createExecutor>;
@@ -239,14 +252,15 @@ export function createExecutor(
     restore_snapshot: ({ snapshotId }) => codingToolHost.restoreSnapshot(snapshotId as string),
   };
 
-  async function buildToolDefinitions() {
+  async function buildToolDefinitions(includeContextTools = false) {
     const local = skillRegistry ? [...LOCAL_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS] : LOCAL_TOOL_DEFINITIONS;
     const enabled = codingToolHost.isToolEnabled
       ? local.filter((tool) => codingToolHost.isToolEnabled?.(tool.function.name))
       : local;
-    if (!externalMcpRegistry?.hasExternalTools()) return enabled;
+    const builtIn = includeContextTools ? [...enabled, ...CONTEXT_TOOL_DEFINITIONS] : enabled;
+    if (!externalMcpRegistry?.hasExternalTools()) return builtIn;
     const external = await externalMcpRegistry.listTools();
-    return [...enabled, ...external.map((tool) => ({
+    return [...builtIn, ...external.map((tool) => ({
       type: 'function' as const,
       function: {
         name: externalMcpRegistry.normalizeToolName(tool.server, tool.name),
@@ -282,8 +296,11 @@ export function createExecutor(
       let modelAttemptCount = 0;
       let usage: LoopResult['usage'] = { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 };
       let latestInputTokens: number | undefined;
+      let latestContextUsage: ContextUsageSnapshot | undefined;
+      const contextSummaryUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+      let forceSummaryNext = false;
       let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
-      const base = () => ({ messages: loopMessages, finalContent, toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens });
+      const base = () => ({ messages: loopMessages, finalContent, toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage });
       const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
       const maxAttempts = options.maxModelAttempts ?? maxTurns * 2;
       const maxRetries = options.maxRetriesPerTurn ?? 1;
@@ -292,6 +309,8 @@ export function createExecutor(
         if (signal.aborted) return aborted(base());
         modelTurnCount += 1;
         let retries = 0;
+        let overflowRecovered = false;
+        let recoverNext = false;
         let response: ModelResponse | undefined;
         while (!response) {
           if (modelAttemptCount >= maxAttempts) {
@@ -299,9 +318,61 @@ export function createExecutor(
           }
           modelAttemptCount += 1;
           onEvent({ type: 'task_status', taskId: runId, status: 'executing', note: `model attempt ${modelAttemptCount}` });
-          const definitions = await buildToolDefinitions();
+          const definitions = await buildToolDefinitions(Boolean(options.context));
           currentDefinitions = definitions;
-          const turn = await collectModelTurn(observeModelEvents(modelClient.streamMessage(workingMessages, {
+          let prepared: PreparedContext | undefined;
+          let requestMessages: ChatMessage[] = workingMessages;
+          if (options.context) {
+            const prepareInput = {
+              sessionId: options.context.sessionId,
+              runId,
+              turn: modelTurnCount,
+              attempt: modelAttemptCount,
+              activeRequest: options.context.activeRequest,
+              systemSections: options.context.systemSections,
+              canonicalMessages: workingMessages,
+              toolDefinitions: definitions,
+              policy: options.context.policy,
+              forceSummary: forceSummaryNext,
+              signal,
+              onActivity: (presentation: import('../shared/types.ts').ContextPresentation) => onEvent({ type: 'context_activity', presentation }),
+            };
+            prepared = recoverNext
+              ? await options.context.engine.recoverFromOverflow(prepareInput)
+              : await options.context.engine.prepare(prepareInput);
+            recoverNext = false;
+            forceSummaryNext = false;
+            await options.semantic?.contextPrepared?.(prepared);
+            requestMessages = prepared.messages;
+            latestContextUsage = prepared.usage;
+            onEvent({ type: 'context_usage', ...prepared.usage });
+            if (prepared.activity) {
+              onEvent({
+                type: 'context_activity',
+                presentation: {
+                  operationRef: prepared.activity.operationRef,
+                  status: 'completed',
+                  beforeTokens: prepared.activity.beforeTokens,
+                  afterTokens: prepared.activity.afterTokens,
+                  breakdown: prepared.activity.afterBreakdown,
+                  externalizedToolResults: prepared.activity.externalizedToolResults,
+                  archivedMessages: prepared.activity.archivedMessages,
+                  archivedConversationSegments: prepared.activity.archivedConversationSegments,
+                  compactedToolResults: prepared.activity.compactedToolResults,
+                  summarizedMessages: prepared.activity.summarizedMessages,
+                  retainedConversationSegments: prepared.activity.retainedConversationSegments,
+                  retainedMessageCount: prepared.activity.retainedMessageCount,
+                },
+              });
+            }
+            const summary = prepared.summaryRecord?.summaryUsage;
+            if (summary) {
+              contextSummaryUsage.inputTokens += summary.inputTokens ?? 0;
+              contextSummaryUsage.outputTokens += summary.outputTokens ?? 0;
+              contextSummaryUsage.totalTokens += summary.totalTokens ?? 0;
+            }
+          }
+          const turn = await collectModelTurn(observeModelEvents(modelClient.streamMessage(requestMessages, {
             tools: definitions,
             tool_choice: 'auto',
             parallel_tool_calls: false,
@@ -311,6 +382,11 @@ export function createExecutor(
             return aborted(base());
           }
           if (turn.status === 'failed') {
+            if (turn.failure.category === 'context_overflow' && options.context && !overflowRecovered && !turn.producedSemanticOutput) {
+              overflowRecovered = true;
+              recoverNext = true;
+              continue;
+            }
             if (turn.failure.retryable && !turn.producedSemanticOutput && retries < maxRetries) {
               retries += 1;
               const waited = await waitForRetry(turn.failure.retryAfterMs ?? 250, signal);
@@ -324,18 +400,63 @@ export function createExecutor(
               error: { code: `MODEL_${turn.failure.category.toUpperCase()}`, message: turn.failure.message },
             };
           }
+          if (prepared && turn.response.usage?.inputTokens !== undefined && options.context) {
+            await options.context.engine.recordProviderUsage({
+              sessionId: options.context.sessionId,
+              runId,
+              manifestId: prepared.manifest.id,
+              inputTokens: turn.response.usage.inputTokens,
+            });
+            const actual = turn.response.usage.inputTokens;
+            const estimatedTotal = Object.values(prepared.manifest.breakdown).reduce((sum, value) => sum + value, 0);
+            const breakdown = { ...prepared.manifest.breakdown };
+            if (estimatedTotal > 0) {
+              let assigned = 0;
+              const keys = Object.keys(breakdown) as Array<keyof typeof breakdown>;
+              for (const key of keys.slice(0, -1)) {
+                breakdown[key] = Math.floor(actual * breakdown[key] / estimatedTotal);
+                assigned += breakdown[key];
+              }
+              breakdown.other = actual - assigned;
+            } else {
+              breakdown.other = actual;
+            }
+            latestContextUsage = {
+              usedTokens: actual,
+              ...(options.context.policy.contextWindowTokens !== undefined ? {
+                contextWindowTokens: options.context.policy.contextWindowTokens,
+                percentage: Number((actual / options.context.policy.contextWindowTokens * 100).toFixed(1)),
+              } : {}),
+              ...(prepared.usage.hardLimitTokens !== undefined ? { hardLimitTokens: prepared.usage.hardLimitTokens } : {}),
+              ...(prepared.usage.targetTokens !== undefined ? { targetTokens: prepared.usage.targetTokens } : {}),
+              source: 'provider',
+              timing: 'last_request',
+              asOfTurn: modelTurnCount,
+              asOfAttempt: modelAttemptCount,
+              breakdown,
+              breakdownEstimated: true,
+            };
+            onEvent({ type: 'context_usage', ...latestContextUsage });
+          } else if (prepared && options.context) {
+            latestContextUsage = { ...prepared.usage, timing: 'last_request' };
+            onEvent({ type: 'context_usage', ...latestContextUsage });
+          }
           response = turn.response;
         }
 
         usage = usageSummary(usage, response.usage);
         latestInputTokens = response.usage?.inputTokens;
-        onEvent({
-          type: 'context_usage',
-          ...(latestInputTokens !== undefined ? { usedTokens: latestInputTokens } : {}),
-          ...(modelClient.contextWindow !== undefined ? { limitTokens: modelClient.contextWindow } : {}),
-          source: latestInputTokens !== undefined ? 'provider' : 'unknown',
-          asOfTurn: modelTurnCount,
-        });
+        if (!options.context) {
+          latestContextUsage = {
+            ...(latestInputTokens !== undefined ? { usedTokens: latestInputTokens } : {}),
+            ...(modelClient.contextWindow !== undefined ? { contextWindowTokens: modelClient.contextWindow } : {}),
+            source: latestInputTokens !== undefined ? 'provider' : 'unknown',
+            timing: 'last_request',
+            asOfTurn: modelTurnCount,
+            asOfAttempt: modelAttemptCount,
+          };
+          onEvent({ type: 'context_usage', ...latestContextUsage });
+        }
         finalContent = response.content || finalContent;
         const assistant = assistantMessage(response);
         await options.semantic?.assistantCommitted(assistant);
@@ -377,14 +498,17 @@ export function createExecutor(
           toolsUsed.push(toolName);
           let toolResult: unknown;
           let fileDiff: FileDiff | undefined;
+          const semanticContextTool = toolName === 'compact_context';
           const invalid = validationError(currentDefinitions, toolName, args);
           try {
             if (invalid) {
               toolResult = { status: 'rejected', error: invalid };
             } else {
               await options.semantic?.toolStarted(legacyCall);
-              onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'running' });
-              onEvent({ type: 'tool_view', presentation: presentTool({ callRef: call.id, tool: toolName, args, status: 'running' }) });
+              if (!semanticContextTool) {
+                onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'running' });
+                onEvent({ type: 'tool_view', presentation: presentTool({ callRef: call.id, tool: toolName, args, status: 'running' }) });
+              }
             }
             if (invalid) {
               // Rejected calls still receive a paired tool result but never reach an execution adapter.
@@ -394,6 +518,15 @@ export function createExecutor(
                 onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
                 toolResult = { answer: await onConfirm(String(args.question ?? 'Please confirm'), Array.isArray(args.options) ? args.options.map(String) : undefined) };
               }
+            } else if (toolName === 'read_artifact' && options.context) {
+              toolResult = await options.context.readArtifact({
+                ref: String(args.ref ?? ''),
+                ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
+                ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+              });
+            } else if (toolName === 'compact_context' && options.context) {
+              toolResult = { status: 'scheduled', message: '上下文将在当前工具批次完成后整理' };
+              forceSummaryNext = true;
             } else if (toolName === 'list_skills' && skillRegistry) {
               toolResult = { skills: skillRegistry.listSkills() };
               onEvent({ type: 'skill', skill: '*', action: 'listed', summary: 'Listed available skills' });
@@ -446,8 +579,10 @@ export function createExecutor(
           } catch (error) {
             toolResult = { error: error instanceof Error ? error.message : String(error) };
           }
-          onEvent({ type: 'tool', tool: toolName, summary: `Tool call: ${toolName}`, detail: toolSummary(toolResult) });
-          onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'settled' });
+          if (!semanticContextTool) {
+            onEvent({ type: 'tool', tool: toolName, summary: `Tool call: ${toolName}`, detail: toolSummary(toolResult) });
+            onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'settled' });
+          }
           const toolMessage: ToolResultMessage = {
             role: 'tool',
             tool_call_id: call.id,
@@ -455,7 +590,7 @@ export function createExecutor(
             content: stringifyToolResult(toolResult),
           };
           const presentation = presentTool({ callRef: call.id, tool: toolName, args, result: toolResult, fileDiff });
-          onEvent({ type: 'tool_view', presentation });
+          if (!semanticContextTool) onEvent({ type: 'tool_view', presentation });
           await options.semantic?.toolOutcome(toolMessage, presentation);
           workingMessages.push(toolMessage);
           loopMessages.push(toolMessage);

@@ -273,3 +273,29 @@ test('a follow-up Run persists its client request key for retry replay', async (
     await rm(projectDir, { recursive: true, force: true });
   }
 });
+
+test('context artifacts are Session scoped, digest idempotent and readable after restart', async () => {
+  const projectId = `test-context-artifact-${crypto.randomUUID()}`;
+  const repository = createSessionRepository({ projectId });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const other = await repository.createSession();
+    await repository.beginRun({ sessionId: session.sessionId, runId: 'run-artifact', userMessage: { role: 'user', content: 'large output' }, context: generalContext });
+    const content = '0123456789'.repeat(2_000);
+    const first = await repository.putContextArtifact({ sessionId: session.sessionId, runId: 'run-artifact', kind: 'tool-result', sourceRef: 'call-1', content });
+    const duplicate = await repository.putContextArtifact({ sessionId: session.sessionId, runId: 'run-artifact', kind: 'tool-result', sourceRef: 'call-retry', content });
+    assert.equal(duplicate.id, first.id);
+    const page = await repository.readContextArtifact({ sessionId: session.sessionId, ref: first.id, offset: 100, limit: 400 });
+    assert.equal(page.content, content.slice(100, 500));
+    assert.equal(page.nextOffset, 500);
+    await assert.rejects(() => repository.readContextArtifact({ sessionId: other.sessionId, ref: first.id }), /invalid for this Session/);
+    await assert.rejects(() => repository.readContextArtifact({ sessionId: session.sessionId, ref: '../forged' }), /invalid for this Session/);
+
+    const reopened = createSessionRepository({ projectId });
+    const restored = await reopened.readContextArtifact({ sessionId: session.sessionId, ref: first.id, limit: 20 });
+    assert.equal(restored.content, content.slice(0, 20));
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});

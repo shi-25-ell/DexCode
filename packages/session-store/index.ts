@@ -1,11 +1,18 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { DEFAULT_PROJECT_ID } from '../shared/index.ts';
 import { conversationTitle } from '../conversation-view/title.ts';
 import type {
   ChatMessage,
   CompactionCheckpoint,
+  ContextActivity,
+  ContextArtifactRef,
   ContextManifest,
+  ContextManifestV2,
+  ContextPresentation,
+  ContextSummaryRecord,
+  ContextUsageSnapshot,
   RunReport,
   RunContext,
   Session,
@@ -61,6 +68,20 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return join(sessionsDir, `${sessionId}.json`);
   }
 
+  function artifactRoot(sessionId: string) {
+    sessionPath(sessionId);
+    return join(sessionsDir, sessionId, 'artifacts');
+  }
+
+  function contained(root: string, target: string): boolean {
+    const rel = relative(resolve(root), resolve(target));
+    return rel === '' || (!rel.startsWith('..') && !rel.includes(':'));
+  }
+
+  function safeArtifactPart(value: string): string {
+    return value.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 48) || 'context';
+  }
+
   function normalizeScope(scope: SessionScope | undefined): SessionScope {
     if (!scope) return { kind: 'general' };
     if (scope.kind === 'general') return { kind: 'general' };
@@ -79,6 +100,8 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       runReports: session.runReports ?? [],
       contextManifests: session.contextManifests ?? [],
       compactionCheckpoints: session.compactionCheckpoints ?? [],
+      contextSummaries: session.contextSummaries ?? [],
+      contextArtifacts: session.contextArtifacts ?? [],
       clientRequestIds: session.clientRequestIds ?? [],
     };
   }
@@ -289,6 +312,8 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         runReports: [],
         contextManifests: [],
         compactionCheckpoints: [],
+        contextSummaries: [],
+        contextArtifacts: [],
         clientRequestIds: [input.clientRequestId],
       };
       const saved = await withSessionLock(sessionId, () => saveUnlocked(session));
@@ -314,6 +339,8 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       runReports: [],
       contextManifests: [],
       compactionCheckpoints: [],
+      contextSummaries: [],
+      contextArtifacts: [],
     };
     await withSessionLock(sessionId, async () => {
       if (await loadRaw(sessionId)) throw new Error(`Session already exists: ${sessionId}`);
@@ -455,7 +482,14 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function commitContext(input: { sessionId: string; runId: string; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }): Promise<Session> {
+  async function commitContext(input: {
+    sessionId: string;
+    runId: string;
+    manifest: ContextManifest;
+    checkpoint?: CompactionCheckpoint;
+    summaryRecord?: ContextSummaryRecord;
+    activity?: ContextActivity;
+  }): Promise<Session> {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
@@ -468,16 +502,210 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         compactionCheckpoints: input.checkpoint
           ? [...(session.compactionCheckpoints ?? []), input.checkpoint]
           : session.compactionCheckpoints,
+        contextSummaries: input.summaryRecord
+          ? [...(session.contextSummaries ?? []), input.summaryRecord]
+          : session.contextSummaries,
+        ledger: input.manifest.version === 2
+          ? [
+              ...(session.ledger ?? []),
+              { seq, at: new Date().toISOString(), runId: input.runId, type: 'context_prepare_committed', manifest: input.manifest },
+              ...(input.activity ? [{
+                seq: seq + 1,
+                at: new Date().toISOString(),
+                runId: input.runId,
+                type: 'context_compaction_completed' as const,
+                presentation: {
+                  operationRef: input.activity.operationRef,
+                  status: 'completed' as const,
+                  beforeTokens: input.activity.beforeTokens,
+                  afterTokens: input.activity.afterTokens,
+                  breakdown: input.activity.afterBreakdown,
+                  externalizedToolResults: input.activity.externalizedToolResults,
+                  archivedMessages: input.activity.archivedMessages,
+                  archivedConversationSegments: input.activity.archivedConversationSegments,
+                  compactedToolResults: input.activity.compactedToolResults,
+                  summarizedMessages: input.activity.summarizedMessages,
+                  retainedConversationSegments: input.activity.retainedConversationSegments,
+                  retainedMessageCount: input.activity.retainedMessageCount,
+                },
+                ...(input.summaryRecord ? { summaryRecordId: input.summaryRecord.id } : {}),
+              }] : []),
+            ]
+          : [...(session.ledger ?? []), {
+              seq,
+              at: new Date().toISOString(),
+              runId: input.runId,
+              type: 'context_committed' as const,
+              manifest: input.manifest,
+              ...(input.checkpoint ? { checkpoint: input.checkpoint } : {}),
+            }],
+      });
+    });
+  }
+
+  async function beginContextCompaction(input: { sessionId: string; runId: string; operationRef: string }): Promise<void> {
+    await withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      await saveUnlocked({
+        ...session,
+        revision: (session.revision ?? 0) + 1,
         ledger: [...(session.ledger ?? []), {
           seq,
           at: new Date().toISOString(),
           runId: input.runId,
-          type: 'context_committed',
-          manifest: input.manifest,
-          ...(input.checkpoint ? { checkpoint: input.checkpoint } : {}),
+          type: 'context_compaction_started',
+          operationRef: input.operationRef,
         }],
       });
     });
+  }
+
+  async function failContextCompaction(input: {
+    sessionId: string;
+    runId: string;
+    operationRef: string;
+    reason: NonNullable<ContextPresentation['reason']>;
+  }): Promise<void> {
+    await withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      await saveUnlocked({
+        ...session,
+        revision: (session.revision ?? 0) + 1,
+        ledger: [...(session.ledger ?? []), {
+          seq,
+          at: new Date().toISOString(),
+          runId: input.runId,
+          type: 'context_compaction_failed',
+          operationRef: input.operationRef,
+          reason: input.reason,
+        }],
+      });
+    });
+  }
+
+  async function recordContextProviderUsage(input: {
+    sessionId: string;
+    runId: string;
+    manifestId: string;
+    actualInputTokens: number;
+    usage: ContextUsageSnapshot;
+  }): Promise<void> {
+    await withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      let found = false;
+      const manifests = (session.contextManifests ?? []).map((manifest) => {
+        if (manifest.version !== 2 || manifest.id !== input.manifestId) return manifest;
+        found = true;
+        return {
+          ...manifest,
+          actualInputTokens: input.actualInputTokens,
+          tokenSource: 'provider' as const,
+          breakdown: input.usage.breakdown ?? manifest.breakdown,
+        } satisfies ContextManifestV2;
+      });
+      if (!found) throw new Error('Context manifest not found for provider usage');
+      const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      await saveUnlocked({
+        ...session,
+        revision: (session.revision ?? 0) + 1,
+        contextManifests: manifests,
+        ledger: [...(session.ledger ?? []), {
+          seq,
+          at: new Date().toISOString(),
+          runId: input.runId,
+          type: 'context_usage_observed',
+          manifestId: input.manifestId,
+          usage: input.usage,
+        }],
+      });
+    });
+  }
+
+  async function putContextArtifact(input: {
+    sessionId: string;
+    runId: string;
+    kind: ContextArtifactRef['kind'];
+    sourceRef: string;
+    content: string;
+  }): Promise<ContextArtifactRef> {
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      const digest = createHash('sha256').update(input.content).digest('hex');
+      const id = `artifact-${createHash('sha256').update(`${input.sessionId}:${input.kind}:${digest}`).digest('hex').slice(0, 24)}`;
+      const existing = session.contextArtifacts?.find((artifact) => artifact.id === id);
+      if (existing) return existing;
+      const folder = input.kind === 'tool-result' ? 'tool-results' : 'transcripts';
+      const storageKey = `${folder}/${safeArtifactPart(input.runId)}-${safeArtifactPart(input.sourceRef)}-${digest.slice(0, 20)}.txt`;
+      const root = artifactRoot(input.sessionId);
+      const target = resolve(root, storageKey);
+      if (!contained(root, target)) throw new Error('Artifact path escapes the Session scope');
+      await mkdir(dirname(target), { recursive: true });
+      let alreadyWritten = false;
+      try {
+        alreadyWritten = await readFile(target, 'utf8').then((value) => value === input.content);
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'ENOENT') throw error;
+      }
+      if (!alreadyWritten) {
+        const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+        await writeFile(temporary, input.content, 'utf8');
+        try {
+          await rename(temporary, target);
+        } catch (error) {
+          await rm(temporary, { force: true });
+          throw error;
+        }
+      }
+      const ref: ContextArtifactRef = {
+        version: 1,
+        id,
+        sessionId: input.sessionId,
+        kind: input.kind,
+        digest: `sha256-${digest}`,
+        chars: input.content.length,
+        createdAt: new Date().toISOString(),
+        storageKey,
+      };
+      await saveUnlocked({
+        ...session,
+        revision: (session.revision ?? 0) + 1,
+        contextArtifacts: [...(session.contextArtifacts ?? []), ref],
+      });
+      return ref;
+    });
+  }
+
+  async function readContextArtifact(input: { sessionId: string; ref: string; offset?: number; limit?: number }) {
+    const session = await loadRaw(input.sessionId);
+    if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+    const artifact = session.contextArtifacts?.find((candidate) => candidate.id === input.ref && candidate.sessionId === input.sessionId);
+    if (!artifact?.storageKey) throw new Error('Artifact ref is invalid for this Session');
+    const root = artifactRoot(input.sessionId);
+    const target = resolve(root, artifact.storageKey);
+    if (!contained(root, target)) throw new Error('Artifact path escapes the Session scope');
+    const content = await readFile(target, 'utf8');
+    const actualDigest = `sha256-${createHash('sha256').update(content).digest('hex')}`;
+    if (actualDigest !== artifact.digest) throw new Error('Artifact integrity check failed');
+    const offset = Math.max(0, Math.min(content.length, Math.floor(input.offset ?? 0)));
+    const limit = Math.max(1, Math.min(32_000, Math.floor(input.limit ?? 8_000)));
+    const end = Math.min(content.length, offset + limit);
+    return {
+      ref: artifact.id,
+      content: content.slice(offset, end),
+      offset,
+      ...(end < content.length ? { nextOffset: end } : {}),
+      totalChars: content.length,
+    };
   }
 
   async function finishRun(input: { sessionId: string; report: RunReport; summary: TaskSummary }) {
@@ -629,6 +857,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     if (!session) return false;
     if (session.activeTaskId) throw new Error(`Cannot delete Session with active Run: ${session.activeTaskId}`);
     await rm(sessionPath(sessionId), { force: true });
+    await rm(join(sessionsDir, sessionId), { recursive: true, force: true });
     const currentId = await getCurrentSessionId(session.scope);
     if (currentId === sessionId) {
       await setCurrentSessionId(null, session.scope);
@@ -685,6 +914,11 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     markToolStarted,
     commitToolOutcome,
     commitContext,
+    beginContextCompaction,
+    failContextCompaction,
+    recordContextProviderUsage,
+    putContextArtifact,
+    readContextArtifact,
     finishRun,
     readProjectMemory,
     getProjectMemory,

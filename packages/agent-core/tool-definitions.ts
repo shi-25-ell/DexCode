@@ -228,3 +228,31 @@ export const SKILL_TOOL_DEFINITIONS = [
     },
   },
 ];
+
+export const CONTEXT_TOOL_DEFINITIONS = [
+  {
+    type: 'function' as const,
+    function: {
+      name: 'read_artifact',
+      description: '按不透明引用分页读取已安全保存的上下文内容。只可读取当前会话中的引用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string' },
+          offset: { type: 'number' },
+          limit: { type: 'number', description: '单次最多 32000 字符' },
+        },
+        required: ['ref'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'compact_context',
+      description: '阶段结束且后续只需要状态摘要时，请求整理较早对话。当前工具批次完成后生效。',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+  },
+];

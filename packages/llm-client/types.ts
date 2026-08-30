@@ -33,6 +33,7 @@ export type ModelFailure = {
     | 'permission'
     | 'rate_limit'
     | 'quota'
+    | 'context_overflow'
     | 'timeout'
     | 'network'
     | 'invalid_request'
@@ -86,6 +87,7 @@ export type ModelClient = {
   readonly baseUrl: string;
   readonly displayName?: string;
   readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
   readonly providerDisplayName?: string;
   streamMessage(messages: unknown[], options?: ChatOptions): AsyncIterable<ModelEvent>;
 };

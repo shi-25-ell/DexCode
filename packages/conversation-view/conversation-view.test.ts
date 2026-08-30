@@ -99,3 +99,37 @@ test('tool output renders common content and command streams instead of JSON env
   assert.equal(safeDisplayOutput({ status: 'succeeded', stdout: '测试通过', stderr: '一条警告' }).text, '测试通过\n\n标准错误\n一条警告');
   assert.doesNotMatch(safeDisplayOutput({ content: 'token=secret-value' }).text ?? '', /secret-value/);
 });
+
+test('projection restores Context Cards and provider-calibrated request usage from the ledger', () => {
+  const now = new Date().toISOString();
+  const breakdown = { systemPrompt: 100, workspaceCode: 200, recentConversation: 300, toolResults: 100, projectMemory: 50, toolDefinitions: 150, other: 100 };
+  const session: Session = {
+    sessionId: 'session-context-view',
+    scope: { kind: 'general' },
+    createdAt: now,
+    updatedAt: now,
+    messages: [{ role: 'user', content: 'long task' }],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [
+      { seq: 1, at: now, runId: 'run-context', type: 'message', message: { role: 'user', content: 'long task' } },
+      { seq: 2, at: now, runId: 'run-context', type: 'context_compaction_started', operationRef: 'context-op' },
+      { seq: 3, at: now, runId: 'run-context', type: 'context_compaction_completed', presentation: { operationRef: 'context-op', status: 'completed', beforeTokens: 4_000, afterTokens: 1_000, breakdown, archivedMessages: 12 } },
+      { seq: 4, at: now, runId: 'run-context', type: 'context_usage_observed', manifestId: 'manifest-1', usage: { usedTokens: 1_100, contextWindowTokens: 10_000, hardLimitTokens: 8_000, percentage: 11, source: 'provider', timing: 'last_request', asOfTurn: 2, asOfAttempt: 2, breakdown, breakdownEstimated: true } },
+    ],
+  };
+  const view = projectConversation(session);
+  assert.equal(view.items.filter((item) => item.kind === 'context').length, 1);
+  assert.deepEqual(view.contextUsage, {
+    usedTokens: 1_100,
+    contextWindowTokens: 10_000,
+    hardLimitTokens: 8_000,
+    percentage: 11,
+    source: 'provider',
+    timing: 'last_request',
+    asOfTurn: 2,
+    asOfAttempt: 2,
+    breakdown,
+    breakdownEstimated: true,
+  });
+});

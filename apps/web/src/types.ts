@@ -35,15 +35,48 @@ export type ConversationItem =
   | { id: string; kind: 'user'; content: string }
   | { id: string; kind: 'assistant'; content: string }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
+  | { id: string; kind: 'context'; context: ContextPresentation }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command'; title: string; target?: string; options: string[]; resolved?: string }
   | { id: string; kind: 'error'; title: string; message: string };
 
 export type ContextUsage = {
   usedTokens?: number;
-  limitTokens?: number;
+  contextWindowTokens?: number;
+  hardLimitTokens?: number;
+  targetTokens?: number;
   percentage?: number;
-  source: 'provider' | 'estimated' | 'unknown';
+  source: 'provider' | 'calibrated' | 'estimated' | 'unknown';
+  timing: 'next_request' | 'last_request';
   asOfTurn?: number;
+  asOfAttempt?: number;
+  breakdown?: ContextBreakdown;
+  breakdownEstimated?: boolean;
+};
+
+export type ContextBreakdown = {
+  systemPrompt: number;
+  workspaceCode: number;
+  recentConversation: number;
+  toolResults: number;
+  projectMemory: number;
+  toolDefinitions: number;
+  other: number;
+};
+
+export type ContextPresentation = {
+  operationRef: string;
+  status: 'running' | 'completed' | 'failed';
+  beforeTokens?: number;
+  afterTokens?: number;
+  breakdown?: ContextBreakdown;
+  externalizedToolResults?: number;
+  archivedMessages?: number;
+  archivedConversationSegments?: number;
+  compactedToolResults?: number;
+  summarizedMessages?: number;
+  retainedConversationSegments?: number;
+  retainedMessageCount?: number;
+  reason?: string;
 };
 
 export type ConversationSnapshot = {
@@ -65,7 +98,8 @@ export type StreamEvent =
   | { type: 'session'; sessionId: string; isNew: boolean }
   | { type: 'chunk'; chunk: string }
   | { type: 'tool_view'; presentation: ToolPresentation }
-  | { type: 'context_usage'; usedTokens?: number; limitTokens?: number; source: ContextUsage['source']; asOfTurn?: number }
+  | ({ type: 'context_usage' } & ContextUsage)
+  | { type: 'context_activity'; presentation: ContextPresentation }
   | { type: 'task_status'; status: string; taskId: string; note?: string }
   | { type: 'confirm_request'; confirmId: string; question: string; options?: string[] }
   | { type: 'command_confirm_request'; confirmId: string; command: string; cwd: string; risk: string; reason: string }

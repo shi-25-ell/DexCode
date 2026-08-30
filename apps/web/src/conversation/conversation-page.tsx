@@ -4,10 +4,11 @@ import { type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef
 import { useNavigate } from 'react-router-dom';
 import { apiJson, getConversation, scopeWorkspaceRef, streamConversation } from '../api';
 import { AppShell } from '../shell/app-shell';
-import type { ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, StreamEvent, ToolPresentation } from '../types';
+import type { ContextPresentation, ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, StreamEvent, ToolPresentation } from '../types';
 import { AssistantMessage } from './assistant-message';
 import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
+import { ContextCard } from './context-card';
 import { isTimelineNearBottom } from './scroll-follow';
 import { UserMessage } from './user-message';
 
@@ -23,13 +24,14 @@ type Action =
   | { type: 'submit'; content: string }
   | { type: 'chunk'; content: string }
   | { type: 'tool'; tool: ToolPresentation }
+  | { type: 'context'; context: ContextPresentation }
   | { type: 'usage'; usage: ContextUsage }
   | { type: 'status'; status: LiveState['status'] }
   | { type: 'approval'; item: Extract<ConversationItem, { kind: 'approval' }> }
   | { type: 'resolve'; approvalRef: string; answer: string }
   | { type: 'error'; message: string };
 
-const initialState: LiveState = { items: [], contextUsage: { source: 'unknown' }, status: 'idle', title: '新会话' };
+const initialState: LiveState = { items: [], contextUsage: { source: 'unknown', timing: 'next_request' }, status: 'idle', title: '新会话' };
 
 function shortTitle(content: string): string {
   const normalized = content.trim().replace(/\s+/g, ' ');
@@ -58,6 +60,14 @@ export function conversationReducer(state: LiveState, action: Action): LiveState
     items[existing] = { id: `tool-${action.tool.callRef}`, kind: 'tool', tool: action.tool };
     return { ...state, items };
   }
+  if (action.type === 'context') {
+    const existing = state.items.findIndex((item) => item.kind === 'context' && item.context.operationRef === action.context.operationRef);
+    const next = { id: `context-${action.context.operationRef}`, kind: 'context' as const, context: action.context };
+    if (existing < 0) return { ...state, items: [...state.items, next] };
+    const items = [...state.items];
+    items[existing] = next;
+    return { ...state, items };
+  }
   if (action.type === 'usage') return { ...state, contextUsage: action.usage };
   if (action.type === 'status') return { ...state, status: action.status };
   if (action.type === 'approval') return { ...state, status: 'waiting', items: [...state.items, action.item] };
@@ -74,11 +84,14 @@ function formatTokens(value: number): string {
 }
 
 function ContextLabel({ usage, running }: { usage: ContextUsage; running: boolean }) {
-  if (usage.percentage === undefined) return <span>{running ? '上下文计算中' : '上下文未知'}</span>;
-  const detail = usage.usedTokens !== undefined && usage.limitTokens !== undefined
-    ? `${formatTokens(usage.usedTokens)} / ${formatTokens(usage.limitTokens)} tokens`
+  if (usage.percentage === undefined) return <span>{running && usage.source === 'unknown' ? '上下文计算中' : '上下文未知'}</span>;
+  const detail = usage.usedTokens !== undefined && usage.contextWindowTokens !== undefined
+    ? `${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindowTokens)} tokens`
     : '';
-  return <span title={`${detail}${usage.source === 'estimated' ? ' · 估算' : ''}`}>上下文 {usage.percentage}%{usage.source === 'estimated' ? ' · 估算' : ''}</span>;
+  const timing = usage.timing === 'last_request' ? '最近一次模型请求' : '下一次模型请求';
+  const source = usage.source === 'provider' ? '模型实测' : '校准估算';
+  const estimated = usage.source === 'estimated' || usage.source === 'calibrated';
+  return <span title={`${detail} · ${timing} · ${source}${usage.breakdownEstimated ? ' · 构成估算' : ''}`}>上下文 {usage.percentage}%{estimated ? ' · 估算' : ''}</span>;
 }
 
 function ApprovalCard({ item, workspaceRef, onResolve }: {
@@ -138,7 +151,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   useEffect(() => {
     stickToBottom.current = true;
     setAtBottom(true);
-    if (!conversationRef) dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], contextUsage: { source: 'unknown' } } });
+    if (!conversationRef) dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], contextUsage: { source: 'unknown', timing: 'next_request' } } });
   }, [conversationRef, scope.kind, scope.kind === 'workspace' ? scope.workspaceRef : 'general']);
 
   useLayoutEffect(() => {
@@ -173,13 +186,11 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       navigate(next, { replace: true });
     } else if (event.type === 'chunk') dispatch({ type: 'chunk', content: event.chunk });
     else if (event.type === 'tool_view') dispatch({ type: 'tool', tool: event.presentation });
-    else if (event.type === 'context_usage') dispatch({ type: 'usage', usage: {
-      ...(event.usedTokens !== undefined ? { usedTokens: event.usedTokens } : {}),
-      ...(event.limitTokens !== undefined ? { limitTokens: event.limitTokens } : {}),
-      ...(event.usedTokens !== undefined && event.limitTokens ? { percentage: Math.min(100, Math.round(event.usedTokens / event.limitTokens * 100)) } : {}),
-      source: event.source,
-      ...(event.asOfTurn ? { asOfTurn: event.asOfTurn } : {}),
-    } });
+    else if (event.type === 'context_usage') {
+      const { type: _type, ...usage } = event;
+      dispatch({ type: 'usage', usage });
+    }
+    else if (event.type === 'context_activity') dispatch({ type: 'context', context: event.presentation });
     else if (event.type === 'task_status') dispatch({ type: 'status', status: event.status === 'waiting_confirm' ? 'waiting' : event.status === 'error' ? 'failed' : event.status === 'done' || event.status === 'aborted' ? 'idle' : 'running' });
     else if (event.type === 'confirm_request') dispatch({ type: 'approval', item: { id: `approval-${event.confirmId}`, kind: 'approval', approvalRef: event.confirmId, approvalKind: 'question', title: event.question, options: event.options?.length ? event.options : ['确认', '取消'] } });
     else if (event.type === 'command_confirm_request') dispatch({ type: 'approval', item: { id: `approval-${event.confirmId}`, kind: 'approval', approvalRef: event.confirmId, approvalKind: 'command', title: event.reason || '需要确认命令', target: event.command, options: ['allow_once', 'allow_whitelist', 'deny'] } });
@@ -218,16 +229,23 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const stop = () => controllerRef.current?.abort();
   const timeline = useMemo(() => state.items, [state.items]);
   const effectiveUsage = useMemo<ContextUsage>(() => {
-    const limitTokens = state.contextUsage.limitTokens ?? meta.data?.model.contextWindow;
+    const contextWindowTokens = state.contextUsage.contextWindowTokens ?? meta.data?.model.contextWindow;
     const usedTokens = state.contextUsage.usedTokens ?? (state.items.length === 0 ? 0 : undefined);
     return {
       ...state.contextUsage,
-      ...(limitTokens !== undefined ? { limitTokens } : {}),
+      ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
       ...(usedTokens !== undefined ? { usedTokens } : {}),
-      ...(usedTokens !== undefined && limitTokens ? { percentage: Math.min(100, Math.round(usedTokens / limitTokens * 100)) } : {}),
+      ...(usedTokens !== undefined && contextWindowTokens ? { percentage: Number((usedTokens / contextWindowTokens * 100).toFixed(1)) } : {}),
       ...(state.contextUsage.source === 'unknown' && usedTokens === 0 ? { source: 'estimated' as const } : {}),
     };
   }, [meta.data?.model.contextWindow, state.contextUsage, state.items.length]);
+  const contextLevel = effectiveUsage.usedTokens !== undefined && effectiveUsage.hardLimitTokens !== undefined
+    ? effectiveUsage.usedTokens >= effectiveUsage.hardLimitTokens
+      ? 'danger'
+      : effectiveUsage.targetTokens !== undefined && effectiveUsage.usedTokens >= effectiveUsage.targetTokens
+        ? 'warning'
+        : 'normal'
+    : 'unknown';
   const scrollToBottom = () => {
     stickToBottom.current = true;
     const element = scrollRef.current;
@@ -264,6 +282,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
               return <AssistantMessage key={item.id} content={item.content} copyContent={showCopy ? assistantResponseCopyText(timeline, index) : item.content} showCopy={showCopy} />;
             }
             if (item.kind === 'tool') return <ToolCard key={item.id} tool={item.tool} />;
+            if (item.kind === 'context') return <ContextCard key={item.id} context={item.context} />;
             if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} onResolve={(answer) => dispatch({ type: 'resolve', approvalRef: item.approvalRef, answer })} />;
             return <div key={item.id} className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;
           })}
@@ -292,7 +311,10 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           </div>
           <div className="composer-footer">
             <span className="model-name"><i />{meta.data?.model.displayName ?? '模型信息加载中'}</span>
-            <span className="context-usage"><i /><ContextLabel usage={effectiveUsage} running={state.status === 'running'} /></span>
+            <span className={`context-usage ${contextLevel}`}>
+              <i><b style={{ width: `${Math.min(100, Math.max(0, effectiveUsage.percentage ?? 0))}%` }} /></i>
+              <ContextLabel usage={effectiveUsage} running={state.status === 'running'} />
+            </span>
           </div>
           </div>
         </form>

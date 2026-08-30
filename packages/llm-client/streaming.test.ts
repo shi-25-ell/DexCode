@@ -63,3 +63,25 @@ test('OpenAI-compatible stream reports an interrupted SSE event as invalid respo
     globalThis.fetch = originalFetch;
   }
 });
+
+test('OpenAI-compatible errors normalize structured context length failures', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { code: 'context_length_exceeded', message: 'maximum context length reached' },
+  }), { status: 400, statusText: 'Bad Request', headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  try {
+    const model = createOpenAiCompatibleModelClient({
+      baseUrl: 'https://example.invalid/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const turn = await collectModelTurn(model.streamMessage([]));
+    assert.equal(turn.status, 'failed');
+    if (turn.status === 'failed') {
+      assert.equal(turn.failure.category, 'context_overflow');
+      assert.doesNotMatch(turn.failure.message, /maximum context length/);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

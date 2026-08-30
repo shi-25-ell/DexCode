@@ -170,6 +170,18 @@ body.resizing { cursor: col-resize; user-select: none; }
 .tool-card.running { border-color: #bfdbfe; }
 .tool-card.failed { border-color: #fecaca; }
 .tool-card.denied { border-color: #fde68a; }
+.context-card { margin: 10px 0; border: 1px solid #ddd6fe; border-radius: 9px; background: #faf8ff; overflow: hidden; }
+.context-card.running { border-color: #bfdbfe; background: #f8fbff; }
+.context-card.failed { border-color: #fde68a; background: #fffdf5; }
+.context-card-trigger { display: grid; grid-template-columns: 28px minmax(0, 1fr) 18px; align-items: center; gap: 10px; width: 100%; min-height: 56px; padding: 10px 13px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.context-card-trigger:disabled { cursor: default; }
+.context-card-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid #ddd6fe; border-radius: 8px; color: var(--purple); }
+.context-card-title { font-weight: 600; }
+.context-card-details { border-top: 1px solid #ede9fe; padding: 12px 14px 14px 52px; color: var(--muted); font-size: 12px; }
+.context-card-details dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 20px; margin: 0; }
+.context-card-details dl div { display: flex; justify-content: space-between; gap: 12px; }
+.context-card-details dt, .context-card-details dd { margin: 0; }
+.context-actions { display: grid; gap: 5px; margin-top: 12px; }
 .tool-card-trigger { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto 18px; align-items: center; gap: 10px; width: 100%; min-height: 64px; padding: 10px 13px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .tool-card-trigger:disabled { cursor: default; }
 .tool-icon { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 6px; color: #6b7280; }
@@ -216,7 +228,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 .model-name, .context-usage { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .model-name i { width: 7px; height: 7px; border-radius: 2px; background: var(--purple); transform: rotate(45deg); }
 .context-usage { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.context-usage i { width: 32px; height: 4px; border-radius: 99px; background: var(--purple); opacity: 0.7; }
+.context-usage i { width: 32px; height: 4px; border-radius: 99px; background: #e5e7eb; overflow: hidden; }
+.context-usage i b { display: block; height: 100%; border-radius: inherit; background: var(--purple); transition: width 180ms ease; }
+.context-usage.warning i b { background: #d97706; }
+.context-usage.danger i b { background: var(--red); }
+.context-usage.unknown i b { background: #9ca3af; }
 
 .settings-scroll { min-height: 0; overflow-y: auto; }
 .settings-page { width: min(900px, calc(100% - 48px)); margin: 0 auto; padding: 28px 0 80px; }
@@ -321,6 +337,8 @@ body.resizing { cursor: col-resize; user-select: none; }
   .timeline { width: min(100% - 28px, 760px); padding-top: 28px; }
   .user-message { max-width: 86%; }
   .tool-card-trigger { grid-template-columns: 28px minmax(0, 1fr) 18px; }
+  .context-card-details { padding-left: 14px; }
+  .context-card-details dl { grid-template-columns: 1fr; }
   .tool-status { display: none; }
   .inline-settings-form { grid-template-columns: 1fr; }
   .whitelist-form { grid-template-columns: 1fr; }

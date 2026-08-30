@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createExecutor } from './executor.ts';
 import type { ModelClient, ModelEvent, ModelResponse } from '../llm-client/index.ts';
+import type { ContextEngine, PrepareContextInput, PreparedContext } from '../context-engine/index.ts';
+import type { AgentEvent } from '../shared/types.ts';
 
 function scriptedModel(responses: ModelResponse[]): ModelClient {
   let index = 0;
@@ -43,6 +45,55 @@ function toolHost(timeline: string[] = []) {
       restoreSnapshot: () => null,
     },
     read: () => content,
+  };
+}
+
+function prepared(input: PrepareContextInput): PreparedContext {
+  const breakdown = { systemPrompt: 2, workspaceCode: 0, recentConversation: 3, toolResults: 0, projectMemory: 0, toolDefinitions: 1, other: 1 };
+  return {
+    messages: [{ role: 'system', content: 'system' }, ...input.canonicalMessages],
+    manifest: {
+      version: 2,
+      id: `manifest-${input.turn}-${input.attempt}`,
+      runId: input.runId,
+      turn: input.turn,
+      attempt: input.attempt,
+      createdAt: new Date().toISOString(),
+      requestDigest: `digest-${input.turn}-${input.attempt}`,
+      requestSerializedChars: 28,
+      estimatedInputTokens: 7,
+      tokenSource: 'estimated',
+      contextWindowTokens: 10_000,
+      maxOutputTokens: 1_000,
+      reserveTokens: 500,
+      hardLimitTokens: 8_500,
+      breakdown,
+      layers: [],
+      artifactRefs: [],
+      includedToolResultIds: input.canonicalMessages.flatMap((message) => message.role === 'tool' ? [message.tool_call_id] : []),
+    },
+    usage: { usedTokens: 7, contextWindowTokens: 10_000, hardLimitTokens: 8_500, percentage: 0.1, source: 'estimated', timing: 'next_request', asOfTurn: input.turn, asOfAttempt: input.attempt, breakdown, breakdownEstimated: true },
+  };
+}
+
+function contextRuntime(engine: ContextEngine) {
+  return {
+    engine,
+    sessionId: 'session-executor',
+    activeRequest: 'run it',
+    systemSections: [{ source: 'systemPrompt' as const, content: 'system' }],
+    policy: {
+      enabled: true,
+      contextWindowTokens: 10_000,
+      maxOutputTokens: 1_000,
+      reserveTokens: 500,
+      targetRatio: 0.7,
+      latestToolResultsToKeep: 2,
+      maxConversationMessages: 50,
+      latestToolBatchChars: 4_000,
+      largeToolResultChars: 2_000,
+    },
+    readArtifact: async () => ({ content: '' }),
   };
 }
 
@@ -99,4 +150,128 @@ test('returns limited rather than completed when the model turn budget is exhaus
   const result = await createExecutor(host).runReActLoop(model, [], () => {}, undefined, { maxIterations: 1 });
   assert.equal(result.status, 'limited');
   assert.equal(result.terminationReason, 'model_turn_limit');
+});
+
+test('prepares and durably commits every model request in a multi-turn Run', async () => {
+  const timeline: string[] = [];
+  const { host } = toolHost(timeline);
+  const prepareInputs: PrepareContextInput[] = [];
+  const engine: ContextEngine = {
+    async prepare(input) { prepareInputs.push(input); timeline.push(`prepare-${input.turn}`); return prepared(input); },
+    async recoverFromOverflow(input) { return prepared({ ...input, forceSummary: true }); },
+    async recordProviderUsage() {},
+  };
+  const responses: ModelResponse[] = [
+    { content: '', reasoning: '', toolCalls: [{ id: 'read-1', name: 'read_file', arguments: { path: 'a.ts' } }], finishReason: 'tool_calls' },
+    { content: '', reasoning: '', toolCalls: [{ id: 'read-2', name: 'read_file', arguments: { path: 'a.ts' } }], finishReason: 'tool_calls' },
+    { content: 'done', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ];
+  let modelCalls = 0;
+  const model = scriptedModel(responses);
+  const observed: ModelClient = { ...model, async *streamMessage(messages, options) {
+    modelCalls += 1;
+    assert.equal(timeline.at(-1), `commit-${modelCalls}`);
+    yield* model.streamMessage(messages, options);
+  } };
+  const result = await createExecutor(host).runReActLoop(observed, [{ role: 'user', content: 'run it' }], () => {}, undefined, {
+    context: contextRuntime(engine),
+    semantic: {
+      assistantCommitted: async () => {},
+      toolStarted: async () => {},
+      toolOutcome: async () => {},
+      contextPrepared: async (value) => { timeline.push(`commit-${value.manifest.turn}`); },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(modelCalls, 3);
+  assert.equal(prepareInputs.length, 3);
+  assert.equal(prepareInputs[1]?.canonicalMessages.some((message) => message.role === 'tool' && message.tool_call_id === 'read-1'), true);
+});
+
+test('context overflow performs one recovery retry without repeating completed tool effects', async () => {
+  const timeline: string[] = [];
+  const { host } = toolHost(timeline);
+  let prepares = 0;
+  let recoveries = 0;
+  const engine: ContextEngine = {
+    async prepare(input) { prepares += 1; return prepared(input); },
+    async recoverFromOverflow(input) { recoveries += 1; return prepared({ ...input, forceSummary: true }); },
+    async recordProviderUsage() {},
+  };
+  const script: Array<ModelResponse | 'overflow'> = [
+    { content: '', reasoning: '', toolCalls: [{ id: 'write-once', name: 'write_file', arguments: { path: 'a.ts', content: 'after' } }], finishReason: 'tool_calls' },
+    'overflow',
+    { content: 'recovered', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ];
+  let index = 0;
+  const model: ModelClient = {
+    model: 'overflow-test',
+    baseUrl: 'memory://overflow',
+    async *streamMessage(): AsyncIterable<ModelEvent> {
+      const item = script[index++];
+      yield { version: 1, type: 'turn_started', attemptId: `attempt-${index}` };
+      if (item === 'overflow') {
+        yield { version: 1, type: 'turn_failed', failure: { category: 'context_overflow', retryable: false, message: 'too long' } };
+        return;
+      }
+      if (!item) throw new Error('unexpected model call');
+      if (item.content) yield { version: 1, type: 'text_delta', delta: item.content };
+      for (const [toolIndex, call] of item.toolCalls.entries()) {
+        yield { version: 1, type: 'tool_call_delta', index: toolIndex, id: call.id, name: call.name, argumentsDelta: JSON.stringify(call.arguments) };
+      }
+      yield { version: 1, type: 'turn_completed', response: item };
+    },
+  };
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'write once' }], () => {}, undefined, {
+    context: contextRuntime(engine),
+    semantic: {
+      assistantCommitted: async () => {},
+      toolStarted: async () => {},
+      toolOutcome: async () => {},
+      contextPrepared: async () => {},
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.finalContent, 'recovered');
+  assert.equal(timeline.filter((value) => value === 'effect').length, 1);
+  assert.equal(recoveries, 1);
+  assert.equal(prepares, 2);
+  assert.equal(result.modelAttemptCount, 3);
+});
+
+test('active compaction waits for the full tool batch and is not shown as a normal Tool Card', async () => {
+  const timeline: string[] = [];
+  const events: AgentEvent[] = [];
+  const { host } = toolHost(timeline);
+  const forceFlags: Array<boolean | undefined> = [];
+  const engine: ContextEngine = {
+    async prepare(input) { forceFlags.push(input.forceSummary); timeline.push(`prepare-${input.turn}`); return prepared(input); },
+    async recoverFromOverflow(input) { return prepared({ ...input, forceSummary: true }); },
+    async recordProviderUsage() {},
+  };
+  const model = scriptedModel([
+    {
+      content: '',
+      reasoning: '',
+      toolCalls: [
+        { id: 'compact-hidden', name: 'compact_context', arguments: {} },
+        { id: 'write-after-compact', name: 'write_file', arguments: { path: 'a.ts', content: 'after' } },
+      ],
+      finishReason: 'tool_calls',
+    },
+    { content: 'done', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ]);
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'compact then write' }], (event) => events.push(event), undefined, {
+    context: contextRuntime(engine),
+    semantic: {
+      assistantCommitted: async () => {},
+      toolStarted: async (call) => { timeline.push(`started-${call.id}`); },
+      toolOutcome: async (message) => { timeline.push(`outcome-${message.tool_call_id}`); },
+      contextPrepared: async () => {},
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(forceFlags, [false, true]);
+  assert.equal(timeline.indexOf('outcome-write-after-compact') < timeline.indexOf('prepare-2'), true);
+  assert.equal(events.some((event) => event.type === 'tool_view' && event.presentation.callRef === 'compact-hidden'), false);
 });

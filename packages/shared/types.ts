@@ -50,6 +50,90 @@ export type TaskSummary = {
 
 export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
 
+export type ContextBreakdown = {
+  systemPrompt: number;
+  workspaceCode: number;
+  recentConversation: number;
+  toolResults: number;
+  projectMemory: number;
+  toolDefinitions: number;
+  other: number;
+};
+
+export type ContextUsageSource = 'provider' | 'calibrated' | 'estimated' | 'unknown';
+export type ContextUsageTiming = 'next_request' | 'last_request';
+
+export type ContextUsageSnapshot = {
+  usedTokens?: number;
+  contextWindowTokens?: number;
+  hardLimitTokens?: number;
+  targetTokens?: number;
+  percentage?: number;
+  source: ContextUsageSource;
+  timing: ContextUsageTiming;
+  asOfTurn?: number;
+  asOfAttempt?: number;
+  breakdown?: ContextBreakdown;
+  breakdownEstimated?: boolean;
+};
+
+export type ContextPolicy = {
+  enabled: boolean;
+  contextWindowTokens?: number;
+  maxOutputTokens: number;
+  reserveTokens: number;
+  targetRatio: number;
+  latestToolResultsToKeep: number;
+  maxConversationMessages: number;
+  latestToolBatchChars: number;
+  largeToolResultChars: number;
+};
+
+export type ContextArtifactRef = {
+  version: 1;
+  id: string;
+  sessionId: string;
+  kind: 'tool-result' | 'transcript';
+  digest: string;
+  chars: number;
+  createdAt: string;
+  storageKey?: string;
+};
+
+export type ContextLayer = 'large_tool_results' | 'middle_archive' | 'old_tool_results' | 'summary';
+
+export type ContextActivity = {
+  operationRef: string;
+  layers: ContextLayer[];
+  beforeTokens: number;
+  afterTokens: number;
+  beforeBreakdown: ContextBreakdown;
+  afterBreakdown: ContextBreakdown;
+  externalizedToolResults: number;
+  archivedMessages: number;
+  archivedConversationSegments: number;
+  compactedToolResults: number;
+  summarizedMessages: number;
+  retainedConversationSegments: number;
+  retainedMessageCount: number;
+};
+
+export type ContextPresentation = {
+  operationRef: string;
+  status: 'running' | 'completed' | 'failed';
+  beforeTokens?: number;
+  afterTokens?: number;
+  breakdown?: ContextBreakdown;
+  externalizedToolResults?: number;
+  archivedMessages?: number;
+  archivedConversationSegments?: number;
+  compactedToolResults?: number;
+  summarizedMessages?: number;
+  retainedConversationSegments?: number;
+  retainedMessageCount?: number;
+  reason?: 'summary_failed' | 'cancelled' | 'invalid_summary' | 'interrupted' | 'persistence_failed';
+};
+
 export type RunReport = {
   version: 1;
   runId: string;
@@ -67,13 +151,19 @@ export type RunReport = {
     totalTokens: number;
     unknown: number;
   };
+  contextSummaryUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
   latestInputTokens?: number;
+  latestContextUsage?: ContextUsageSnapshot;
   toolsUsed: string[];
   filesModified: string[];
   error?: { code: string; message: string };
 };
 
-export type ContextManifest = {
+export type ContextManifestV1 = {
   version: 1;
   id: string;
   runId: string;
@@ -84,6 +174,33 @@ export type ContextManifest = {
   checkpointId?: string;
 };
 
+export type ContextManifestV2 = {
+  version: 2;
+  id: string;
+  runId: string;
+  turn: number;
+  attempt: number;
+  createdAt: string;
+  requestDigest: string;
+  requestSerializedChars: number;
+  estimatedInputTokens: number;
+  actualInputTokens?: number;
+  tokenSource: ContextUsageSource;
+  contextWindowTokens?: number;
+  maxOutputTokens: number;
+  reserveTokens: number;
+  hardLimitTokens?: number;
+  targetTokens?: number;
+  breakdown: ContextBreakdown;
+  layers: ContextLayer[];
+  activity?: ContextActivity;
+  summaryRecordId?: string;
+  artifactRefs: ContextArtifactRef[];
+  includedToolResultIds: string[];
+};
+
+export type ContextManifest = ContextManifestV1 | ContextManifestV2;
+
 export type CompactionCheckpoint = {
   version: 1;
   id: string;
@@ -91,6 +208,29 @@ export type CompactionCheckpoint = {
   sourceDigest: string;
   summary: string;
   strategyVersion: 'deterministic-summary-v1';
+};
+
+export type ContextSummaryRecord = {
+  version: 2;
+  id: string;
+  runId: string;
+  turn: number;
+  strategyVersion: 'structured-summary-v2';
+  sourceDigest: string;
+  coveredMessageCount: number;
+  summary: string;
+  retainedTail: ChatMessage[];
+  retainedTailDigest: string;
+  tokensBefore: number;
+  tokensAfter: number;
+  summaryModel: string;
+  summaryUsage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+  createdAt: string;
+  artifactRefs: ContextArtifactRef[];
 };
 
 export type ToolViewStatus = 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
@@ -118,6 +258,11 @@ export type SessionLedgerRecord =
   | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string; input?: Record<string, unknown> }
   | { seq: number; at: string; runId: string; type: 'tool_completed'; callId: string; presentation: ToolPresentation }
   | { seq: number; at: string; runId: string; type: 'context_committed'; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }
+  | { seq: number; at: string; runId: string; type: 'context_prepare_committed'; manifest: ContextManifestV2 }
+  | { seq: number; at: string; runId: string; type: 'context_compaction_started'; operationRef: string }
+  | { seq: number; at: string; runId: string; type: 'context_compaction_completed'; presentation: ContextPresentation; summaryRecordId?: string }
+  | { seq: number; at: string; runId: string; type: 'context_compaction_failed'; operationRef: string; reason: NonNullable<ContextPresentation['reason']> }
+  | { seq: number; at: string; runId: string; type: 'context_usage_observed'; manifestId: string; usage: ContextUsageSnapshot }
   | { seq: number; at: string; runId: string; type: 'run_terminal'; report: RunReport }
   | { seq: number; at: string; runId: string; type: 'recovery'; reason: 'interrupted' };
 
@@ -157,6 +302,8 @@ export type Session = {
   runReports?: RunReport[];
   contextManifests?: ContextManifest[];
   compactionCheckpoints?: CompactionCheckpoint[];
+  contextSummaries?: ContextSummaryRecord[];
+  contextArtifacts?: ContextArtifactRef[];
   clientRequestIds?: string[];
 };
 
@@ -221,9 +368,21 @@ export type ToolViewEvent = {
 export type ContextUsageEvent = {
   type: 'context_usage';
   usedTokens?: number;
-  limitTokens?: number;
-  source: 'provider' | 'estimated' | 'unknown';
+  contextWindowTokens?: number;
+  hardLimitTokens?: number;
+  targetTokens?: number;
+  percentage?: number;
+  source: ContextUsageSource;
+  timing: ContextUsageTiming;
   asOfTurn?: number;
+  asOfAttempt?: number;
+  breakdown?: ContextBreakdown;
+  breakdownEstimated?: boolean;
+};
+
+export type ContextActivityEvent = {
+  type: 'context_activity';
+  presentation: ContextPresentation;
 };
 
 export type ResultEvent = {
@@ -291,6 +450,7 @@ export type AgentEvent =
   | ToolEvent
   | ToolViewEvent
   | ContextUsageEvent
+  | ContextActivityEvent
   | ResultEvent
   | ErrorEvent
   | ConfirmRequestEvent
