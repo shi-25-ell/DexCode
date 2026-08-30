@@ -878,7 +878,7 @@ activeTaskId
 - `apps/web` 已替换为 Vite + React + TypeScript SPA；旧三栏页面、编辑器、文件树、执行摘要和分散的设置 HTML/TS 已移除。
 - `packages/conversation-view` 统一负责首问标题、中文工具名称、状态、目标、输出裁剪、敏感信息遮盖、文件 diff 和 durable ledger replay。
 - `packages/capability-registry` 提供能力入口清单。`DEX_DISABLED_CAPABILITIES` 删除注册项后，Sidebar 与设置路由同时不再提供该能力；页面组件不维护固定六项数组。
-- `public/brand-icon.svg` 是缺省可替换资源；构建变量 `VITE_BRAND_ICON_URL` 可指向其他图标，加载失败时使用中性占位，不把 DexCode 图形写死在 JSX。
+- `public/dexcode-icon.png` 是缺省可替换资源；构建变量 `VITE_BRAND_ICON_URL` 可指向其他图标，加载失败时使用中性占位，不把 DexCode 图形写死在 JSX。
 - Runtime 新增 scoped conversation/workspace 接口，请求通过 workspace reference 解析各自 runtime，不再依赖全局 `activeRuntime`。
 - 首次发送通过 `materializeRun` 原子写入 Session、首问标题、user message 和 `run_started`；普通后续消息也持久化 `clientRequestId`，重试返回现有结果而不是重复提交。
 - Context、provider 或执行基础设施在 Run 开始后失败时仍提交失败终态，保留用户已发生的真实交互和可恢复 ledger。

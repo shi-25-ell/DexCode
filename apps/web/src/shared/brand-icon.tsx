@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-const DEFAULT_BRAND_ICON = '/brand-icon.svg';
+const DEFAULT_BRAND_ICON = '/dexcode-icon.png';
 
 export function BrandIcon() {
   const [failed, setFailed] = useState(false);
