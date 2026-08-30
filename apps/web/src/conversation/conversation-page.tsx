@@ -1,12 +1,11 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Square } from 'lucide-react';
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
 import { useNavigate } from 'react-router-dom';
-import remarkGfm from 'remark-gfm';
 import { apiJson, getConversation, scopeWorkspaceRef, streamConversation } from '../api';
 import { AppShell } from '../shell/app-shell';
 import type { ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, StreamEvent, ToolPresentation } from '../types';
+import { AssistantMessage } from './assistant-message';
 import { ToolCard } from './tool-card';
 import { isTimelineNearBottom } from './scroll-follow';
 
@@ -258,7 +257,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           ) : null}
           {timeline.map((item) => {
             if (item.kind === 'user') return <div key={item.id} className="user-message">{item.content}</div>;
-            if (item.kind === 'assistant') return <div key={item.id} className="assistant-message"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown></div>;
+            if (item.kind === 'assistant') return <AssistantMessage key={item.id} content={item.content} />;
             if (item.kind === 'tool') return <ToolCard key={item.id} tool={item.tool} />;
             if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} onResolve={(answer) => dispatch({ type: 'resolve', approvalRef: item.approvalRef, answer })} />;
             return <div key={item.id} className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;
