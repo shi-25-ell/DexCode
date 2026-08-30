@@ -3,6 +3,7 @@ import type {
   CompactionCheckpoint,
   ContextManifest,
   RunReport,
+  RunContext,
   Session,
   TaskSummary,
 } from '../shared/types.ts';
@@ -11,6 +12,7 @@ export type BeginRunInput = {
   sessionId: string;
   runId: string;
   userMessage: ChatMessage;
+  context: RunContext;
 };
 
 export type AppendRunMessageInput = {
@@ -34,11 +36,10 @@ export type FinishRunInput = {
 
 export interface SessionRepository {
   loadSession(id: string): Promise<Session | null>;
-  getOrCreateCurrentSession(): Promise<Session>;
   beginRun(input: BeginRunInput): Promise<Session>;
   appendRunMessage(input: AppendRunMessageInput): Promise<Session>;
   markToolStarted(input: MarkToolStartedInput): Promise<Session>;
   commitContext(input: { sessionId: string; runId: string; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }): Promise<Session>;
   finishRun(input: FinishRunInput): Promise<{ session: Session; report: RunReport; committed: boolean }>;
-  readProjectMemory(): Promise<string>;
+  readProjectMemory(workspaceId?: string): Promise<string>;
 }

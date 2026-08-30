@@ -53,6 +53,7 @@ export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
 export type RunReport = {
   version: 1;
   runId: string;
+  context?: RunContext;
   status: RunStatus;
   terminationReason: string;
   finalAnswer?: string;
@@ -92,7 +93,7 @@ export type CompactionCheckpoint = {
 };
 
 export type SessionLedgerRecord =
-  | { seq: number; at: string; runId: string; type: 'run_started' }
+  | { seq: number; at: string; runId: string; type: 'run_started'; context?: RunContext }
   | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage }
   | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string }
   | { seq: number; at: string; runId: string; type: 'context_committed'; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }
@@ -108,8 +109,21 @@ export type FileDiff = {
 
 // ── 会话对象 ──
 
+export type SessionScope =
+  | { kind: 'general' }
+  | { kind: 'workspace'; workspaceId: string };
+
+export type RunContext = {
+  scope: SessionScope;
+  workspace?: {
+    workspaceId: string;
+    rootPath: string;
+  };
+};
+
 export type Session = {
   sessionId: string;
+  scope: SessionScope;
   createdAt: string;
   updatedAt: string;
   title?: string;

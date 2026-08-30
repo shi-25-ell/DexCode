@@ -1,6 +1,7 @@
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DEFAULT_PROJECT_ID, type VersionSnapshot } from '../shared/index.ts';
+export { createWorkspaceRegistry, type WorkspaceRecord } from './registry.ts';
 import {
   applyAtLineAnchor,
   applyFuzzyReplacement,
@@ -220,12 +221,12 @@ function renameNode(nodes: TreeNode[], segments: string[], nextName: string): Tr
   return next;
 }
 
-export function createWorkspaceService(options: { projectId?: string; rootDir?: string; initialTree?: TreeNode[] } = {}) {
+export function createWorkspaceService(options: { projectId?: string; rootDir?: string; stateDir?: string; initialTree?: TreeNode[] } = {}) {
   const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
   const rootDir = options.rootDir ?? `${process.cwd()}/workspaces/${projectId}/workspace`;
 
   function createVersionPaths(nextRootDir: string) {
-    const projectDir = dirname(nextRootDir);
+    const projectDir = options.stateDir ? resolve(options.stateDir) : dirname(nextRootDir);
     return {
       projectDir,
       snapshotsDir: join(projectDir, 'snapshots'),

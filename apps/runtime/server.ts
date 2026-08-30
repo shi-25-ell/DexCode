@@ -5,9 +5,9 @@ import { createCodingAgent } from '../../packages/agent-core/index.ts';
 import { createContextManager } from '../../packages/context-builder/index.ts';
 import { createModelClient } from '../../packages/llm-client/index.ts';
 import { createCodingToolHost } from '../../packages/tool-gateway/index.ts';
-import { createWorkspaceService } from '../../packages/workspace-manager/index.ts';
+import { createWorkspaceRegistry, createWorkspaceService, type WorkspaceRecord } from '../../packages/workspace-manager/index.ts';
 import { createSessionRepository } from '../../packages/session-store/index.ts';
-import type { AgentEvent, PendingConfirm, PendingCommandConfirm } from '../../packages/shared/types.ts';
+import type { AgentEvent, PendingConfirm, PendingCommandConfirm, Session, SessionScope } from '../../packages/shared/types.ts';
 import { validateCommand } from '../../packages/tool-gateway/command-safety.ts';
 import type { CommandConfirmHook } from '../../packages/tool-gateway/run-command.ts';
 import type { McpJsonRpcRequest } from '../../packages/mcp-server/index.ts';
@@ -208,13 +208,11 @@ function createConfirmHook(
 }
 
 // ── 模块级初始化 ──
-const workspaceService: WorkspaceService = createWorkspaceService({
-  rootDir: process.env.WORKSPACE_DIR,
-});
-const codingToolHost: CodingToolHost = createCodingToolHost(workspaceService);
-const contextManager = createContextManager(codingToolHost);
 const modelClient = createModelClient();
 const sessionRepository: SessionRepository = createSessionRepository();
+const workspaceRegistry = createWorkspaceRegistry({
+  registryFile: join(process.cwd(), 'workspaces', 'workspace-registry.json'),
+});
 const externalMcpConfigs: ExternalMcpServerConfig[] = (() => {
   const raw = process.env.EXTERNAL_MCP_SERVERS;
   if (!raw) return [];
@@ -226,15 +224,104 @@ const externalMcpConfigs: ExternalMcpServerConfig[] = (() => {
   }
 })();
 const externalMcpRegistry = createExternalMcpRegistry(externalMcpConfigs);
-const skillRegistry: SkillRegistry = createSkillRegistry({
-  workspaceRoot: workspaceService.getRootDir(),
-});
-const codingAgent: CodingAgent = createCodingAgent(contextManager, codingToolHost, modelClient, sessionRepository, externalMcpRegistry, skillRegistry);
 const templateGenerator = createTemplateGenerator();
 
-await workspaceService.loadFromDisk();
-await sessionRepository.getOrCreateCurrentSession();
-await skillRegistry.loadAll();
+type WorkspaceRuntime = {
+  workspace: WorkspaceRecord;
+  workspaceService: WorkspaceService;
+  codingToolHost: CodingToolHost;
+  skillRegistry: SkillRegistry;
+  codingAgent: CodingAgent;
+};
+
+const workspaceRuntimes = new Map<string, WorkspaceRuntime>();
+
+async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: boolean } = {}): Promise<WorkspaceRuntime> {
+  let workspace: WorkspaceRecord;
+  if (options.allowCreate) {
+    const bootstrap = createWorkspaceService({ rootDir });
+    await bootstrap.loadFromDisk();
+    workspace = await workspaceRegistry.register(bootstrap.getRootDir());
+  } else {
+    if (!rootDir) throw new Error('Workspace root path is required');
+    workspace = await workspaceRegistry.register(rootDir);
+  }
+  const cached = workspaceRuntimes.get(workspace.workspaceId);
+  if (cached) {
+    await cached.workspaceService.loadFromDisk();
+    await cached.skillRegistry.reload();
+    return cached;
+  }
+  const stateDir = join(dirname(sessionRepository.sessionsDir), 'workspace-data', workspace.workspaceId);
+  const nextWorkspaceService = createWorkspaceService({
+    rootDir: workspace.canonicalRootPath,
+    stateDir,
+  });
+  await nextWorkspaceService.loadFromDisk();
+  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService);
+  const nextContextManager = createContextManager(nextCodingToolHost);
+  const nextSkillRegistry = createSkillRegistry({ workspaceRoot: workspace.canonicalRootPath });
+  await nextSkillRegistry.loadAll();
+  const nextCodingAgent = createCodingAgent(
+    nextContextManager,
+    nextCodingToolHost,
+    modelClient,
+    sessionRepository,
+    externalMcpRegistry,
+    nextSkillRegistry,
+    { scope: { kind: 'workspace', workspaceId: workspace.workspaceId }, rootPath: workspace.canonicalRootPath },
+  );
+  const runtime = {
+    workspace,
+    workspaceService: nextWorkspaceService,
+    codingToolHost: nextCodingToolHost,
+    skillRegistry: nextSkillRegistry,
+    codingAgent: nextCodingAgent,
+  };
+  workspaceRuntimes.set(workspace.workspaceId, runtime);
+  return runtime;
+}
+
+async function runtimeForSession(session: Session): Promise<WorkspaceRuntime> {
+  if (session.scope.kind !== 'workspace') throw new HttpError(409, 'WORKSPACE_REQUIRED');
+  const cached = workspaceRuntimes.get(session.scope.workspaceId);
+  if (cached) return cached;
+  const workspace = await workspaceRegistry.resolveAvailable(session.scope.workspaceId);
+  return loadWorkspaceRuntime(workspace.canonicalRootPath);
+}
+
+let activeRuntime = await loadWorkspaceRuntime(process.env.WORKSPACE_DIR, { allowCreate: true });
+let workspaceService = activeRuntime.workspaceService;
+let codingToolHost = activeRuntime.codingToolHost;
+let skillRegistry = activeRuntime.skillRegistry;
+let codingAgent = activeRuntime.codingAgent;
+
+function activeScope(): SessionScope {
+  return { kind: 'workspace', workspaceId: activeRuntime.workspace.workspaceId };
+}
+
+function isActiveSession(session: Session): boolean {
+  return session.scope.kind === 'workspace'
+    && session.scope.workspaceId === activeRuntime.workspace.workspaceId;
+}
+
+async function loadActiveSession(sessionId: string): Promise<Session> {
+  const session = await sessionRepository.loadSession(sessionId);
+  if (!session || !isActiveSession(session)) {
+    throw new HttpError(404, 'Session not found in the active workspace');
+  }
+  return session;
+}
+
+function activateRuntime(runtime: WorkspaceRuntime): void {
+  activeRuntime = runtime;
+  workspaceService = runtime.workspaceService;
+  codingToolHost = runtime.codingToolHost;
+  skillRegistry = runtime.skillRegistry;
+  codingAgent = runtime.codingAgent;
+}
+
+await sessionRepository.getCurrentSession(activeScope());
 
 // ── 静态文件 ──
 async function tryReadStaticFile(pathname: string) {
@@ -407,36 +494,41 @@ export function startRuntimeServer() {
 
     // ── GET /api/meta ──
     if (url.pathname === '/api/meta') {
-      const session = await sessionRepository.getOrCreateCurrentSession();
+      const session = await sessionRepository.getCurrentSession(activeScope());
       sendJson(res, 200, {
         appName: 'DexCode',
         llmEnabled: modelClient.model !== 'mock',
         provider: modelClient.model === 'mock' ? 'mock' : (process.env.LLM_PROVIDER || 'openai-compat'),
-        sessionId: session.sessionId,
+        sessionId: session?.sessionId ?? null,
+        workspaceId: activeRuntime.workspace.workspaceId,
       });
       return;
     }
 
     // ── GET /api/session ──
     if (url.pathname === '/api/session' && req.method === 'GET') {
-      const session = await sessionRepository.getOrCreateCurrentSession();
+      const session = await sessionRepository.getCurrentSession(activeScope());
       sendJson(res, 200, {
-        sessionId: session.sessionId,
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt,
-        messageCount: session.messages.length,
-        taskSummaries: session.taskSummaries,
-        activeTaskId: session.activeTaskId,
+        sessionId: session?.sessionId ?? null,
+        scope: session?.scope ?? activeScope(),
+        createdAt: session?.createdAt ?? null,
+        updatedAt: session?.updatedAt ?? null,
+        messageCount: session?.messages.length ?? 0,
+        taskSummaries: session?.taskSummaries ?? [],
+        activeTaskId: session?.activeTaskId ?? null,
       });
       return;
     }
 
     // ── POST /api/session（新建会话）──
     if (url.pathname === '/api/session' && req.method === 'POST') {
-      const newSession = await sessionRepository.createSession();
+      const { kind } = await parseBody<{ kind?: 'general' | 'workspace' }>(req);
+      const scope = kind === 'general' ? { kind: 'general' } as const : activeScope();
       sendJson(res, 200, {
-        sessionId: newSession.sessionId,
-        createdAt: newSession.createdAt,
+        sessionId: null,
+        scope,
+        createdAt: null,
+        materialized: false,
         isNew: true,
       });
       return;
@@ -444,7 +536,8 @@ export function startRuntimeServer() {
 
     // ── GET /api/sessions（历史会话列表）──
     if (url.pathname === '/api/sessions' && req.method === 'GET') {
-      const sessions = await sessionRepository.listSessions();
+      const scope = url.searchParams.get('scope') === 'general' ? { kind: 'general' } as const : activeScope();
+      const sessions = await sessionRepository.listSessions(scope);
       sendJson(res, 200, { sessions });
       return;
     }
@@ -454,9 +547,10 @@ export function startRuntimeServer() {
       const { sessionId } = await parseBody<{ sessionId?: string }>(req);
       if (!sessionId) { sendJson(res, 400, { error: 'sessionId is required' }); return; }
       try {
-        const session = await sessionRepository.switchSession(sessionId);
+        const session = await sessionRepository.switchSession(sessionId, activeScope());
         sendJson(res, 200, {
           sessionId: session.sessionId,
+          scope: session.scope,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
           messages: session.messages,
@@ -471,6 +565,8 @@ export function startRuntimeServer() {
     // ── DELETE /api/session/:id ──
     if (url.pathname.startsWith('/api/session/') && !url.pathname.includes('/export') && req.method === 'DELETE') {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', ''));
+      const session = await loadActiveSession(sessionId);
+      if (session.activeTaskId) throw new HttpError(409, 'Cannot delete a Session with an active Run');
       const ok = await sessionRepository.deleteSession(sessionId);
       sendJson(res, ok ? 200 : 404, ok ? { ok: true, sessionId } : { error: 'Session not found' });
       return;
@@ -481,6 +577,7 @@ export function startRuntimeServer() {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', ''));
       const meta = await parseBody<{ title?: string; archived?: boolean }>(req);
       try {
+        await loadActiveSession(sessionId);
         const updated = await sessionRepository.updateSessionMeta(sessionId, meta);
         sendJson(res, 200, updated);
       } catch (err) {
@@ -493,6 +590,7 @@ export function startRuntimeServer() {
     if (url.pathname.startsWith('/api/session/') && url.pathname.endsWith('/export') && req.method === 'GET') {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', '').replace('/export', ''));
       try {
+        await loadActiveSession(sessionId);
         const session = await sessionRepository.exportSession(sessionId);
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
@@ -508,7 +606,7 @@ export function startRuntimeServer() {
     // ── GET /api/sessions/search ──
     if (url.pathname === '/api/sessions/search' && req.method === 'GET') {
       const query = url.searchParams.get('q') ?? '';
-      const results = await sessionRepository.searchSessions(query);
+      const results = await sessionRepository.searchSessions(query, activeScope());
       sendJson(res, 200, { sessions: results });
       return;
     }
@@ -573,13 +671,13 @@ export function startRuntimeServer() {
 
     // ── POST /api/workspace/load（切换工作区目录）──
     if (url.pathname === '/api/project-memory' && req.method === 'GET') {
-      sendJson(res, 200, await sessionRepository.getProjectMemory());
+      sendJson(res, 200, await sessionRepository.getProjectMemory(activeRuntime.workspace.workspaceId));
       return;
     }
 
     if (url.pathname === '/api/project-memory' && req.method === 'PUT') {
       const { content } = await parseBody<RequestContext>(req);
-      const updated = await sessionRepository.writeProjectMemory(content ?? '');
+      const updated = await sessionRepository.writeProjectMemory(content ?? '', activeRuntime.workspace.workspaceId);
       sendJson(res, 200, { ok: true, ...updated });
       return;
     }
@@ -591,7 +689,7 @@ export function startRuntimeServer() {
         return;
       }
       try {
-        const updated = await sessionRepository.appendProjectMemory(entry, section);
+        const updated = await sessionRepository.appendProjectMemory(entry, section, activeRuntime.workspace.workspaceId);
         sendJson(res, 200, { ok: true, ...updated });
       } catch (err) {
         sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -606,15 +704,16 @@ export function startRuntimeServer() {
         return;
       }
       try {
-        const tree = await workspaceService.switchRoot(dirPath);
-        skillRegistry.setWorkspaceRoot(workspaceService.getRootDir());
-        await skillRegistry.reload();
-        const newSession = await sessionRepository.createSession();
+        const runtime = await loadWorkspaceRuntime(dirPath);
+        activateRuntime(runtime);
+        const tree = workspaceService.listTree();
         sendJson(res, 200, {
           ok: true,
+          workspaceId: activeRuntime.workspace.workspaceId,
           rootDir: workspaceService.getRootDir(),
           tree,
-          sessionId: newSession.sessionId,
+          sessionId: null,
+          sessionMaterialized: false,
         });
       } catch (err) {
         sendJson(res, 400, { error: `无法加载路径：${err instanceof Error ? err.message : String(err)}` });
@@ -919,9 +1018,14 @@ export function startRuntimeServer() {
     if (url.pathname === '/api/agent/chat' && req.method === 'POST') {
       const { prompt, selectedFile, sessionId: reqSessionId } = await parseBody<ChatPayload>(req);
 
-      const session = reqSessionId
-        ? (await sessionRepository.loadSession(reqSessionId) ?? await sessionRepository.getOrCreateCurrentSession())
-        : await sessionRepository.getOrCreateCurrentSession();
+      let session: Session;
+      if (reqSessionId) {
+        session = await loadActiveSession(reqSessionId);
+      } else {
+        session = await sessionRepository.createSession(activeScope());
+      }
+      if (!isActiveSession(session)) throw new HttpError(409, 'SESSION_WORKSPACE_MISMATCH');
+      const sessionRuntime = await runtimeForSession(session);
 
       res.writeHead(200, sseHeaders());
 
@@ -941,7 +1045,7 @@ export function startRuntimeServer() {
       const commandConfirmHook = createCommandConfirmHook(session.sessionId, taskId, writeEvent);
 
       try {
-        await codingAgent.runTask(
+        await sessionRuntime.codingAgent.runTask(
           session.sessionId,
           prompt ?? '',
           selectedFile ?? null,

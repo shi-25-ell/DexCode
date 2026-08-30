@@ -721,7 +721,7 @@ loadWorkspaceBtn.addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path }),
     });
-    const data = await res.json() as { ok?: boolean; tree?: WorkspaceNode[]; sessionId?: string; error?: string };
+    const data = await res.json() as { ok?: boolean; tree?: WorkspaceNode[]; sessionId?: string | null; error?: string };
 
     if (!data.ok) {
       setWorkspaceError(data.error ?? '加载失败');
@@ -733,10 +733,12 @@ loadWorkspaceBtn.addEventListener('click', async () => {
     workspaceCache = data.tree ?? [];
     renderTree(workspaceCache);
 
-    if (data.sessionId) {
-      currentSessionId = data.sessionId;
-      const shortId = data.sessionId.replace('session-', '').slice(-6);
+    currentSessionId = data.sessionId ?? null;
+    if (currentSessionId) {
+      const shortId = currentSessionId.replace('session-', '').slice(-6);
       sessionBadge.textContent = `会话 #${shortId}`;
+    } else {
+      sessionBadge.textContent = '新会话';
     }
 
     chatLog.innerHTML = '';
@@ -1913,28 +1915,12 @@ async function streamChat(prompt: string) {
   return finalResult;
 }
 
-async function createNewSession() {
-  try {
-    const response = await fetch('/api/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    if (!response.ok) throw new Error('创建会话失败');
-    const data = await response.json() as { sessionId?: string };
-    if (!data.sessionId) throw new Error('未返回会话 ID');
-    currentSessionId = data.sessionId;
-    const shortId = data.sessionId.replace('session-', '').slice(-6);
-    sessionBadge.textContent = `会话 #${shortId}`;
-    chatLog.innerHTML = '';
-    hideSessionDropdown();
-    showToast({ kind: 'info', title: '已创建新会话', message: `当前会话 #${shortId}` });
-  } catch (error) {
-    showToast({
-      kind: 'error',
-      title: '创建会话失败',
-      message: (error as Error).message,
-    });
-  }
+function createNewSession() {
+  currentSessionId = null;
+  sessionBadge.textContent = '新会话';
+  chatLog.innerHTML = '';
+  hideSessionDropdown();
+  showToast({ kind: 'info', title: '已准备新会话', message: '发送第一条消息后创建' });
 }
 
 function hideSessionDropdown() {
@@ -2335,6 +2321,7 @@ applyLayoutWidths();
 initResizers();
 loadExpandedFolders();
 loadWorkspace();
+sessionBadge.textContent = '新会话';
 
 // 添加模板生成按钮到新建菜单
 const newItemMenuElement = newItemMenu;

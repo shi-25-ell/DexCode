@@ -5,7 +5,9 @@ import type {
   CompactionCheckpoint,
   ContextManifest,
   RunReport,
+  RunContext,
   Session,
+  SessionScope,
   SystemMessage,
   TaskSummary,
   UserMessage,
@@ -151,17 +153,26 @@ function buildSystemPrompt(
   projectMemory: string,
   taskSummaries: TaskSummary[],
   skillsBlock = '',
+  scope: SessionScope = { kind: 'general' },
 ): string {
   const parts = [
-    'You are DexCode, a coding agent responsible for tasks in the active workspace.',
-    'Before using normal tools, check Available Skills. If a skill directly matches, read and activate it before following its instructions.',
-    'Use tools for file reads, writes, and commands. Do not fabricate tool results.',
-    'For existing files, prefer patch_file. Use write_file only for new files or deliberate full rewrites.',
+    scope.kind === 'workspace'
+      ? 'You are DexCode, a coding agent responsible for tasks in this Session workspace.'
+      : 'You are DexCode in general conversation mode. No workspace is attached, so workspace file and command tools are unavailable.',
     'Use ask_user only for destructive actions or decisions that cannot be safely inferred.',
     'When the task is done, summarize results in concise Chinese.',
   ];
+  if (scope.kind === 'workspace') {
+    parts.splice(1, 0,
+      'Before using normal tools, check Available Skills. If a skill directly matches, read and activate it before following its instructions.',
+      'Use tools for file reads, writes, and commands. Do not fabricate tool results.',
+      'For existing files, prefer patch_file. Use write_file only for new files or deliberate full rewrites.',
+    );
+  }
   if (skillsBlock.trim()) parts.push('', skillsBlock.trim());
-  parts.push('', '## Workspace Summary', context.workspaceSummary || '(empty workspace)');
+  if (scope.kind === 'workspace') {
+    parts.push('', '## Workspace Summary', context.workspaceSummary || '(empty workspace)');
+  }
   const memory = context.projectMemorySummary?.trim() || projectMemory.trim();
   if (memory) parts.push('', '## Project Memory', memory);
   const recent = taskSummaries.slice(-5);
@@ -200,8 +211,15 @@ export function createCodingAgent(
   sessionRepository?: SessionRepository,
   externalMcpRegistry?: ReturnType<typeof createExternalMcpRegistry>,
   skillRegistry?: SkillRegistry,
+  environment?: { scope: SessionScope; rootPath?: string },
 ) {
-  const executor = createExecutor(codingToolHost, externalMcpRegistry, skillRegistry);
+  if (!environment) throw new Error('CodingAgent environment is required');
+  const agentEnvironment = environment;
+  const effectiveSkillRegistry = agentEnvironment.scope.kind === 'workspace' ? skillRegistry : undefined;
+  const effectiveToolHost = agentEnvironment.scope.kind === 'general'
+    ? { ...codingToolHost, isToolEnabled: () => false }
+    : codingToolHost;
+  const executor = createExecutor(effectiveToolHost, externalMcpRegistry, effectiveSkillRegistry);
 
   async function execute(
     runId: string,
@@ -225,18 +243,45 @@ export function createCodingAgent(
     if (!sessionRepository) throw new Error('sessionRepository is required for runTask');
     const session = await sessionRepository.loadSession(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
+    const expectedScope = JSON.stringify(agentEnvironment.scope);
+    if (JSON.stringify(session.scope) !== expectedScope) {
+      throw new Error('Session scope does not match the Agent environment');
+    }
+    const runContext: RunContext = agentEnvironment.scope.kind === 'workspace'
+      ? {
+          scope: agentEnvironment.scope,
+          workspace: {
+            workspaceId: agentEnvironment.scope.workspaceId,
+            rootPath: agentEnvironment.rootPath ?? '',
+          },
+        }
+      : { scope: agentEnvironment.scope };
+    if (agentEnvironment.scope.kind === 'workspace' && !runContext.workspace?.rootPath) {
+      throw new Error('Workspace Agent environment requires a resolved root path');
+    }
     const runId = options.runId ?? crypto.randomUUID();
     const startedAt = new Date().toISOString();
     onEvent({ type: 'task_status', taskId: runId, status: 'planning' });
-    const projectMemory = await sessionRepository.readProjectMemory();
-    const context = await contextManager.buildForPrompt(userPrompt, selectedFile, { projectMemory });
+    const projectMemory = await sessionRepository.readProjectMemory(
+      agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : undefined,
+    );
+    const context = agentEnvironment.scope.kind === 'workspace'
+      ? await contextManager.buildForPrompt(userPrompt, selectedFile, { projectMemory })
+      : {
+          prompt: userPrompt,
+          selectedFile: null,
+          selectedFileContent: null,
+          workspaceSummary: '',
+          projectMemorySummary: '',
+          contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
+        };
     const system: SystemMessage = {
       role: 'system',
-      content: buildSystemPrompt(context, projectMemory, session.taskSummaries, skillsBlock(skillRegistry, userPrompt)),
+      content: buildSystemPrompt(context, projectMemory, session.taskSummaries, skillsBlock(effectiveSkillRegistry, userPrompt), agentEnvironment.scope),
     };
     const user: UserMessage = { role: 'user', content: userPrompt };
     const history = projectHistory(runId, session.messages);
-    await sessionRepository.beginRun({ sessionId, runId, userMessage: user });
+    await sessionRepository.beginRun({ sessionId, runId, userMessage: user, context: runContext });
     await sessionRepository.commitContext({ sessionId, runId, manifest: history.manifest, checkpoint: history.checkpoint });
     let result: LoopResult;
     try {
@@ -282,6 +327,7 @@ export function createCodingAgent(
     const report: RunReport = {
       version: 1,
       runId,
+      context: runContext,
       status: result.status,
       terminationReason: result.terminationReason,
       ...(result.finalContent ? { finalAnswer: result.finalContent } : {}),
@@ -311,10 +357,19 @@ export function createCodingAgent(
     onChunk: ((chunk: unknown) => void) | null = null,
     options: { signal?: AbortSignal } = {},
   ) {
-    const context = await contextManager.buildForPrompt(prompt, selectedFile);
+    const context = agentEnvironment.scope.kind === 'workspace'
+      ? await contextManager.buildForPrompt(prompt, selectedFile)
+      : {
+          prompt,
+          selectedFile: null,
+          selectedFileContent: null,
+          workspaceSummary: '',
+          projectMemorySummary: '',
+          contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
+        };
     const system: SystemMessage = {
       role: 'system',
-      content: buildSystemPrompt(context, '', [], skillsBlock(skillRegistry, prompt)),
+      content: buildSystemPrompt(context, '', [], skillsBlock(effectiveSkillRegistry, prompt), agentEnvironment.scope),
     };
     const onEvent = (event: AgentEvent) => onChunk?.(event);
     const result = await execute(crypto.randomUUID(), [system, { role: 'user', content: prompt }], onEvent, undefined, options.signal);

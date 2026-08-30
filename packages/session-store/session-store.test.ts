@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { rm } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
-import type { RunReport, TaskSummary } from '../shared/types.ts';
+import type { RunContext, RunReport, SessionScope, TaskSummary } from '../shared/types.ts';
 import { createSessionRepository } from './index.ts';
 
 function terminal(runId: string): { report: RunReport; summary: TaskSummary } {
@@ -36,13 +36,23 @@ function terminal(runId: string): { report: RunReport; summary: TaskSummary } {
   };
 }
 
+const generalContext: RunContext = { scope: { kind: 'general' } };
+
+function workspaceScope(workspaceId: string): SessionScope {
+  return { kind: 'workspace', workspaceId };
+}
+
+function workspaceContext(workspaceId: string, rootPath: string): RunContext {
+  return { scope: workspaceScope(workspaceId), workspace: { workspaceId, rootPath } };
+}
+
 test('Session repository commits one terminal report and preserves ledger order', async () => {
   const repository = createSessionRepository({ projectId: `test-core-${crypto.randomUUID()}` });
   const projectDir = dirname(repository.sessionsDir);
   try {
     const session = await repository.createSession();
     const runId = crypto.randomUUID();
-    await repository.beginRun({ sessionId: session.sessionId, runId, userMessage: { role: 'user', content: 'test' } });
+    await repository.beginRun({ sessionId: session.sessionId, runId, userMessage: { role: 'user', content: 'test' }, context: generalContext });
     await repository.commitContext({
       sessionId: session.sessionId,
       runId,
@@ -65,6 +75,7 @@ test('Session repository commits one terminal report and preserves ledger order'
     const loaded = await repository.loadSession(session.sessionId);
     assert.equal(loaded?.activeTaskId, null);
     assert.equal(loaded?.runReports?.length, 1);
+    assert.deepEqual(loaded?.runReports?.[0]?.context, generalContext);
     assert.equal(loaded?.contextManifests?.at(-1)?.requestDigest, 'fnv1a-test');
     assert.deepEqual(loaded?.ledger?.map((record) => record.type), ['run_started', 'message', 'context_committed', 'message', 'run_terminal']);
   } finally {
@@ -79,13 +90,137 @@ test('a new repository instance recovers an interrupted Run exactly once', async
   try {
     const session = await firstRepository.createSession();
     const runId = crypto.randomUUID();
-    await firstRepository.beginRun({ sessionId: session.sessionId, runId, userMessage: { role: 'user', content: 'test' } });
+    await firstRepository.beginRun({ sessionId: session.sessionId, runId, userMessage: { role: 'user', content: 'test' }, context: generalContext });
     const reopened = createSessionRepository({ projectId });
     const recovered = await reopened.loadSession(session.sessionId);
     const loadedAgain = await reopened.loadSession(session.sessionId);
     assert.equal(recovered?.activeTaskId, null);
     assert.equal(recovered?.runReports?.at(-1)?.terminationReason, 'recovered_interruption');
     assert.equal(loadedAgain?.runReports?.length, 1);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('Session repository isolates current pointers and listings by scope', async () => {
+  const repository = createSessionRepository({ projectId: `test-scope-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  const scopeA = workspaceScope('workspace-a');
+  const scopeB = workspaceScope('workspace-b');
+  try {
+    const [sessionA, sessionB, general] = await Promise.all([
+      repository.createSession(scopeA),
+      repository.createSession(scopeB),
+      repository.createSession(),
+    ]);
+    await Promise.all([
+      repository.appendMessages(sessionA.sessionId, [{ role: 'user', content: 'A' }]),
+      repository.appendMessages(sessionB.sessionId, [{ role: 'user', content: 'B' }]),
+      repository.appendMessages(general.sessionId, [{ role: 'user', content: 'general' }]),
+    ]);
+
+    assert.equal((await repository.getCurrentSession(scopeA))?.sessionId, sessionA.sessionId);
+    assert.equal((await repository.getCurrentSession(scopeB))?.sessionId, sessionB.sessionId);
+    assert.equal((await repository.getCurrentSession())?.sessionId, general.sessionId);
+    assert.deepEqual((await repository.listSessions(scopeA)).map((session) => session.sessionId), [sessionA.sessionId]);
+    assert.deepEqual((await repository.listSessions(scopeB)).map((session) => session.sessionId), [sessionB.sessionId]);
+    await assert.rejects(
+      () => repository.switchSession(sessionA.sessionId, scopeB),
+      /does not belong to the active workspace/,
+    );
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('reading an empty workspace current Session does not materialize a conversation', async () => {
+  const repository = createSessionRepository({ projectId: `test-lazy-session-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  const scope = workspaceScope('workspace-lazy');
+  try {
+    const current = await repository.getCurrentSession(scope);
+    assert.equal(current, null);
+    assert.equal((await repository.listSessions(scope)).length, 0);
+
+    const pending = await repository.createSession(scope);
+    assert.equal(await repository.getCurrentSession(scope), null);
+    assert.equal((await repository.listSessions(scope)).length, 0);
+
+    await repository.beginRun({
+      sessionId: pending.sessionId,
+      runId: 'run-first-interaction',
+      userMessage: { role: 'user', content: 'hello' },
+      context: workspaceContext('workspace-lazy', 'D:\\workspace-lazy'),
+    });
+    assert.equal((await repository.getCurrentSession(scope))?.sessionId, pending.sessionId);
+    assert.deepEqual((await repository.listSessions(scope)).map((session) => session.sessionId), [pending.sessionId]);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('Session repository rejects a Run whose workspace differs from its Session scope', async () => {
+  const repository = createSessionRepository({ projectId: `test-run-scope-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  const scope = workspaceScope('workspace-a');
+  try {
+    const session = await repository.createSession(scope);
+    await assert.rejects(
+      () => repository.beginRun({
+        sessionId: session.sessionId,
+        runId: 'run-wrong',
+        userMessage: { role: 'user', content: 'test' },
+        context: workspaceContext('workspace-b', 'D:\\workspace-b'),
+      }),
+      /does not match Session scope/,
+    );
+
+    await repository.beginRun({
+      sessionId: session.sessionId,
+      runId: 'run-correct',
+      userMessage: { role: 'user', content: 'test' },
+      context: workspaceContext('workspace-a', 'D:\\workspace-a'),
+    });
+    const loaded = await repository.loadSession(session.sessionId);
+    const started = loaded?.ledger?.find((record) => record.type === 'run_started');
+    assert.deepEqual(started && 'context' in started ? started.context : undefined, workspaceContext('workspace-a', 'D:\\workspace-a'));
+    await assert.rejects(() => repository.deleteSession(session.sessionId), /active Run/);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('legacy Sessions without a scope migrate conservatively to general', async () => {
+  const repository = createSessionRepository({ projectId: `test-legacy-scope-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  const sessionId = 'session-legacy';
+  try {
+    await mkdir(repository.sessionsDir, { recursive: true });
+    await writeFile(join(repository.sessionsDir, `${sessionId}.json`), JSON.stringify({
+      sessionId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [{ role: 'user', content: 'legacy' }],
+      taskSummaries: [],
+      activeTaskId: null,
+    }), 'utf8');
+    const loaded = await repository.loadSession(sessionId);
+    assert.deepEqual(loaded?.scope, { kind: 'general' });
+    assert.equal((await repository.listSessions({ kind: 'general' })).length, 1);
+    assert.equal((await repository.listSessions(workspaceScope('workspace-a'))).length, 0);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('project memory is isolated by workspace identity', async () => {
+  const repository = createSessionRepository({ projectId: `test-memory-scope-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    await repository.writeProjectMemory('memory-a', 'workspace-a');
+    await repository.writeProjectMemory('memory-b', 'workspace-b');
+    assert.equal(await repository.readProjectMemory('workspace-a'), 'memory-a\n');
+    assert.equal(await repository.readProjectMemory('workspace-b'), 'memory-b\n');
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }
