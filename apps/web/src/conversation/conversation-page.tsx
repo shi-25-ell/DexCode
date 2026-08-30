@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUp, Paperclip, Square } from 'lucide-react';
-import { type FormEvent, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { ArrowDown, ArrowUp, Square } from 'lucide-react';
+import { type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useNavigate } from 'react-router-dom';
 import remarkGfm from 'remark-gfm';
@@ -8,6 +8,7 @@ import { apiJson, getConversation, scopeWorkspaceRef, streamConversation } from 
 import { AppShell } from '../shell/app-shell';
 import type { ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, StreamEvent, ToolPresentation } from '../types';
 import { ToolCard } from './tool-card';
+import { isTimelineNearBottom } from './scroll-follow';
 
 type LiveState = {
   items: ConversationItem[];
@@ -45,7 +46,7 @@ export function conversationReducer(state: LiveState, action: Action): LiveState
   if (action.type === 'chunk') {
     const items = [...state.items];
     const last = items.at(-1);
-    if (last?.kind === 'assistant' && last.id.startsWith('live-assistant-')) last.content += action.content;
+    if (last?.kind === 'assistant' && last.id.startsWith('live-assistant-')) items[items.length - 1] = { ...last, content: last.content + action.content };
     else items.push({ id: `live-assistant-${crypto.randomUUID()}`, kind: 'assistant', content: action.content });
     return { ...state, items };
   }
@@ -71,12 +72,12 @@ function formatTokens(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value);
 }
 
-function ContextLabel({ usage }: { usage: ContextUsage }) {
-  if (usage.percentage === undefined) return <span>上下文未知</span>;
+function ContextLabel({ usage, running }: { usage: ContextUsage; running: boolean }) {
+  if (usage.percentage === undefined) return <span>{running ? '上下文计算中' : '上下文未知'}</span>;
   const detail = usage.usedTokens !== undefined && usage.limitTokens !== undefined
     ? `${formatTokens(usage.usedTokens)} / ${formatTokens(usage.limitTokens)} tokens`
     : '';
-  return <span title={`${detail}${usage.source === 'estimated' ? ' · 估算' : ''}`}>上下文 {usage.percentage}%{detail ? ` · ${detail}` : ''}{usage.source === 'estimated' ? ' · 估算' : ''}</span>;
+  return <span title={`${detail}${usage.source === 'estimated' ? ' · 估算' : ''}`}>上下文 {usage.percentage}%{usage.source === 'estimated' ? ' · 估算' : ''}</span>;
 }
 
 function ApprovalCard({ item, workspaceRef, onResolve }: {
@@ -111,8 +112,10 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const [prompt, setPrompt] = useState('');
   const controllerRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
-  const liveStatusRef = useRef<LiveState['status']>('idle');
+  const [atBottom, setAtBottom] = useState(true);
+  const streamingRef = useRef(false);
   const workspaceRef = scopeWorkspaceRef(scope);
   const snapshot = useQuery({
     queryKey: ['conversation', scope, conversationRef],
@@ -126,22 +129,40 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   });
 
   useEffect(() => {
-    if (snapshot.data && liveStatusRef.current !== 'running' && liveStatusRef.current !== 'waiting') {
+    if (snapshot.data && !streamingRef.current) {
       dispatch({ type: 'hydrate', snapshot: snapshot.data });
     }
   }, [snapshot.data]);
 
   useEffect(() => {
-    liveStatusRef.current = state.status;
-  }, [state.status]);
-
-  useEffect(() => {
+    stickToBottom.current = true;
+    setAtBottom(true);
     if (!conversationRef) dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], contextUsage: { source: 'unknown' } } });
   }, [conversationRef, scope.kind, scope.kind === 'workspace' ? scope.workspaceRef : 'general']);
 
-  useEffect(() => {
-    if (stickToBottom.current) scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+  useLayoutEffect(() => {
+    if (!stickToBottom.current) return;
+    const frame = requestAnimationFrame(() => {
+      const element = scrollRef.current;
+      if (!element) return;
+      element.scrollTop = element.scrollHeight;
+      setAtBottom(true);
+    });
+    return () => cancelAnimationFrame(frame);
   }, [state.items]);
+
+  useEffect(() => {
+    const timelineElement = timelineRef.current;
+    const scrollElement = scrollRef.current;
+    if (!timelineElement || !scrollElement || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottom.current) return;
+      scrollElement.scrollTop = scrollElement.scrollHeight;
+      setAtBottom(true);
+    });
+    observer.observe(timelineElement);
+    return () => observer.disconnect();
+  }, []);
 
   const handleStreamEvent = (event: StreamEvent) => {
     if (event.type === 'session' && event.isNew) {
@@ -169,6 +190,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     const content = prompt.trim();
     if (!content || state.status === 'running' || state.status === 'waiting') return;
     setPrompt('');
+    streamingRef.current = true;
     dispatch({ type: 'submit', content });
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -185,6 +207,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       if (!controller.signal.aborted) dispatch({ type: 'error', message: error instanceof Error ? error.message : '连接失败' });
     } finally {
       controllerRef.current = null;
+      streamingRef.current = false;
       dispatch({ type: 'status', status: 'idle' });
       await queryClient.invalidateQueries({ queryKey: ['conversations', scope] });
       await queryClient.invalidateQueries({ queryKey: ['conversation'] });
@@ -193,17 +216,40 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
 
   const stop = () => controllerRef.current?.abort();
   const timeline = useMemo(() => state.items, [state.items]);
+  const effectiveUsage = useMemo<ContextUsage>(() => {
+    const limitTokens = state.contextUsage.limitTokens ?? meta.data?.model.contextWindow;
+    const usedTokens = state.contextUsage.usedTokens ?? (state.items.length === 0 ? 0 : undefined);
+    return {
+      ...state.contextUsage,
+      ...(limitTokens !== undefined ? { limitTokens } : {}),
+      ...(usedTokens !== undefined ? { usedTokens } : {}),
+      ...(usedTokens !== undefined && limitTokens ? { percentage: Math.min(100, Math.round(usedTokens / limitTokens * 100)) } : {}),
+      ...(state.contextUsage.source === 'unknown' && usedTokens === 0 ? { source: 'estimated' as const } : {}),
+    };
+  }, [meta.data?.model.contextWindow, state.contextUsage, state.items.length]);
+  const scrollToBottom = () => {
+    stickToBottom.current = true;
+    const element = scrollRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+    setAtBottom(true);
+  };
   return (
     <AppShell scope={scope} conversationRef={conversationRef} title={state.title} status={state.status}>
-      <div
-        className="conversation-scroll"
-        ref={scrollRef}
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          stickToBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
-        }}
-      >
-        <div className="timeline">
+      <div className="conversation-layout">
+        <div
+          className="conversation-scroll"
+          ref={scrollRef}
+          tabIndex={0}
+          onWheel={(event) => { if (event.deltaY < 0) stickToBottom.current = false; }}
+          onTouchMove={() => { stickToBottom.current = false; }}
+          onKeyDown={(event) => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) stickToBottom.current = false; }}
+          onScroll={(event) => {
+            const nearBottom = isTimelineNearBottom(event.currentTarget);
+            stickToBottom.current = nearBottom;
+            setAtBottom(nearBottom);
+          }}
+        >
+          <div className="timeline" ref={timelineRef}>
           {timeline.length === 0 ? (
             <div className="empty-conversation">
               <h2>{scope.kind === 'general' ? '从一个问题开始' : '开始处理当前项目'}</h2>
@@ -217,10 +263,11 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} onResolve={(answer) => dispatch({ type: 'resolve', approvalRef: item.approvalRef, answer })} />;
             return <div key={item.id} className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;
           })}
+          </div>
+          {!atBottom ? <button className="back-to-bottom" onClick={scrollToBottom}><ArrowDown size={15} />回到底部</button> : null}
         </div>
-      </div>
-      <form className="composer-wrap" onSubmit={(event) => void submit(event)}>
-        <div className="composer">
+        <form className="composer-wrap" onSubmit={(event) => void submit(event)}>
+          <div className="composer">
           <textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
@@ -235,17 +282,17 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             rows={3}
           />
           <div className="composer-actions">
-            <button type="button" className="attach-button" aria-label="添加附件" title="附件支持将在后续版本提供"><Paperclip size={17} /></button>
             {state.status === 'running' || state.status === 'waiting'
               ? <button type="button" className="send-button stop" onClick={stop} aria-label="停止"><Square size={14} fill="currentColor" /></button>
               : <button type="submit" className="send-button" disabled={!prompt.trim()} aria-label="发送"><ArrowUp size={18} /></button>}
           </div>
           <div className="composer-footer">
             <span className="model-name"><i />{meta.data?.model.displayName ?? '模型信息加载中'}</span>
-            <span className="context-usage"><i /><ContextLabel usage={state.contextUsage} /></span>
+            <span className="context-usage"><i /><ContextLabel usage={effectiveUsage} running={state.status === 'running'} /></span>
           </div>
-        </div>
-      </form>
+          </div>
+        </form>
+      </div>
     </AppShell>
   );
 }

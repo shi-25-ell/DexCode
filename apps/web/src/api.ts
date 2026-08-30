@@ -39,6 +39,14 @@ export async function resolveWorkspace(path: string) {
   });
 }
 
+export async function suggestWorkspacePaths(prefix: string): Promise<string[]> {
+  return (await apiJson<{ suggestions: string[] }>(`/api/fs/suggest?prefix=${encodeURIComponent(prefix)}`)).suggestions;
+}
+
+export async function listRecentWorkspaces(): Promise<Array<{ path: string; displayName: string }>> {
+  return (await apiJson<{ workspaces: Array<{ path: string; displayName: string }> }>('/api/workspaces/recent')).workspaces;
+}
+
 export async function listConversations(scope: ConversationScope): Promise<ConversationListItem[]> {
   return (await apiJson<{ conversations: ConversationListItem[] }>(`/api/conversations?${scopeQuery(scope)}`, {
     workspaceRef: scopeWorkspaceRef(scope),
@@ -49,6 +57,25 @@ export async function getConversation(scope: ConversationScope, ref: string): Pr
   return (await apiJson<{ conversation: ConversationSnapshot }>(`/api/conversations/${encodeURIComponent(ref)}/view?${scopeQuery(scope)}`, {
     workspaceRef: scopeWorkspaceRef(scope),
   })).conversation;
+}
+
+export async function updateConversation(scope: ConversationScope, ref: string, meta: { title?: string; archived?: boolean }): Promise<void> {
+  await apiJson(`/api/conversations/${encodeURIComponent(ref)}?${scopeQuery(scope)}`, {
+    method: 'PATCH',
+    workspaceRef: scopeWorkspaceRef(scope),
+    body: JSON.stringify(meta),
+  });
+}
+
+export async function deleteConversation(scope: ConversationScope, ref: string): Promise<void> {
+  await apiJson(`/api/conversations/${encodeURIComponent(ref)}?${scopeQuery(scope)}`, {
+    method: 'DELETE',
+    workspaceRef: scopeWorkspaceRef(scope),
+  });
+}
+
+export function conversationExportUrl(scope: ConversationScope, ref: string): string {
+  return `/api/conversations/${encodeURIComponent(ref)}/export?${scopeQuery(scope)}${scope.kind === 'workspace' ? `&workspaceRef=${encodeURIComponent(scope.workspaceRef)}` : ''}`;
 }
 
 export async function streamConversation(input: {

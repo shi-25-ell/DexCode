@@ -1,6 +1,7 @@
 import { createOpenAiCompatibleModelClient } from './openai.ts';
 import { createMockModelClient } from './mock.ts';
 import type { ModelClient } from './types.ts';
+import { describeModel } from './model-descriptor.ts';
 
 export type {
   ChatOptions,
@@ -18,6 +19,7 @@ export type {
 export { collectModelTurn, ModelProtocolError, ModelTurnAccumulator } from './turn-accumulator.ts';
 export { createOpenAiCompatibleModelClient } from './openai.ts';
 export { createMockModelClient } from './mock.ts';
+export { describeModel } from './model-descriptor.ts';
 
 function getEnv(name: string): string {
   const value = process.env[name];
@@ -45,12 +47,13 @@ export function createModelClient(): ModelClient {
     return createMockModelClient();
   }
 
+  const descriptor = describeModel(model, baseUrl);
   return createOpenAiCompatibleModelClient({
     baseUrl,
     apiKey,
     model,
-    displayName: getEnv('LLM_DISPLAY_NAME') || model,
-    contextWindow: getEnvNumber('LLM_CONTEXT_WINDOW'),
+    displayName: getEnv('LLM_DISPLAY_NAME') || descriptor.displayName,
+    contextWindow: getEnvNumber('LLM_CONTEXT_WINDOW') ?? descriptor.contextWindow,
     providerDisplayName: getEnv('LLM_PROVIDER_DISPLAY_NAME') || undefined,
     doubaoCompat: provider === 'doubao',
     defaults: {

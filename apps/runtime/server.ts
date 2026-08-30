@@ -12,6 +12,7 @@ import { validateCommand } from '../../packages/tool-gateway/command-safety.ts';
 import type { CommandConfirmHook } from '../../packages/tool-gateway/run-command.ts';
 import type { McpJsonRpcRequest } from '../../packages/mcp-server/index.ts';
 import { createExternalMcpRegistry, type ExternalMcpServerConfig } from '../../packages/mcp-client/index.ts';
+import { createExternalMcpConfigStore } from '../../packages/mcp-client/config-store.ts';
 import { createSkillRegistry, importSkill, previewSkillImport, type SkillImportRequest } from '../../packages/skill-system/index.ts';
 import { createTemplateGenerator } from '../../packages/template-generator/index.ts';
 import { createSuccessResponse } from '../../packages/shared/index.ts';
@@ -216,7 +217,10 @@ const sessionRepository: SessionRepository = createSessionRepository();
 const workspaceRegistry = createWorkspaceRegistry({
   registryFile: join(process.cwd(), 'workspaces', 'workspace-registry.json'),
 });
-const externalMcpConfigs: ExternalMcpServerConfig[] = (() => {
+const externalMcpConfigStore = createExternalMcpConfigStore({
+  file: join(process.cwd(), 'workspaces', 'external-mcp-servers.json'),
+});
+const environmentMcpConfigs: ExternalMcpServerConfig[] = (() => {
   const raw = process.env.EXTERNAL_MCP_SERVERS;
   if (!raw) return [];
   try {
@@ -226,7 +230,8 @@ const externalMcpConfigs: ExternalMcpServerConfig[] = (() => {
     return [];
   }
 })();
-const externalMcpRegistry = createExternalMcpRegistry(externalMcpConfigs);
+let externalMcpConfigs = await externalMcpConfigStore.read(environmentMcpConfigs);
+const externalMcpRegistry = createExternalMcpRegistry(externalMcpConfigs.filter((config) => config.enabled !== false));
 const templateGenerator = createTemplateGenerator();
 const capabilityRegistry = createCapabilityRegistry({
   disabled: (process.env.DEX_DISABLED_CAPABILITIES ?? '').split(',').map((value) => value.trim()).filter(Boolean),
@@ -240,12 +245,26 @@ type WorkspaceRuntime = {
   codingAgent: CodingAgent;
 };
 
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    && Object.values(value as Record<string, unknown>).every((item) => typeof item === 'string');
+}
+
 type ConversationRunPayload = {
   prompt?: string;
   conversationRef?: string;
   clientRequestId?: string;
   scope?: { kind?: 'general' | 'workspace'; workspaceRef?: string };
 };
+
+function conversationScope(url: URL, workspace: SessionScope): SessionScope {
+  return url.searchParams.get('scope') === 'general' ? { kind: 'general' } : workspace;
+}
+
+function safeExportName(title: string): string {
+  const normalized = title.normalize('NFKC').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').replace(/\s+/g, ' ').trim();
+  return (normalized || 'DexCode 会话').slice(0, 64);
+}
 
 const workspaceRuntimes = new Map<string, WorkspaceRuntime>();
 
@@ -462,10 +481,20 @@ export function startRuntimeServer() {
       return;
     }
 
+    if (url.pathname === '/api/workspaces/recent' && req.method === 'GET') {
+      const workspaces = (await workspaceRegistry.list())
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        .slice(0, 10)
+        .map((workspace) => ({
+          path: workspace.canonicalRootPath,
+          displayName: workspace.canonicalRootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? '项目',
+        }));
+      sendJson(res, 200, { workspaces });
+      return;
+    }
+
     if (url.pathname === '/api/conversations' && req.method === 'GET') {
-      const scope: SessionScope = url.searchParams.get('scope') === 'general'
-        ? { kind: 'general' }
-        : requestWorkspaceScope;
+      const scope = conversationScope(url, requestWorkspaceScope);
       const summaries = await sessionRepository.listSessions(scope);
       const sessions = await Promise.all(summaries.map((item) => sessionRepository.loadSession(item.sessionId)));
       sendJson(res, 200, { conversations: sessions.filter((session): session is Session => Boolean(session)).map(projectConversationListItem) });
@@ -475,11 +504,44 @@ export function startRuntimeServer() {
     const conversationViewMatch = /^\/api\/conversations\/([^/]+)\/view$/.exec(url.pathname);
     if (conversationViewMatch && req.method === 'GET') {
       const conversationRef = decodeURIComponent(conversationViewMatch[1]);
-      const scope: SessionScope = url.searchParams.get('scope') === 'general'
-        ? { kind: 'general' }
-        : requestWorkspaceScope;
+      const scope = conversationScope(url, requestWorkspaceScope);
       const session = await loadScopedSession(conversationRef, scope);
       sendJson(res, 200, { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }) });
+      return;
+    }
+
+    const conversationExportMatch = /^\/api\/conversations\/([^/]+)\/export$/.exec(url.pathname);
+    if (conversationExportMatch && req.method === 'GET') {
+      const conversationRef = decodeURIComponent(conversationExportMatch[1]);
+      const session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
+      const exported = await sessionRepository.exportSession(conversationRef);
+      const date = new Date().toISOString().slice(0, 10);
+      const filename = `${safeExportName(projectConversationListItem(session).title)}-${date}.json`;
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': `attachment; filename="dexcode-conversation-${date}.json"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+      });
+      res.end(JSON.stringify(exported, null, 2));
+      return;
+    }
+
+    const conversationMutationMatch = /^\/api\/conversations\/([^/]+)$/.exec(url.pathname);
+    if (conversationMutationMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
+      const conversationRef = decodeURIComponent(conversationMutationMatch[1]);
+      const session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
+      if (req.method === 'DELETE') {
+        if (session.activeTaskId) throw new HttpError(409, '正在运行的会话不能删除，请先停止运行');
+        await sessionRepository.deleteSession(conversationRef);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      const meta = await parseBody<{ title?: string; archived?: boolean }>(req);
+      if (meta.title !== undefined && !meta.title.trim()) throw new HttpError(400, '会话标题不能为空');
+      await sessionRepository.updateSessionMeta(conversationRef, {
+        ...(meta.title !== undefined ? { title: meta.title.trim() } : {}),
+        ...(meta.archived !== undefined ? { archived: meta.archived } : {}),
+      });
+      sendJson(res, 200, { ok: true });
       return;
     }
 
@@ -594,7 +656,9 @@ export function startRuntimeServer() {
       try {
         sendJson(res, 200, { tools: await externalMcpRegistry.listTools() });
       } catch (error: unknown) {
-        sendJson(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' });
+        sendJson(res, error instanceof HttpError ? error.status : 500, {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
       }
       return;
     }
@@ -604,20 +668,33 @@ export function startRuntimeServer() {
       try {
         const { servers } = await parseBody<{ servers?: ExternalMcpServerConfig[] }>(req);
         if (!Array.isArray(servers)) { sendJson(res, 400, { error: 'servers array required' }); return; }
+        const names = new Set<string>();
         for (const server of servers) {
-          if (server.enabled !== false && server.name) {
-            externalMcpRegistry.addServer(server);
+          if (!server || typeof server !== 'object') throw new HttpError(400, '服务器配置必须是对象');
+          if (typeof server.name !== 'string' || !server.name.trim()) throw new HttpError(400, '服务器名称不能为空');
+          if (names.has(server.name)) throw new HttpError(400, `服务器名称重复：${server.name}`);
+          names.add(server.name);
+          if (server.type === 'http') {
+            if (typeof server.url !== 'string' || !server.url.trim()) throw new HttpError(400, `HTTP 服务器缺少地址：${server.name}`);
+            if (server.headers !== undefined && !isStringRecord(server.headers)) throw new HttpError(400, `HTTP 请求头必须是字符串键值对：${server.name}`);
+          } else if (server.type === 'stdio') {
+            if (typeof server.command !== 'string' || !server.command.trim()) throw new HttpError(400, `本地进程服务器缺少命令：${server.name}`);
+            if (server.args !== undefined && (!Array.isArray(server.args) || server.args.some((value) => typeof value !== 'string'))) throw new HttpError(400, `启动参数必须是字符串数组：${server.name}`);
+            if (server.env !== undefined && !isStringRecord(server.env)) throw new HttpError(400, `环境变量必须是字符串键值对：${server.name}`);
+          } else {
+            throw new HttpError(400, '不支持的 MCP 连接类型');
           }
         }
-        const currentNames = new Set(servers.map((s) => s.name));
-        for (const server of externalMcpRegistry.listServers()) {
-          if (!currentNames.has(server.name)) {
-            externalMcpRegistry.removeServer(server.name);
-          }
-        }
-        sendJson(res, 200, { ok: true, servers: externalMcpRegistry.listServers() });
+        const nextConfigs = servers.map((server) => ({ ...server }));
+        await externalMcpConfigStore.write(nextConfigs);
+        for (const server of externalMcpRegistry.listServers()) externalMcpRegistry.removeServer(server.name);
+        externalMcpConfigs = nextConfigs;
+        for (const server of externalMcpConfigs) if (server.enabled !== false) externalMcpRegistry.addServer(server);
+        sendJson(res, 200, { ok: true, servers: externalMcpConfigs });
       } catch (error: unknown) {
-        sendJson(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' });
+        sendJson(res, error instanceof HttpError ? error.status : 500, {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
       }
       return;
     }
@@ -625,14 +702,17 @@ export function startRuntimeServer() {
     // ── DELETE /api/external-mcp/servers/:name ──
     if (url.pathname.startsWith('/api/external-mcp/servers/') && req.method === 'DELETE') {
       const name = decodeURIComponent(url.pathname.replace('/api/external-mcp/servers/', ''));
+      const nextConfigs = externalMcpConfigs.filter((server) => server.name !== name);
+      await externalMcpConfigStore.write(nextConfigs);
       externalMcpRegistry.removeServer(name);
-      sendJson(res, 200, { ok: true, name, servers: externalMcpRegistry.listServers() });
+      externalMcpConfigs = nextConfigs;
+      sendJson(res, 200, { ok: true, servers: externalMcpConfigs });
       return;
     }
 
     // ── GET /api/external-mcp/servers ──
     if (url.pathname === '/api/external-mcp/servers' && req.method === 'GET') {
-      sendJson(res, 200, { servers: externalMcpRegistry.listServers() });
+      sendJson(res, 200, { servers: externalMcpConfigs });
       return;
     }
 

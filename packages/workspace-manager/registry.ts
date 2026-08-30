@@ -75,8 +75,15 @@ export function createWorkspaceRegistry(options: { registryFile: string }) {
       const existing = document.workspaces.find(
         (workspace) => comparablePath(workspace.canonicalRootPath) === comparablePath(canonicalRootPath),
       );
-      if (existing) return existing;
       const now = new Date().toISOString();
+      if (existing) {
+        const touched = { ...existing, updatedAt: now };
+        await writeDocument({
+          version: 1,
+          workspaces: document.workspaces.map((workspace) => workspace.workspaceId === existing.workspaceId ? touched : workspace),
+        });
+        return touched;
+      }
       const workspace: WorkspaceRecord = {
         workspaceId: `workspace-${crypto.randomUUID()}`,
         rootPath: canonicalRootPath,

@@ -1,13 +1,15 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, Menu, MoreVertical, Plus, X } from 'lucide-react';
+import { ChevronLeft, Menu, X } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { apiJson, listCapabilities, listConversations, resolveWorkspace, scopeWorkspaceRef } from '../api';
+import { useNavigate } from 'react-router-dom';
+import { apiJson, resolveWorkspace, scopeWorkspaceRef } from '../api';
 import type { ConversationScope } from '../types';
 import { BrandIcon } from '../shared/brand-icon';
-import { capabilityIcons } from '../shared/icons';
+import { CapabilityCenter } from './capability-center';
+import { ConversationHistory } from './conversation-history';
+import { WorkspacePicker } from './workspace-picker';
 
 type Meta = {
   appName: string;
@@ -23,14 +25,8 @@ export type AppShellProps = {
   children: ReactNode;
 };
 
-function routeForConversation(scope: ConversationScope, ref?: string): string {
-  if (scope.kind === 'general') return ref ? `/c/${encodeURIComponent(ref)}` : '/';
-  return ref ? `/w/${encodeURIComponent(scope.workspaceRef)}/c/${encodeURIComponent(ref)}` : `/w/${encodeURIComponent(scope.workspaceRef)}/new`;
-}
-
 function SidebarContent({ scope, conversationRef, closeMobile }: { scope: ConversationScope; conversationRef?: string; closeMobile?: () => void }) {
   const navigate = useNavigate();
-  const location = useLocation();
   const [path, setPath] = useState('');
   const [pathError, setPathError] = useState('');
   const [loadingPath, setLoadingPath] = useState(false);
@@ -40,105 +36,47 @@ function SidebarContent({ scope, conversationRef, closeMobile }: { scope: Conver
     queryFn: () => apiJson<Meta>('/api/meta', { workspaceRef }),
     enabled: scope.kind === 'workspace',
   });
-  const conversations = useQuery({
-    queryKey: ['conversations', scope],
-    queryFn: () => listConversations(scope),
-  });
-  const capabilities = useQuery({ queryKey: ['capabilities'], queryFn: listCapabilities, staleTime: 60_000 });
 
   useEffect(() => {
     if (scope.kind === 'general') setPath('');
     else if (meta.data?.workspace.canonicalPath) setPath(meta.data.workspace.canonicalPath);
   }, [meta.data?.workspace.canonicalPath, scope.kind]);
 
-  const submitWorkspace = async () => {
-    if (!path.trim()) {
+  const submitWorkspace = async (nextPath: string): Promise<boolean> => {
+    if (!nextPath) {
       navigate('/');
       closeMobile?.();
-      return;
+      return true;
     }
     setLoadingPath(true);
     setPathError('');
     try {
-      const workspace = await resolveWorkspace(path.trim());
+      const workspace = await resolveWorkspace(nextPath);
       navigate(`/w/${encodeURIComponent(workspace.workspaceRef)}/new`);
       closeMobile?.();
+      return true;
     } catch (error) {
       setPathError(error instanceof Error ? error.message : '项目加载失败');
+      return false;
     } finally {
       setLoadingPath(false);
     }
   };
 
-  const returnTo = encodeURIComponent(location.pathname + location.search);
   return (
     <div className="sidebar-content">
       <div className="brand-row">
         <BrandIcon />
         <span className="brand-name">DexCode</span>
       </div>
-      <form className="workspace-form" onSubmit={(event) => { event.preventDefault(); void submitWorkspace(); }}>
-        <input
-          aria-label="项目绝对路径"
-          value={path}
-          onChange={(event) => setPath(event.target.value)}
-          placeholder="输入项目绝对路径"
-          spellCheck={false}
-        />
-        <button type="submit" disabled={loadingPath}>{loadingPath ? '加载中' : '加载'}</button>
-      </form>
-      {pathError ? <p className="inline-error">{pathError}</p> : null}
-
-      <div className="sidebar-section-heading">
-        <span>{scope.kind === 'general' ? '首页会话' : meta.data?.workspace.displayName ?? '当前项目'}</span>
-      </div>
-      <nav className="conversation-list" aria-label="历史会话">
-        {conversations.isLoading ? <div className="sidebar-muted">正在加载会话…</div> : null}
-        {conversations.data?.map((conversation) => (
-          <Link
-            key={conversation.ref}
-            to={routeForConversation(scope, conversation.ref)}
-            className={conversation.ref === conversationRef ? 'conversation-link selected' : 'conversation-link'}
-            onClick={closeMobile}
-            title={conversation.title}
-          >
-            <span className={`conversation-state ${conversation.state}`} aria-hidden="true" />
-            <span>{conversation.title}</span>
-          </Link>
-        ))}
-        {!conversations.isLoading && conversations.data?.length === 0 ? <div className="sidebar-muted">还没有历史会话</div> : null}
-      </nav>
-      <button className="new-conversation" onClick={() => { navigate(routeForConversation(scope)); closeMobile?.(); }}>
-        <Plus size={17} />
-        新建会话
-      </button>
-
-      <div className="capability-zone">
-        <div className="sidebar-section-heading"><span>能力中心</span></div>
-        <div className="capability-grid">
-          {capabilities.data?.map((capability) => {
-            const Icon = capabilityIcons[capability.icon];
-            const unavailable = capability.workspaceRequired && scope.kind === 'general';
-            const href = `${capability.route}?${workspaceRef ? `workspaceRef=${encodeURIComponent(workspaceRef)}&` : ''}returnTo=${returnTo}`;
-            return (
-              <Tooltip.Root key={capability.id}>
-                <Tooltip.Trigger asChild>
-                  <Link
-                    to={href}
-                    className={unavailable ? 'capability-link unavailable' : 'capability-link'}
-                    onClick={closeMobile}
-                    aria-label={unavailable ? `${capability.label}，需要先加载项目` : capability.label}
-                  >
-                    <Icon size={17} strokeWidth={1.7} />
-                    <span>{capability.label}</span>
-                  </Link>
-                </Tooltip.Trigger>
-                {unavailable ? <Tooltip.Portal><Tooltip.Content className="tooltip-content">加载项目后可使用<Tooltip.Arrow /></Tooltip.Content></Tooltip.Portal> : null}
-              </Tooltip.Root>
-            );
-          })}
-        </div>
-      </div>
+      <WorkspacePicker value={path} loading={loadingPath} error={pathError} onChange={setPath} onResolve={submitWorkspace} />
+      <ConversationHistory
+        scope={scope}
+        conversationRef={conversationRef}
+        heading={scope.kind === 'general' ? '首页会话' : meta.data?.workspace.displayName ?? '当前项目'}
+        closeMobile={closeMobile}
+      />
+      <CapabilityCenter scope={scope} closeMobile={closeMobile} />
     </div>
   );
 }
@@ -203,7 +141,6 @@ export function AppShell({ scope, conversationRef, title, status = 'idle', child
               <h1>{title}</h1>
               <span className={`header-status ${status}`}><i />{status === 'running' ? '运行中' : status === 'waiting' ? '等待确认' : status === 'failed' ? '未完成' : '就绪'}</span>
             </div>
-            <button className="icon-button" aria-label="更多操作"><MoreVertical size={19} /></button>
           </header>
           {children}
         </main>

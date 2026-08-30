@@ -1,7 +1,9 @@
 export type ConversationScope = { kind: 'general' } | { kind: 'workspace'; workspaceRef: string };
 
+export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'whitelist' | 'snapshots' | 'project-knowledge';
+
 export type Capability = {
-  id: string;
+  id: CapabilityId;
   label: string;
   route: string;
   icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'camera' | 'book';
