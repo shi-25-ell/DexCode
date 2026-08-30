@@ -49,6 +49,9 @@ export function createModelClient(): ModelClient {
     baseUrl,
     apiKey,
     model,
+    displayName: getEnv('LLM_DISPLAY_NAME') || model,
+    contextWindow: getEnvNumber('LLM_CONTEXT_WINDOW'),
+    providerDisplayName: getEnv('LLM_PROVIDER_DISPLAY_NAME') || undefined,
     doubaoCompat: provider === 'doubao',
     defaults: {
       temperature: getEnvNumber('LLM_TEMPERATURE'),

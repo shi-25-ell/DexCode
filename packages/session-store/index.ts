@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { DEFAULT_PROJECT_ID } from '../shared/index.ts';
+import { conversationTitle } from '../conversation-view/title.ts';
 import type {
   ChatMessage,
   CompactionCheckpoint,
@@ -12,6 +13,7 @@ import type {
   SessionMeta,
   SessionScope,
   TaskSummary,
+  ToolPresentation,
 } from '../shared/types.ts';
 
 export type { Session, TaskSummary, ChatMessage };
@@ -26,6 +28,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
   const locks = new Map<string, Promise<void>>();
   const activeRuns = new Set<string>();
   let currentLock: Promise<void> = Promise.resolve();
+  let materializationLock: Promise<void> = Promise.resolve();
 
   const defaultProjectMemory = `# 项目记忆
 
@@ -76,6 +79,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       runReports: session.runReports ?? [],
       contextManifests: session.contextManifests ?? [],
       compactionCheckpoints: session.compactionCheckpoints ?? [],
+      clientRequestIds: session.clientRequestIds ?? [],
     };
   }
 
@@ -152,6 +156,18 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     }
   }
 
+  async function withMaterializationLock<T>(work: () => Promise<T>): Promise<T> {
+    const previous = materializationLock;
+    let release = () => {};
+    materializationLock = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
   async function getCurrentSessionId(scope: SessionScope = { kind: 'general' }): Promise<string | null> {
     return (await readCurrentSessions())[scopeKey(scope)] ?? null;
   }
@@ -223,6 +239,65 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return withSessionLock(session.sessionId, () => saveUnlocked(session));
   }
 
+  async function materializeRun(input: {
+    scope: SessionScope;
+    clientRequestId: string;
+    runId: string;
+    userMessage: ChatMessage;
+    context: RunContext;
+  }): Promise<{ session: Session; created: boolean }> {
+    const scope = normalizeScope(input.scope);
+    if (!input.clientRequestId.trim()) throw new Error('clientRequestId is required');
+    if (!sameScope(scope, input.context.scope)) throw new Error('Run context does not match Session scope');
+    return withMaterializationLock(async () => {
+      await ensureDir();
+      let files: string[] = [];
+      try {
+        files = await readdir(sessionsDir) as string[];
+      } catch {
+        files = [];
+      }
+      for (const file of files) {
+        if (!file.endsWith('.json') || file === 'current.json') continue;
+        try {
+          const candidate = normalized(JSON.parse(await readFile(join(sessionsDir, file), 'utf8')) as Session);
+          if (sameScope(candidate.scope, scope) && candidate.clientRequestIds?.includes(input.clientRequestId)) {
+            return { session: candidate, created: false };
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      const sessionId = `session-${crypto.randomUUID()}`;
+      const at = new Date().toISOString();
+      const content = input.userMessage.role === 'user' ? input.userMessage.content : '';
+      const session: Session = {
+        sessionId,
+        scope,
+        createdAt: at,
+        updatedAt: at,
+        title: conversationTitle(content),
+        messages: [input.userMessage],
+        taskSummaries: [],
+        activeTaskId: input.runId,
+        revision: 1,
+        ledger: [
+          { seq: 1, at, runId: input.runId, type: 'run_started', context: input.context },
+          { seq: 2, at, runId: input.runId, type: 'message', message: input.userMessage },
+        ],
+        runReports: [],
+        contextManifests: [],
+        compactionCheckpoints: [],
+        clientRequestIds: [input.clientRequestId],
+      };
+      const saved = await withSessionLock(sessionId, () => saveUnlocked(session));
+      activeRuns.add(`${sessionId}:${input.runId}`);
+      await setCurrentSessionId(sessionId, scope);
+      return { session: saved, created: true };
+    });
+  }
+
   async function createSession(scope: SessionScope = { kind: 'general' }): Promise<Session> {
     scope = normalizeScope(scope);
     const sessionId = `session-${crypto.randomUUID()}`;
@@ -280,7 +355,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function beginRun(input: { sessionId: string; runId: string; userMessage: ChatMessage; context: RunContext }): Promise<Session> {
+  async function beginRun(input: { sessionId: string; runId: string; userMessage: ChatMessage; context: RunContext; clientRequestId?: string }): Promise<Session> {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
@@ -295,8 +370,15 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       }
       const at = new Date().toISOString();
       const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      const title = session.title?.trim()
+        || (input.userMessage.role === 'user' ? conversationTitle(input.userMessage.content) : '恢复的会话');
+      const clientRequestIds = input.clientRequestId
+        ? [...new Set([...(session.clientRequestIds ?? []), input.clientRequestId])]
+        : session.clientRequestIds;
       const next = await saveUnlocked({
         ...session,
+        title,
+        clientRequestIds,
         activeTaskId: input.runId,
         revision: (session.revision ?? 0) + 1,
         messages: [...session.messages, input.userMessage],
@@ -326,7 +408,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function markToolStarted(input: { sessionId: string; runId: string; callId: string; tool: string }): Promise<Session> {
+  async function markToolStarted(input: { sessionId: string; runId: string; callId: string; tool: string; input?: Record<string, unknown> }): Promise<Session> {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
@@ -335,7 +417,40 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       return saveUnlocked({
         ...session,
         revision: (session.revision ?? 0) + 1,
-        ledger: [...(session.ledger ?? []), { seq, at: new Date().toISOString(), runId: input.runId, type: 'tool_started', callId: input.callId, tool: input.tool }],
+        ledger: [...(session.ledger ?? []), {
+          seq,
+          at: new Date().toISOString(),
+          runId: input.runId,
+          type: 'tool_started',
+          callId: input.callId,
+          tool: input.tool,
+          ...(input.input ? { input: input.input } : {}),
+        }],
+      });
+    });
+  }
+
+  async function commitToolOutcome(input: {
+    sessionId: string;
+    runId: string;
+    message: ChatMessage;
+    presentation: ToolPresentation;
+  }): Promise<Session> {
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      const at = new Date().toISOString();
+      return saveUnlocked({
+        ...session,
+        revision: (session.revision ?? 0) + 1,
+        messages: [...session.messages, input.message],
+        ledger: [
+          ...(session.ledger ?? []),
+          { seq, at, runId: input.runId, type: 'message', message: input.message },
+          { seq: seq + 1, at, runId: input.runId, type: 'tool_completed', callId: input.presentation.callRef, presentation: input.presentation },
+        ],
       });
     });
   }
@@ -559,6 +674,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     getCurrentSessionId,
     setCurrentSessionId,
     createSession,
+    materializeRun,
     getCurrentSession,
     loadSession,
     saveSession,
@@ -567,6 +683,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     beginRun,
     appendRunMessage,
     markToolStarted,
+    commitToolOutcome,
     commitContext,
     finishRun,
     readProjectMemory,

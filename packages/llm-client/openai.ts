@@ -12,6 +12,9 @@ type OpenAiCompatibleModelOptions = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  displayName?: string;
+  contextWindow?: number;
+  providerDisplayName?: string;
   doubaoCompat?: boolean;
   defaults?: {
     temperature?: number;
@@ -118,7 +121,7 @@ function thrownFailure(error: unknown, callerSignal: AbortSignal | undefined, ti
 }
 
 export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModelOptions): ModelClient {
-  const { baseUrl, apiKey, model, doubaoCompat = false, defaults = {} } = options;
+  const { baseUrl, apiKey, model, displayName, contextWindow, providerDisplayName, doubaoCompat = false, defaults = {} } = options;
 
   async function chatCompletions(payload: Record<string, unknown>, signal: AbortSignal) {
     const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -250,5 +253,5 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
     }
   }
 
-  return { model, baseUrl, streamMessage };
+  return { model, baseUrl, displayName: displayName ?? model, contextWindow, providerDisplayName, streamMessage };
 }

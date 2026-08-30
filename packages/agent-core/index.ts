@@ -238,7 +238,7 @@ export function createCodingAgent(
     selectedFile: string | null,
     onEvent: (event: AgentEvent) => void,
     hooks: ConfirmHook | ExecutorHooks,
-    options: { runId?: string; signal?: AbortSignal } = {},
+    options: { runId?: string; signal?: AbortSignal; prestarted?: boolean; clientRequestId?: string } = {},
   ): Promise<TaskSummary> {
     if (!sessionRepository) throw new Error('sessionRepository is required for runTask');
     const session = await sessionRepository.loadSession(sessionId);
@@ -261,30 +261,43 @@ export function createCodingAgent(
     }
     const runId = options.runId ?? crypto.randomUUID();
     const startedAt = new Date().toISOString();
-    onEvent({ type: 'task_status', taskId: runId, status: 'planning' });
-    const projectMemory = await sessionRepository.readProjectMemory(
-      agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : undefined,
-    );
-    const context = agentEnvironment.scope.kind === 'workspace'
-      ? await contextManager.buildForPrompt(userPrompt, selectedFile, { projectMemory })
-      : {
-          prompt: userPrompt,
-          selectedFile: null,
-          selectedFileContent: null,
-          workspaceSummary: '',
-          projectMemorySummary: '',
-          contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
-        };
-    const system: SystemMessage = {
-      role: 'system',
-      content: buildSystemPrompt(context, projectMemory, session.taskSummaries, skillsBlock(effectiveSkillRegistry, userPrompt), agentEnvironment.scope),
-    };
     const user: UserMessage = { role: 'user', content: userPrompt };
-    const history = projectHistory(runId, session.messages);
-    await sessionRepository.beginRun({ sessionId, runId, userMessage: user, context: runContext });
-    await sessionRepository.commitContext({ sessionId, runId, manifest: history.manifest, checkpoint: history.checkpoint });
+    if (!options.prestarted) {
+      await sessionRepository.beginRun({
+        sessionId,
+        runId,
+        userMessage: user,
+        context: runContext,
+        ...(options.clientRequestId ? { clientRequestId: options.clientRequestId } : {}),
+      });
+    }
+    onEvent({ type: 'task_status', taskId: runId, status: 'planning' });
     let result: LoopResult;
     try {
+      const projectMemory = await sessionRepository.readProjectMemory(
+        agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : undefined,
+      );
+      const context = agentEnvironment.scope.kind === 'workspace'
+        ? await contextManager.buildForPrompt(userPrompt, selectedFile, { projectMemory })
+        : {
+            prompt: userPrompt,
+            selectedFile: null,
+            selectedFileContent: null,
+            workspaceSummary: '',
+            projectMemorySummary: '',
+            contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
+          };
+      const system: SystemMessage = {
+        role: 'system',
+        content: buildSystemPrompt(context, projectMemory, session.taskSummaries, skillsBlock(effectiveSkillRegistry, userPrompt), agentEnvironment.scope),
+      };
+      const historyMessages = options.prestarted
+        && session.messages.at(-1)?.role === 'user'
+        && session.messages.at(-1)?.content === userPrompt
+        ? session.messages.slice(0, -1)
+        : session.messages;
+      const history = projectHistory(runId, historyMessages);
+      await sessionRepository.commitContext({ sessionId, runId, manifest: history.manifest, checkpoint: history.checkpoint });
       result = await execute(
         runId,
         [system, ...history.messages, user],
@@ -293,8 +306,12 @@ export function createCodingAgent(
         options.signal,
         {
           assistantCommitted: (message) => sessionRepository.appendRunMessage({ sessionId, runId, message }).then(() => undefined),
-          toolStarted: (call) => sessionRepository.markToolStarted({ sessionId, runId, callId: call.id, tool: call.function.name }).then(() => undefined),
-          toolOutcome: (message) => sessionRepository.appendRunMessage({ sessionId, runId, message }).then(() => undefined),
+          toolStarted: (call) => {
+            let input: Record<string, unknown> | undefined;
+            try { input = JSON.parse(call.function.arguments) as Record<string, unknown>; } catch { input = undefined; }
+            return sessionRepository.markToolStarted({ sessionId, runId, callId: call.id, tool: call.function.name, input }).then(() => undefined);
+          },
+          toolOutcome: (message, presentation) => sessionRepository.commitToolOutcome({ sessionId, runId, message, presentation }).then(() => undefined),
         },
       );
     } catch (error) {
@@ -336,6 +353,7 @@ export function createCodingAgent(
       modelTurnCount: result.modelTurnCount,
       modelAttemptCount: result.modelAttemptCount,
       usage: result.usage,
+      ...(result.latestInputTokens !== undefined ? { latestInputTokens: result.latestInputTokens } : {}),
       toolsUsed: taskSummary.toolsUsed,
       filesModified: taskSummary.filesModified,
       ...(result.error ? { error: result.error } : {}),

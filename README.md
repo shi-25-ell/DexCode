@@ -9,6 +9,10 @@
 - **文件管理**：浏览、编辑、创建、重命名、删除工作区文件
 - **真实流式输出**：OpenAI-compatible SSE 会被解析为统一的文本、reasoning、tool call 和 terminal 事件，再通过有界 SSE 队列输出
 - **可恢复会话**：多会话独立隔离，持久化 Run ledger、终态报告、上下文清单和压缩 checkpoint
+- **对话式 Web UI**：浅色单列时间线、可伸缩侧边栏、移动端抽屉和可折叠中文 Tool Card
+- **按项目隔离**：项目路径只选择请求 scope，不再修改一个全局活动工作区；首页会话与各项目会话相互隔离
+- **延迟物化草稿**：点击“新建会话”不会产生空 Session，首次发送非空消息才原子创建会话与 Run
+- **可替换产品外壳**：品牌图标可由构建变量替换，能力入口由服务端注册表驱动，可逐项移除
 - **MCP 兼容**：内置 MCP server（JSON-RPC 2.0），可作为标准 MCP 工具服务被外部客户端接入
 - **Mock 模式**：未配置 LLM 凭据时自动降级，不影响文件管理功能
 
@@ -29,8 +33,9 @@ npm install
 Copy-Item .env.example .env
 # 编辑 .env 填入你的 API Key
 
-# 3. 启动
-npm run dev
+# 3. 构建并启动生产入口
+npm run build:web
+npm start
 ```
 
 访问 http://localhost:3000
@@ -41,37 +46,34 @@ npm run dev
 
 ### 工作区加载
 
-顶部栏左侧为工作区路径输入框，支持：
-
-- **路径补全**：输入前缀后自动下拉显示匹配的子目录（最多 10 条）；点击补全项自动展开下一层
-- **Tab 键**：填入下拉第一项并展开下一层
-- **历史记录**：点击空输入框弹出最近加载过的路径（localStorage 保存，最多 10 条）
-- **加载**：点击"加载"按钮或按 Enter 切换工作区；切换本身不会创建会话，发送第一条消息后才持久化新会话
+侧边栏顶部输入项目绝对路径，点击“加载”或按 Enter。成功后只显示该工作区的历史会话；清空路径并提交可返回无工作区首页。选择工作区不会创建会话，也不会改变其他浏览器标签页的工作区。
 
 ### 聊天
 
 - **发送**：在输入框按 Enter 发送
 - **换行**：Shift+Enter 换行
-- Agent 执行过程中输入框自动禁用，工具调用以可折叠卡片展示
+- Agent 执行过程中可显式停止，工具、Skill 与 MCP 调用以短小的中文卡片展示
+- Tool Card 默认只显示名称、目标、状态和摘要；原始输出需要主动展开
+- 文件修改使用工作区相对路径与 `+N -M` 统计
+- 输入框下方显示真实模型名和上下文占用；数据不完整时明确显示“上下文未知”
 
 ### 会话切换
 
-点击顶部"会话 #XXXXXX"徽章，弹出本工作区所有历史会话列表，每条显示：
+历史会话位于侧边栏，默认标题来自第一条用户问题，不显示 Session ID。点击“新建会话”只打开客户端草稿；未发送即离开不会写入持久化记录。首次发送后，页面使用 replace navigation 切换到持久会话地址。
 
-- 会话 ID 缩写和最后活跃时间
-- 最后一条用户消息预览（最多 60 字）
-- 任务数量
+### 能力中心与品牌资源
 
-点击任意历史会话，聊天区域还原该会话的完整对话记录，后续新任务在该会话下继续执行。
+MCP、工具、Skill、白名单、快照、项目知识均从统一 React 外壳进入。入口来自 `CapabilityRegistry`，不是 Sidebar 内的固定数组：
 
-会话之间**完全隔离**，切换会话不影响当前工作区文件树。
+```dotenv
+# 逗号分隔；移除注册项后，侧边栏和设置路由同时收口
+DEX_DISABLED_CAPABILITIES=snapshots,project-knowledge
 
-### 文件树
+# 构建时替换品牌图标；缺省使用 public/brand-icon.svg
+VITE_BRAND_ICON_URL=/my-brand.svg
+```
 
-- 点击文件在编辑器中打开，内容直接可编辑，失焦后自动保存
-- 右键文件/目录弹出上下文菜单（重命名、删除）
-- 顶部"新建"按钮可新建文件或目录
-- 拖动三列面板间的分隔线可调整宽度
+桌面侧边栏可拖动宽度或折叠；窄屏使用抽屉。依赖工作区的能力在首页会说明需要先选择项目，不会静默失效。
 
 ## LLM 配置
 
@@ -127,8 +129,11 @@ LLM_PROVIDER=doubao
 | `LLM_TOP_P` | 否 | Top-p 采样，不填则不传给 API |
 | `LLM_TIMEOUT` | 否 | 请求超时（毫秒） |
 | `LLM_MAX_RETRIES` | 否 | 最大重试次数 |
+| `LLM_CONTEXT_WINDOW` | 否 | 模型上下文窗口；未配置时 UI 不伪造使用率 |
 | `WORKSPACE_DIR` | 否 | 启动时默认加载的工作区目录 |
 | `PORT` | 否 | HTTP 服务端口，默认 `3000` |
+| `DEX_DISABLED_CAPABILITIES` | 否 | 要从产品外壳移除的能力 ID，逗号分隔 |
+| `VITE_BRAND_ICON_URL` | 否 | 前端构建时使用的品牌图标 URL |
 
 **向后兼容**：`DOUBAO_API_KEY` / `DOUBAO_MODEL` / `DOUBAO_BASE_URL` 变量在未设置 `LLM_*` 时仍然生效。
 
@@ -136,10 +141,10 @@ LLM_PROVIDER=doubao
 
 不配置任何 Key 时自动进入 Mock 模式，文件管理功能完全正常，AI 对话返回占位响应。
 
-`GET /api/meta` 可以查看当前 LLM 状态：
+`GET /api/meta` 返回面向产品的模型和工作区描述，不在普通 UI 暴露 provider wire 字段：
 
 ```json
-{ "llmEnabled": false, "provider": "mock" }
+{ "appName": "DexCode", "model": { "displayName": "Mock Model" } }
 ```
 
 ## 项目结构
@@ -148,9 +153,11 @@ LLM_PROVIDER=doubao
 ├── server.ts                    # 入口：加载 .env，启动服务
 ├── apps/
 │   ├── runtime/server.ts        # HTTP 服务器 + API 路由
-│   └── web/                     # 前端（原生 TypeScript）
+│   └── web/                     # Vite + React + TypeScript 单页应用
 ├── packages/
 │   ├── agent-core/              # 单 Agent Run、ReAct 循环、终态报告与 Session contract
+│   ├── capability-registry/     # 可删除的产品能力注册表
+│   ├── conversation-view/       # canonical facts 到产品展示模型的投影
 │   ├── mcp-server/              # MCP server（JSON-RPC 2.0，工具/资源/提示词注册）
 │   ├── llm-client/              # OpenAI-compatible canonical streaming
 │   │   ├── types.ts             # ModelEvent、ModelResponse、failure taxonomy
@@ -172,7 +179,13 @@ LLM_PROVIDER=doubao
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
-| `/api/meta` | GET | 应用信息、LLM 状态 |
+| `/api/meta` | GET | 产品模型描述与当前请求工作区信息 |
+| `/api/capabilities` | GET | 当前启用的产品能力入口 |
+| `/api/workspaces/resolve` | POST | 解析项目路径并返回 opaque workspace ref |
+| `/api/conversations` | GET | general 或 workspace scope 的产品会话列表 |
+| `/api/conversations/:ref/view` | GET | 可直接渲染的历史会话投影 |
+| `/api/conversation-runs` | POST | 首次物化或继续会话的 SSE Run 入口 |
+| `/api/conversation-runs/:runRef/commands` | POST | 显式停止当前 Run |
 | `/api/session` | GET | 当前会话信息 |
 | `/api/session` | POST | 准备新会话（首条聊天消息到达时持久化） |
 | `/api/sessions` | GET | 历史会话列表（含最后消息预览） |
@@ -200,13 +213,17 @@ LLM_PROVIDER=doubao
 # 类型检查
 npm run typecheck
 
-# 前端编译（修改 app.ts 后需执行）
+# 前端生产编译
 npm run build:web
+
+# 前端单元与组件测试
+npm run test:web
 
 # 关键链路测试
 npm test
 
-# 启动（热重载需手动重启）
+# 开发：两个终端分别启动 Runtime 与 Vite
+npm run dev:runtime
 npm run dev
 ```
 

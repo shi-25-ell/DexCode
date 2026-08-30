@@ -1,6 +1,6 @@
 # DexCode Web UI 重构开发设计
 
-> 状态：设计已确认，尚未开始实现  
+> 状态：已实施并完成桌面、窄屏与流式链路验收
 > 日期：2026-08-30  
 > 适用范围：`apps/web`、`apps/runtime` 中的 Web 适配层，以及为 UI 提供稳定投影所需的共享模块  
 > 参考：OpenCode Web App 的信息层级与交互方式。只能参考产品设计，不复制其代码、包结构、命名或视觉资产。
@@ -41,7 +41,7 @@ DexCode 当前主页面同时放置对话、编辑器、工作区文件树和 Ag
 10. UI 不直接显示底层标识、代码枚举、provider wire 字段、HTTP 状态或原始 JSON。
 11. 多标签页或多个请求不能通过一个全局 `activeRuntime` 相互切换工作区。
 12. 为新接口、投影 reducer、草稿物化、Tool Card 和历史恢复建立自动化测试。
-13. `MCP`、`工具`、`Skill`、`白名单`、`快照`、`项目知识` 六项能力必须始终保留并可操作；主页面简化不能以删除、停用或延期恢复这些能力为代价。入口的按钮样式、分组方式和页面位置不在本阶段冻结，需在视觉方案中另行确认。
+13. `MCP`、`工具`、`Skill`、`白名单`、`快照`、`项目知识` 六项能力在当前版本必须保留并可操作；主页面简化不能以删除、停用或延期恢复这些能力为代价。入口由能力注册表驱动，不能在 Sidebar 中写死，后续可以逐项禁用、替换或删除，并同步收口对应路由。
 
 ### 2.2 明确不做
 
@@ -344,6 +344,7 @@ opaque reference 可以出现在 URL，但页面不得把 URL 片段显示成标
 - 输入区 sticky 在主区域底部，不能覆盖最后一条消息。
 - 窄屏侧边栏变为 Drawer；主对话仍是唯一内容列。
 - 设置、MCP、工具、Skill、白名单、快照和项目知识的入口样式与位置在视觉方案中确定；可选择侧边栏、顶栏、功能面板或组合布局，但不能从新外壳中消失。
+- 核心能力入口来自 `CapabilityRegistry`（或等价配置 seam）。Sidebar 只渲染当前启用项；删除能力时应同时移除注册项、路由和相关预取，不允许在组件中维护固定六项数组。
 
 ### 8.1 关键用户流程
 
@@ -867,6 +868,50 @@ activeTaskId
 - 迁移期可以用 feature flag 选择旧/新入口，但同一个请求只能进入一套会话状态机；禁止双写 Session。
 - Projection 是纯计算模块，应优先完成并用 fixture 锁定，再接浏览器。
 - Runtime workspace scope 改造必须在接入新侧边栏前完成，否则多标签行为仍然错误。
+
+## 20. 实施结果与验收记录
+
+本节记录 2026-08-30 在 `ui-update` 分支完成的实现，不替代前文的产品与架构约束。
+
+### 20.1 已落地模块
+
+- `apps/web` 已替换为 Vite + React + TypeScript SPA；旧三栏页面、编辑器、文件树、执行摘要和分散的设置 HTML/TS 已移除。
+- `packages/conversation-view` 统一负责首问标题、中文工具名称、状态、目标、输出裁剪、敏感信息遮盖、文件 diff 和 durable ledger replay。
+- `packages/capability-registry` 提供能力入口清单。`DEX_DISABLED_CAPABILITIES` 删除注册项后，Sidebar 与设置路由同时不再提供该能力；页面组件不维护固定六项数组。
+- `public/brand-icon.svg` 是缺省可替换资源；构建变量 `VITE_BRAND_ICON_URL` 可指向其他图标，加载失败时使用中性占位，不把 DexCode 图形写死在 JSX。
+- Runtime 新增 scoped conversation/workspace 接口，请求通过 workspace reference 解析各自 runtime，不再依赖全局 `activeRuntime`。
+- 首次发送通过 `materializeRun` 原子写入 Session、首问标题、user message 和 `run_started`；普通后续消息也持久化 `clientRequestId`，重试返回现有结果而不是重复提交。
+- Context、provider 或执行基础设施在 Run 开始后失败时仍提交失败终态，保留用户已发生的真实交互和可恢复 ledger。
+- Skill、MCP、文件、命令等语义事件在实时流与历史恢复中都投影为同一种 Tool Card；原始 tool message 不进入默认时间线。
+- 设置能力已全部迁移到 React 路由，保留 MCP、工具、Skill、白名单、快照和项目知识的真实后端操作。
+
+### 20.2 视觉对照
+
+已确认概念图：[`docs/assets/web-ui-concept-v2.png`](assets/web-ui-concept-v2.png)。实现截图：
+
+- [`docs/assets/web-ui-implementation-desktop.png`](assets/web-ui-implementation-desktop.png)
+- [`docs/assets/web-ui-implementation-mobile.png`](assets/web-ui-implementation-mobile.png)
+
+对照结果：
+
+1. 白色主画布、浅灰侧栏、黑色正文和蓝/绿/紫状态层级与概念一致。
+2. 桌面侧栏默认 280px，可在 248-360px 间拖动并折叠；390px 视口切换为 Drawer。
+3. 会话历史使用首问标题，未显示 Session ID；新会话入口位于历史列表下方。
+4. 六项能力保持两列入口布局，来自注册表，并在移动 Drawer 中完整可达。
+5. Tool Card 使用小尺寸 16px 图标，中文名称、相对目标、成功状态和简短结果；Skill 与 MCP 具有独立提示。
+6. 文件修改卡显示 `src/auth/login.ts +18 −6`，原始输出默认折叠且可交互展开。
+7. Composer 固定显示真实模型名与可信上下文状态；本次环境未配置 context window，因此实现截图显示“上下文未知”，没有沿用概念图中的演示百分比。
+
+允许的实现差异：概念图使用 1600×1000 的展示画布并含演示时间戳、头像和模型数据；浏览器验收使用原生 1280×720 桌面视口与 390×844 移动视口，未伪造时间戳、头像或上下文窗口。桌面截图因原生视口高度只同时露出部分卡片，其余内容可在真实时间线滚动查看。首屏没有增加营销文案。
+
+### 20.3 验证证据
+
+- Browser：生产入口 `http://localhost:3000`，页面标题 `DexCode`，DOM 非空，无 error console log。
+- 真实流式路径：general 草稿首次发送后使用 replace navigation 进入 durable 会话；侧栏标题为首问而非 ID。
+- 历史 replay：canonical fixture 恢复为读取文件、Skill、MCP、修改文件和执行命令五类 Tool Card；普通 DOM 不含 `read_file`、`patch_file`、`run_command`、`activate_skill` 或 `mcp__...`。
+- 折叠交互：读取文件卡可展开经过裁剪与遮盖的原始结果，再次点击恢复紧凑态。
+- 响应式：390×844 下桌面 resize control 不存在，Drawer 可打开/关闭，历史标题和六项能力均可访问；工具设置页能返回原会话。
+- 自动化：`npm test` 25/25，`npm run test:web` 3/3，`npm run lint` 通过，`npm run build:web` 通过。
 - ToolOutcome 缺少可靠字段时应显示保守结果，不根据 JSON 猜测成功。
 - 上下文数据缺失时显示未知，不以看似精确的假百分比换取视觉完整。
 - 删除旧入口前保留一个可回退提交点；回退不得回滚已经写入的新 canonical Session facts。

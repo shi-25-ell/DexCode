@@ -67,6 +67,7 @@ export type RunReport = {
     totalTokens: number;
     unknown: number;
   };
+  latestInputTokens?: number;
   toolsUsed: string[];
   filesModified: string[];
   error?: { code: string; message: string };
@@ -92,10 +93,30 @@ export type CompactionCheckpoint = {
   strategyVersion: 'deterministic-summary-v1';
 };
 
+export type ToolViewStatus = 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
+
+export type ToolPresentation = {
+  callRef: string;
+  category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'other';
+  name: string;
+  target?: string;
+  status: ToolViewStatus;
+  summary: string;
+  rawOutput?: string;
+  truncated?: boolean;
+  fileChange?: {
+    path: string;
+    additions?: number;
+    deletions?: number;
+    binary?: boolean;
+  };
+};
+
 export type SessionLedgerRecord =
   | { seq: number; at: string; runId: string; type: 'run_started'; context?: RunContext }
   | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage }
-  | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string }
+  | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string; input?: Record<string, unknown> }
+  | { seq: number; at: string; runId: string; type: 'tool_completed'; callId: string; presentation: ToolPresentation }
   | { seq: number; at: string; runId: string; type: 'context_committed'; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }
   | { seq: number; at: string; runId: string; type: 'run_terminal'; report: RunReport }
   | { seq: number; at: string; runId: string; type: 'recovery'; reason: 'interrupted' };
@@ -136,6 +157,7 @@ export type Session = {
   runReports?: RunReport[];
   contextManifests?: ContextManifest[];
   compactionCheckpoints?: CompactionCheckpoint[];
+  clientRequestIds?: string[];
 };
 
 export type SessionMeta = {
@@ -189,6 +211,19 @@ export type ToolEvent = {
   tool: string;
   summary?: string;
   detail?: string;
+};
+
+export type ToolViewEvent = {
+  type: 'tool_view';
+  presentation: ToolPresentation;
+};
+
+export type ContextUsageEvent = {
+  type: 'context_usage';
+  usedTokens?: number;
+  limitTokens?: number;
+  source: 'provider' | 'estimated' | 'unknown';
+  asOfTurn?: number;
 };
 
 export type ResultEvent = {
@@ -254,6 +289,8 @@ export type AgentEvent =
   | ReasoningChunkEvent
   | ToolStatusEvent
   | ToolEvent
+  | ToolViewEvent
+  | ContextUsageEvent
   | ResultEvent
   | ErrorEvent
   | ConfirmRequestEvent

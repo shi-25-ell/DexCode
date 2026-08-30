@@ -225,3 +225,51 @@ test('project memory is isolated by workspace identity', async () => {
     await rm(projectDir, { recursive: true, force: true });
   }
 });
+
+test('first submitted prompt materializes one titled Session idempotently', async () => {
+  const repository = createSessionRepository({ projectId: `test-materialize-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const first = await repository.materializeRun({
+      scope: { kind: 'general' },
+      clientRequestId: 'request-1',
+      runId: 'run-1',
+      userMessage: { role: 'user', content: '  请分析当前项目的问题  ' },
+      context: generalContext,
+    });
+    const retry = await repository.materializeRun({
+      scope: { kind: 'general' },
+      clientRequestId: 'request-1',
+      runId: 'run-2',
+      userMessage: { role: 'user', content: '不应创建第二个会话' },
+      context: generalContext,
+    });
+    assert.equal(first.created, true);
+    assert.equal(retry.created, false);
+    assert.equal(retry.session.sessionId, first.session.sessionId);
+    assert.equal(first.session.title, '请分析当前项目的问题');
+    assert.deepEqual(first.session.ledger?.map((record) => record.type), ['run_started', 'message']);
+    assert.equal((await repository.listSessions({ kind: 'general' })).length, 1);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('a follow-up Run persists its client request key for retry replay', async () => {
+  const repository = createSessionRepository({ projectId: `test-follow-up-idempotency-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.beginRun({
+      sessionId: session.sessionId,
+      runId: 'run-follow-up',
+      clientRequestId: 'request-follow-up',
+      userMessage: { role: 'user', content: '继续分析' },
+      context: generalContext,
+    });
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.deepEqual(loaded?.clientRequestIds, ['request-follow-up']);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});

@@ -84,5 +84,8 @@ export type ChatOptions = {
 export type ModelClient = {
   readonly model: string;
   readonly baseUrl: string;
+  readonly displayName?: string;
+  readonly contextWindow?: number;
+  readonly providerDisplayName?: string;
   streamMessage(messages: unknown[], options?: ChatOptions): AsyncIterable<ModelEvent>;
 };

@@ -25,6 +25,7 @@ import type {
   SkillTrigger,
 } from '../skill-system/index.ts';
 import { captureFileDiff } from './file-diff.ts';
+import { presentTool } from '../conversation-view/tool-presentation.ts';
 import { LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitions.ts';
 
 export type CodingToolHost = {
@@ -61,7 +62,7 @@ export type ExecutorHooks = { onConfirm?: ConfirmHook; onCommandConfirm?: Comman
 export type ExecutorSemanticHooks = {
   assistantCommitted(message: AssistantMessage): Promise<void>;
   toolStarted(call: ToolCall): Promise<void>;
-  toolOutcome(message: ToolResultMessage): Promise<void>;
+  toolOutcome(message: ToolResultMessage, presentation: import('../shared/types.ts').ToolPresentation): Promise<void>;
 };
 export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
 export type TerminationReason =
@@ -84,6 +85,7 @@ export type LoopResult = {
   modelTurnCount: number;
   modelAttemptCount: number;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number; unknown: number };
+  latestInputTokens?: number;
   error?: { code: string; message: string };
 };
 
@@ -279,8 +281,9 @@ export function createExecutor(
       let modelTurnCount = 0;
       let modelAttemptCount = 0;
       let usage: LoopResult['usage'] = { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 };
+      let latestInputTokens: number | undefined;
       let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
-      const base = () => ({ messages: loopMessages, finalContent, toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage });
+      const base = () => ({ messages: loopMessages, finalContent, toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens });
       const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
       const maxAttempts = options.maxModelAttempts ?? maxTurns * 2;
       const maxRetries = options.maxRetriesPerTurn ?? 1;
@@ -325,6 +328,14 @@ export function createExecutor(
         }
 
         usage = usageSummary(usage, response.usage);
+        latestInputTokens = response.usage?.inputTokens;
+        onEvent({
+          type: 'context_usage',
+          ...(latestInputTokens !== undefined ? { usedTokens: latestInputTokens } : {}),
+          ...(modelClient.contextWindow !== undefined ? { limitTokens: modelClient.contextWindow } : {}),
+          source: latestInputTokens !== undefined ? 'provider' : 'unknown',
+          asOfTurn: modelTurnCount,
+        });
         finalContent = response.content || finalContent;
         const assistant = assistantMessage(response);
         await options.semantic?.assistantCommitted(assistant);
@@ -365,6 +376,7 @@ export function createExecutor(
           const args = call.arguments as JsonObject & Record<string, unknown>;
           toolsUsed.push(toolName);
           let toolResult: unknown;
+          let fileDiff: FileDiff | undefined;
           const invalid = validationError(currentDefinitions, toolName, args);
           try {
             if (invalid) {
@@ -372,6 +384,7 @@ export function createExecutor(
             } else {
               await options.semantic?.toolStarted(legacyCall);
               onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'running' });
+              onEvent({ type: 'tool_view', presentation: presentTool({ callRef: call.id, tool: toolName, args, status: 'running' }) });
             }
             if (invalid) {
               // Rejected calls still receive a paired tool result but never reach an execution adapter.
@@ -408,6 +421,7 @@ export function createExecutor(
                 } else if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
                   const captured = await captureFileDiff(codingToolHost.readFile, args.path, () => fn(args));
                   toolResult = captured.result;
+                  fileDiff = captured.diff;
                   fileChanges.push(captured.diff);
                   filesModified.push(args.path);
                 } else {
@@ -440,7 +454,9 @@ export function createExecutor(
             name: toolName,
             content: stringifyToolResult(toolResult),
           };
-          await options.semantic?.toolOutcome(toolMessage);
+          const presentation = presentTool({ callRef: call.id, tool: toolName, args, result: toolResult, fileDiff });
+          onEvent({ type: 'tool_view', presentation });
+          await options.semantic?.toolOutcome(toolMessage, presentation);
           workingMessages.push(toolMessage);
           loopMessages.push(toolMessage);
         }

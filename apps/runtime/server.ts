@@ -15,6 +15,8 @@ import { createExternalMcpRegistry, type ExternalMcpServerConfig } from '../../p
 import { createSkillRegistry, importSkill, previewSkillImport, type SkillImportRequest } from '../../packages/skill-system/index.ts';
 import { createTemplateGenerator } from '../../packages/template-generator/index.ts';
 import { createSuccessResponse } from '../../packages/shared/index.ts';
+import { createCapabilityRegistry } from '../../packages/capability-registry/index.ts';
+import { presentTool, projectConversation, projectConversationListItem } from '../../packages/conversation-view/index.ts';
 
 type RequestContext = {
   path?: string;
@@ -129,6 +131,7 @@ async function parseBody<T>(req: IncomingMessage): Promise<T> {
 // ── 挂起确认表（内存）──
 const pendingConfirms = new Map<string, PendingConfirm>();
 const pendingCommandConfirms = new Map<string, PendingCommandConfirm>();
+const activeConversationRuns = new Map<string, AbortController>();
 
 function createCommandConfirmHook(
   sessionId: string,
@@ -225,6 +228,9 @@ const externalMcpConfigs: ExternalMcpServerConfig[] = (() => {
 })();
 const externalMcpRegistry = createExternalMcpRegistry(externalMcpConfigs);
 const templateGenerator = createTemplateGenerator();
+const capabilityRegistry = createCapabilityRegistry({
+  disabled: (process.env.DEX_DISABLED_CAPABILITIES ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+});
 
 type WorkspaceRuntime = {
   workspace: WorkspaceRecord;
@@ -232,6 +238,13 @@ type WorkspaceRuntime = {
   codingToolHost: CodingToolHost;
   skillRegistry: SkillRegistry;
   codingAgent: CodingAgent;
+};
+
+type ConversationRunPayload = {
+  prompt?: string;
+  conversationRef?: string;
+  clientRequestId?: string;
+  scope?: { kind?: 'general' | 'workspace'; workspaceRef?: string };
 };
 
 const workspaceRuntimes = new Map<string, WorkspaceRuntime>();
@@ -284,44 +297,40 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
 
 async function runtimeForSession(session: Session): Promise<WorkspaceRuntime> {
   if (session.scope.kind !== 'workspace') throw new HttpError(409, 'WORKSPACE_REQUIRED');
-  const cached = workspaceRuntimes.get(session.scope.workspaceId);
+  return runtimeForWorkspaceRef(session.scope.workspaceId);
+}
+
+async function runtimeForWorkspaceRef(workspaceRef: string): Promise<WorkspaceRuntime> {
+  const cached = workspaceRuntimes.get(workspaceRef);
   if (cached) return cached;
-  const workspace = await workspaceRegistry.resolveAvailable(session.scope.workspaceId);
+  const workspace = await workspaceRegistry.resolveAvailable(workspaceRef);
   return loadWorkspaceRuntime(workspace.canonicalRootPath);
 }
 
-let activeRuntime = await loadWorkspaceRuntime(process.env.WORKSPACE_DIR, { allowCreate: true });
-let workspaceService = activeRuntime.workspaceService;
-let codingToolHost = activeRuntime.codingToolHost;
-let skillRegistry = activeRuntime.skillRegistry;
-let codingAgent = activeRuntime.codingAgent;
+const defaultRuntime = await loadWorkspaceRuntime(process.env.WORKSPACE_DIR, { allowCreate: true });
+const generalAgent = createCodingAgent(
+  createContextManager(defaultRuntime.codingToolHost),
+  defaultRuntime.codingToolHost,
+  modelClient,
+  sessionRepository,
+  externalMcpRegistry,
+  undefined,
+  { scope: { kind: 'general' } },
+);
 
-function activeScope(): SessionScope {
-  return { kind: 'workspace', workspaceId: activeRuntime.workspace.workspaceId };
+function workspaceScope(runtime: WorkspaceRuntime): SessionScope {
+  return { kind: 'workspace', workspaceId: runtime.workspace.workspaceId };
 }
 
-function isActiveSession(session: Session): boolean {
-  return session.scope.kind === 'workspace'
-    && session.scope.workspaceId === activeRuntime.workspace.workspaceId;
-}
-
-async function loadActiveSession(sessionId: string): Promise<Session> {
+async function loadScopedSession(sessionId: string, scope: SessionScope): Promise<Session> {
   const session = await sessionRepository.loadSession(sessionId);
-  if (!session || !isActiveSession(session)) {
-    throw new HttpError(404, 'Session not found in the active workspace');
+  if (!session || JSON.stringify(session.scope) !== JSON.stringify(scope)) {
+    throw new HttpError(404, '该会话不属于当前范围');
   }
   return session;
 }
 
-function activateRuntime(runtime: WorkspaceRuntime): void {
-  activeRuntime = runtime;
-  workspaceService = runtime.workspaceService;
-  codingToolHost = runtime.codingToolHost;
-  skillRegistry = runtime.skillRegistry;
-  codingAgent = runtime.codingAgent;
-}
-
-await sessionRepository.getCurrentSession(activeScope());
+await sessionRepository.getCurrentSession(workspaceScope(defaultRuntime));
 
 // ── 静态文件 ──
 async function tryReadStaticFile(pathname: string) {
@@ -366,6 +375,7 @@ function createBoundedSseWriter(
     event.type === 'chunk' ||
     event.type === 'reasoning_chunk' ||
     event.type === 'tool_status' ||
+    (event.type === 'tool_view' && event.presentation.status === 'running') ||
     (event.type === 'task_status' && event.status === 'executing');
 
   const waitForDrain = () => new Promise<void>((resolve) => res.once('drain', resolve));
@@ -425,6 +435,161 @@ export function startRuntimeServer() {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
     try {
+    const requestedWorkspaceRef = String(req.headers['x-workspace-ref'] ?? url.searchParams.get('workspaceRef') ?? '').trim();
+    const requestRuntime = requestedWorkspaceRef
+      ? await runtimeForWorkspaceRef(requestedWorkspaceRef)
+      : defaultRuntime;
+    const workspaceService = requestRuntime.workspaceService;
+    const codingToolHost = requestRuntime.codingToolHost;
+    const skillRegistry = requestRuntime.skillRegistry;
+    const codingAgent = requestRuntime.codingAgent;
+    const requestWorkspaceScope = workspaceScope(requestRuntime);
+
+    if (url.pathname === '/api/capabilities' && req.method === 'GET') {
+      sendJson(res, 200, { capabilities: capabilityRegistry.list() });
+      return;
+    }
+
+    if (url.pathname === '/api/workspaces/resolve' && req.method === 'POST') {
+      const { path } = await parseBody<{ path?: string }>(req);
+      if (!path?.trim()) throw new HttpError(400, '请输入项目绝对路径');
+      const runtime = await loadWorkspaceRuntime(path.trim());
+      sendJson(res, 200, {
+        workspaceRef: runtime.workspace.workspaceId,
+        displayName: runtime.workspace.canonicalRootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? '项目',
+        canonicalPath: runtime.workspace.canonicalRootPath,
+      });
+      return;
+    }
+
+    if (url.pathname === '/api/conversations' && req.method === 'GET') {
+      const scope: SessionScope = url.searchParams.get('scope') === 'general'
+        ? { kind: 'general' }
+        : requestWorkspaceScope;
+      const summaries = await sessionRepository.listSessions(scope);
+      const sessions = await Promise.all(summaries.map((item) => sessionRepository.loadSession(item.sessionId)));
+      sendJson(res, 200, { conversations: sessions.filter((session): session is Session => Boolean(session)).map(projectConversationListItem) });
+      return;
+    }
+
+    const conversationViewMatch = /^\/api\/conversations\/([^/]+)\/view$/.exec(url.pathname);
+    if (conversationViewMatch && req.method === 'GET') {
+      const conversationRef = decodeURIComponent(conversationViewMatch[1]);
+      const scope: SessionScope = url.searchParams.get('scope') === 'general'
+        ? { kind: 'general' }
+        : requestWorkspaceScope;
+      const session = await loadScopedSession(conversationRef, scope);
+      sendJson(res, 200, { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }) });
+      return;
+    }
+
+    const runCommandMatch = /^\/api\/conversation-runs\/([^/]+)\/commands$/.exec(url.pathname);
+    if (runCommandMatch && req.method === 'POST') {
+      const runRef = decodeURIComponent(runCommandMatch[1]);
+      const { action } = await parseBody<{ action?: 'stop' }>(req);
+      if (action !== 'stop') throw new HttpError(400, '不支持的运行命令');
+      const controller = activeConversationRuns.get(runRef);
+      if (!controller) throw new HttpError(404, '当前运行不存在或已经结束');
+      controller.abort();
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (url.pathname === '/api/conversation-runs' && req.method === 'POST') {
+      const payload = await parseBody<ConversationRunPayload>(req);
+      const prompt = payload.prompt?.trim() ?? '';
+      const clientRequestId = payload.clientRequestId?.trim() ?? '';
+      if (!prompt) throw new HttpError(400, '消息不能为空');
+      if (!clientRequestId) throw new HttpError(400, 'clientRequestId required');
+
+      let scope: SessionScope;
+      let agent: CodingAgent;
+      if (payload.scope?.kind === 'workspace') {
+        const workspaceRef = payload.scope.workspaceRef?.trim();
+        if (!workspaceRef) throw new HttpError(400, 'workspaceRef required');
+        const workspace = await workspaceRegistry.resolveAvailable(workspaceRef);
+        const runtime = await loadWorkspaceRuntime(workspace.canonicalRootPath);
+        scope = workspaceScope(runtime);
+        agent = runtime.codingAgent;
+      } else {
+        scope = { kind: 'general' };
+        agent = generalAgent;
+      }
+
+      const runId = crypto.randomUUID();
+      const runContext = scope.kind === 'workspace'
+        ? {
+            scope,
+            workspace: {
+              workspaceId: scope.workspaceId,
+              rootPath: (await workspaceRegistry.resolveAvailable(scope.workspaceId)).canonicalRootPath,
+            },
+          }
+        : { scope };
+      let session: Session;
+      let isNew = false;
+      let prestarted = false;
+      if (payload.conversationRef) {
+        session = await loadScopedSession(payload.conversationRef, scope);
+        if (session.clientRequestIds?.includes(clientRequestId)) {
+          res.writeHead(200, sseHeaders());
+          res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.sessionId, isNew: false })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }), idempotentReplay: true } })}\n\n`);
+          res.end();
+          return;
+        }
+      } else {
+        const materialized = await sessionRepository.materializeRun({
+          scope,
+          clientRequestId,
+          runId,
+          userMessage: { role: 'user', content: prompt },
+          context: runContext,
+        });
+        session = materialized.session;
+        isNew = materialized.created;
+        prestarted = materialized.created;
+        if (!materialized.created) {
+          res.writeHead(200, sseHeaders());
+          res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.sessionId, isNew: false })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }), idempotentReplay: true } })}\n\n`);
+          res.end();
+          return;
+        }
+      }
+
+      res.writeHead(200, sseHeaders());
+      const controller = new AbortController();
+      activeConversationRuns.set(runId, controller);
+      const writer = createBoundedSseWriter(res, () => controller.abort());
+      writer.write({ type: 'session', sessionId: session.sessionId, isNew });
+      const onEvent = (event: AgentEvent) => writer.write(event);
+      let responseFinished = false;
+      res.on('close', () => {
+        if (!responseFinished) controller.abort();
+      });
+      try {
+        await agent.runTask(
+          session.sessionId,
+          prompt,
+          null,
+          onEvent,
+          {
+            onConfirm: createConfirmHook(session.sessionId, runId, onEvent),
+            onCommandConfirm: createCommandConfirmHook(session.sessionId, runId, onEvent),
+          },
+          { runId, signal: controller.signal, prestarted, clientRequestId },
+        );
+      } catch (error) {
+        writer.write({ type: 'error', message: error instanceof Error ? error.message : '运行失败' });
+      } finally {
+        responseFinished = true;
+        activeConversationRuns.delete(runId);
+        await writer.drain();
+        res.end();
+      }
+      return;
+    }
     if (url.pathname === '/api/external-mcp/tools' && req.method === 'GET') {
       try {
         sendJson(res, 200, { tools: await externalMcpRegistry.listTools() });
@@ -494,23 +659,29 @@ export function startRuntimeServer() {
 
     // ── GET /api/meta ──
     if (url.pathname === '/api/meta') {
-      const session = await sessionRepository.getCurrentSession(activeScope());
       sendJson(res, 200, {
         appName: 'DexCode',
         llmEnabled: modelClient.model !== 'mock',
-        provider: modelClient.model === 'mock' ? 'mock' : (process.env.LLM_PROVIDER || 'openai-compat'),
-        sessionId: session?.sessionId ?? null,
-        workspaceId: activeRuntime.workspace.workspaceId,
+        model: {
+          displayName: modelClient.displayName ?? modelClient.model,
+          ...(modelClient.contextWindow ? { contextWindow: modelClient.contextWindow } : {}),
+          ...(modelClient.providerDisplayName ? { providerDisplayName: modelClient.providerDisplayName } : {}),
+        },
+        workspace: {
+          ref: requestRuntime.workspace.workspaceId,
+          displayName: requestRuntime.workspace.canonicalRootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? '项目',
+          canonicalPath: requestRuntime.workspace.canonicalRootPath,
+        },
       });
       return;
     }
 
     // ── GET /api/session ──
     if (url.pathname === '/api/session' && req.method === 'GET') {
-      const session = await sessionRepository.getCurrentSession(activeScope());
+      const session = await sessionRepository.getCurrentSession(requestWorkspaceScope);
       sendJson(res, 200, {
         sessionId: session?.sessionId ?? null,
-        scope: session?.scope ?? activeScope(),
+        scope: session?.scope ?? requestWorkspaceScope,
         createdAt: session?.createdAt ?? null,
         updatedAt: session?.updatedAt ?? null,
         messageCount: session?.messages.length ?? 0,
@@ -523,7 +694,7 @@ export function startRuntimeServer() {
     // ── POST /api/session（新建会话）──
     if (url.pathname === '/api/session' && req.method === 'POST') {
       const { kind } = await parseBody<{ kind?: 'general' | 'workspace' }>(req);
-      const scope = kind === 'general' ? { kind: 'general' } as const : activeScope();
+      const scope = kind === 'general' ? { kind: 'general' } as const : requestWorkspaceScope;
       sendJson(res, 200, {
         sessionId: null,
         scope,
@@ -536,7 +707,7 @@ export function startRuntimeServer() {
 
     // ── GET /api/sessions（历史会话列表）──
     if (url.pathname === '/api/sessions' && req.method === 'GET') {
-      const scope = url.searchParams.get('scope') === 'general' ? { kind: 'general' } as const : activeScope();
+      const scope = url.searchParams.get('scope') === 'general' ? { kind: 'general' } as const : requestWorkspaceScope;
       const sessions = await sessionRepository.listSessions(scope);
       sendJson(res, 200, { sessions });
       return;
@@ -547,7 +718,7 @@ export function startRuntimeServer() {
       const { sessionId } = await parseBody<{ sessionId?: string }>(req);
       if (!sessionId) { sendJson(res, 400, { error: 'sessionId is required' }); return; }
       try {
-        const session = await sessionRepository.switchSession(sessionId, activeScope());
+        const session = await sessionRepository.switchSession(sessionId, requestWorkspaceScope);
         sendJson(res, 200, {
           sessionId: session.sessionId,
           scope: session.scope,
@@ -565,7 +736,7 @@ export function startRuntimeServer() {
     // ── DELETE /api/session/:id ──
     if (url.pathname.startsWith('/api/session/') && !url.pathname.includes('/export') && req.method === 'DELETE') {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', ''));
-      const session = await loadActiveSession(sessionId);
+      const session = await loadScopedSession(sessionId, requestWorkspaceScope);
       if (session.activeTaskId) throw new HttpError(409, 'Cannot delete a Session with an active Run');
       const ok = await sessionRepository.deleteSession(sessionId);
       sendJson(res, ok ? 200 : 404, ok ? { ok: true, sessionId } : { error: 'Session not found' });
@@ -577,7 +748,7 @@ export function startRuntimeServer() {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', ''));
       const meta = await parseBody<{ title?: string; archived?: boolean }>(req);
       try {
-        await loadActiveSession(sessionId);
+        await loadScopedSession(sessionId, requestWorkspaceScope);
         const updated = await sessionRepository.updateSessionMeta(sessionId, meta);
         sendJson(res, 200, updated);
       } catch (err) {
@@ -590,7 +761,7 @@ export function startRuntimeServer() {
     if (url.pathname.startsWith('/api/session/') && url.pathname.endsWith('/export') && req.method === 'GET') {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', '').replace('/export', ''));
       try {
-        await loadActiveSession(sessionId);
+        await loadScopedSession(sessionId, requestWorkspaceScope);
         const session = await sessionRepository.exportSession(sessionId);
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
@@ -606,7 +777,7 @@ export function startRuntimeServer() {
     // ── GET /api/sessions/search ──
     if (url.pathname === '/api/sessions/search' && req.method === 'GET') {
       const query = url.searchParams.get('q') ?? '';
-      const results = await sessionRepository.searchSessions(query, activeScope());
+      const results = await sessionRepository.searchSessions(query, requestWorkspaceScope);
       sendJson(res, 200, { sessions: results });
       return;
     }
@@ -671,13 +842,13 @@ export function startRuntimeServer() {
 
     // ── POST /api/workspace/load（切换工作区目录）──
     if (url.pathname === '/api/project-memory' && req.method === 'GET') {
-      sendJson(res, 200, await sessionRepository.getProjectMemory(activeRuntime.workspace.workspaceId));
+      sendJson(res, 200, await sessionRepository.getProjectMemory(requestRuntime.workspace.workspaceId));
       return;
     }
 
     if (url.pathname === '/api/project-memory' && req.method === 'PUT') {
       const { content } = await parseBody<RequestContext>(req);
-      const updated = await sessionRepository.writeProjectMemory(content ?? '', activeRuntime.workspace.workspaceId);
+      const updated = await sessionRepository.writeProjectMemory(content ?? '', requestRuntime.workspace.workspaceId);
       sendJson(res, 200, { ok: true, ...updated });
       return;
     }
@@ -689,7 +860,7 @@ export function startRuntimeServer() {
         return;
       }
       try {
-        const updated = await sessionRepository.appendProjectMemory(entry, section, activeRuntime.workspace.workspaceId);
+        const updated = await sessionRepository.appendProjectMemory(entry, section, requestRuntime.workspace.workspaceId);
         sendJson(res, 200, { ok: true, ...updated });
       } catch (err) {
         sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -705,12 +876,11 @@ export function startRuntimeServer() {
       }
       try {
         const runtime = await loadWorkspaceRuntime(dirPath);
-        activateRuntime(runtime);
-        const tree = workspaceService.listTree();
+        const tree = runtime.workspaceService.listTree();
         sendJson(res, 200, {
           ok: true,
-          workspaceId: activeRuntime.workspace.workspaceId,
-          rootDir: workspaceService.getRootDir(),
+          workspaceId: runtime.workspace.workspaceId,
+          rootDir: runtime.workspaceService.getRootDir(),
           tree,
           sessionId: null,
           sessionMaterialized: false,
@@ -730,11 +900,9 @@ export function startRuntimeServer() {
         const partial = endsWithSep ? '' : prefix.slice(dir.endsWith('/') ? dir.length : dir.length + 1);
         const entries = await readdir(dir, { withFileTypes: true });
         const suggestions = entries
-          .filter((entry): entry is { name: string; isDirectory: () => boolean } => {
-            return typeof entry !== 'string' && entry.isDirectory() && !entry.name.startsWith('.') && entry.name.startsWith(partial);
-          })
+          .flatMap((entry) => typeof entry !== 'string' && entry.isDirectory() && !entry.name.startsWith('.') && entry.name.startsWith(partial) ? [entry.name] : [])
           .slice(0, 10)
-          .map((entry) => join(dir, entry.name) + '/');
+          .map((name) => join(dir, name) + '/');
         sendJson(res, 200, { suggestions });
       } catch {
         sendJson(res, 200, { suggestions: [] });
@@ -829,7 +997,10 @@ export function startRuntimeServer() {
           lastCalledAt: null,
         }));
       } catch { /* external MCP not available */ }
-      sendJson(res, 200, { tools: [...localTools, ...externalTools] });
+      sendJson(res, 200, { tools: [...localTools, ...externalTools].map((tool) => ({
+        ...tool,
+        displayName: presentTool({ callRef: 'settings', tool: tool.name, status: 'running' }).name,
+      })) });
       return;
     }
 
@@ -1020,11 +1191,10 @@ export function startRuntimeServer() {
 
       let session: Session;
       if (reqSessionId) {
-        session = await loadActiveSession(reqSessionId);
+        session = await loadScopedSession(reqSessionId, requestWorkspaceScope);
       } else {
-        session = await sessionRepository.createSession(activeScope());
+        session = await sessionRepository.createSession(requestWorkspaceScope);
       }
-      if (!isActiveSession(session)) throw new HttpError(409, 'SESSION_WORKSPACE_MISMATCH');
       const sessionRuntime = await runtimeForSession(session);
 
       res.writeHead(200, sseHeaders());
@@ -1229,6 +1399,15 @@ export function startRuntimeServer() {
       res.writeHead(200, { "Content-Type": type });
       res.end(content);
       return;
+    }
+
+    if (req.method === 'GET' && !url.pathname.startsWith('/api/') && !url.pathname.startsWith('/mcp')) {
+      const index = await tryReadStaticFile('/index.html');
+      if (index) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(index);
+        return;
+      }
     }
 
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
