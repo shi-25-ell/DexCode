@@ -3,7 +3,7 @@ import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { apiJson } from '../api';
 import { PanelHeader, SettingsDialog, SettingsFeedback, Toggle } from './settings-shared';
-import type { McpServer, McpTool } from './types';
+import type { McpServer, McpServerStatus, McpTool } from './types';
 
 function parseRecord(value: string, label: string): Record<string, string> {
   if (!value.trim()) return {};
@@ -17,6 +17,22 @@ function parseArgs(value: string): string[] {
   const parsed = JSON.parse(value) as unknown;
   if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) throw new Error('启动参数必须是字符串数组 JSON');
   return parsed;
+}
+
+export function describeMcpStatus(
+  server: McpServer,
+  status: McpServerStatus | undefined,
+  loading: boolean,
+): { tone: 'normal' | 'error'; text: string } {
+  if (server.enabled === false) return { tone: 'normal', text: '已停用' };
+  if (!status) return { tone: 'normal', text: loading ? '正在连接并识别工具…' : '等待连接检查' };
+  if (status.state === 'error') return { tone: 'error', text: `连接失败：${status.error || '未知错误'}` };
+  if (status.state === 'connecting') return { tone: 'normal', text: '正在初始化 MCP 会话…' };
+  if (status.state === 'idle') return { tone: 'normal', text: '等待连接检查' };
+  return {
+    tone: 'normal',
+    text: `已连接 · ${status.toolCount} 个工具${status.protocolVersion ? ` · MCP ${status.protocolVersion}` : ''}`,
+  };
 }
 
 export function McpPanel() {
@@ -33,7 +49,11 @@ export function McpPanel() {
   const [enabled, setEnabled] = useState(true);
   const [formError, setFormError] = useState('');
   const query = useQuery({ queryKey: ['mcp-servers'], queryFn: () => apiJson<{ servers: McpServer[] }>('/api/external-mcp/servers') });
-  const tools = useQuery({ queryKey: ['mcp-tools'], queryFn: () => apiJson<{ tools: McpTool[] }>('/api/external-mcp/tools'), retry: false });
+  const tools = useQuery({
+    queryKey: ['mcp-tools'],
+    queryFn: () => apiJson<{ tools: McpTool[]; statuses: McpServerStatus[] }>('/api/external-mcp/tools'),
+    retry: false,
+  });
   const save = useMutation({
     mutationFn: (servers: McpServer[]) => apiJson('/api/external-mcp/servers', { method: 'POST', body: JSON.stringify({ servers }) }),
     onSuccess: async () => { setEditing(false); await client.invalidateQueries({ queryKey: ['mcp-servers'] }); await client.invalidateQueries({ queryKey: ['mcp-tools'] }); },
@@ -67,7 +87,14 @@ export function McpPanel() {
     } catch (error) { setFormError(error instanceof Error ? error.message : '配置无效'); }
   };
   const toggle = (server: McpServer) => save.mutate((query.data?.servers ?? []).map((item) => item.name === server.name ? { ...item, enabled: item.enabled === false } : item));
-  return <><PanelHeader title="MCP" description="添加、识别和管理 HTTP 或本地进程 MCP 服务器；对话调用时会显示对应提示。" onRefresh={() => { void query.refetch(); void tools.refetch(); }} action={<button className="primary-button" aria-label="添加 MCP 服务器" onClick={openNew}><Plus size={15} />添加</button>} /><SettingsFeedback loading={query.isLoading} error={query.error} empty={!query.isLoading && query.data?.servers.length === 0 ? '暂无 MCP 服务器' : undefined} /><div className="settings-list">{query.data?.servers.map((server) => { const serverTools = tools.data?.tools.filter((tool) => tool.server === server.name) ?? []; return <article className="settings-row" key={server.name}><div className="settings-row-main"><div className="settings-row-title"><strong>{server.name}</strong><span>{server.type === 'http' ? 'HTTP' : '本地进程'}</span><span>{server.enabled === false ? '已停用' : '已启用'}</span></div><p>{server.type === 'http' ? server.url : server.command}</p><div className="settings-meta">{tools.isError && server.enabled !== false ? '工具识别失败，请检查连接' : `识别到 ${serverTools.length} 个工具`}</div>{serverTools.length ? <details><summary>查看工具</summary><div className="mcp-tool-list">{serverTools.map((tool) => <span title={tool.description} key={tool.name}>{tool.name}</span>)}</div></details> : null}</div><div className="settings-row-actions"><button className="secondary-button" onClick={() => openEdit(server)}><Pencil size={14} />编辑</button><button className="danger-icon" aria-label={`删除 ${server.name}`} onClick={() => { if (window.confirm(`确定删除 MCP 服务器“${server.name}”吗？`)) remove.mutate(server); }}><Trash2 size={15} /></button><Toggle enabled={server.enabled !== false} label={server.name} disabled={save.isPending} onChange={() => toggle(server)} /></div></article>; })}</div>
+  return <><PanelHeader title="MCP" description="添加、识别和管理 HTTP 或本地进程 MCP 服务器；对话调用时会显示对应提示。" onRefresh={() => { void query.refetch(); void tools.refetch(); }} action={<button className="primary-button" aria-label="添加 MCP 服务器" onClick={openNew}><Plus size={15} />添加</button>} /><SettingsFeedback loading={query.isLoading} error={query.error} empty={!query.isLoading && query.data?.servers.length === 0 ? '暂无 MCP 服务器' : undefined} /><div className="settings-list">{query.data?.servers.map((server) => {
+      const serverTools = tools.data?.tools.filter((tool) => tool.server === server.name) ?? [];
+      const serverStatus = tools.data?.statuses.find((status) => status.name === server.name);
+      const presentation = tools.isError && server.enabled !== false
+        ? { tone: 'error' as const, text: tools.error instanceof Error ? `状态检查失败：${tools.error.message}` : '状态检查失败' }
+        : describeMcpStatus(server, serverStatus, tools.isLoading || tools.isFetching);
+      return <article className="settings-row" key={server.name}><div className="settings-row-main"><div className="settings-row-title"><strong>{server.name}</strong><span>{server.type === 'http' ? 'HTTP' : '本地进程'}</span><span>{server.enabled === false ? '已停用' : '已启用'}</span></div><p>{server.type === 'http' ? server.url : server.command}</p><div className={`settings-meta${presentation.tone === 'error' ? ' error' : ''}`}>{presentation.text}</div>{serverTools.length ? <details><summary>查看工具</summary><div className="mcp-tool-list">{serverTools.map((tool) => <span title={tool.description} key={tool.name}>{tool.name}</span>)}</div></details> : null}</div><div className="settings-row-actions"><button className="secondary-button" onClick={() => openEdit(server)}><Pencil size={14} />编辑</button><button className="danger-icon" aria-label={`删除 ${server.name}`} onClick={() => { if (window.confirm(`确定删除 MCP 服务器“${server.name}”吗？`)) remove.mutate(server); }}><Trash2 size={15} /></button><Toggle enabled={server.enabled !== false} label={server.name} disabled={save.isPending} onChange={() => toggle(server)} /></div></article>;
+    })}</div>
     {editing ? <SettingsDialog title={originalName ? `编辑 MCP：${originalName}` : '添加 MCP 服务器'} onClose={() => setEditing(false)} wide><form onSubmit={submit}><div className="settings-form-grid"><label className="settings-field"><span>服务器名称</span><input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="settings-field"><span>连接类型</span><select value={type} onChange={(event) => setType(event.target.value as 'http' | 'stdio')}><option value="http">HTTP</option><option value="stdio">本地进程（stdio）</option></select></label></div>{type === 'http' ? <><label className="settings-field"><span>HTTP MCP 地址</span><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/mcp" /></label><details className="advanced-settings"><summary>高级设置：请求头</summary><p>可能包含密钥。只发送到本机 Runtime，不写入浏览器历史。</p><textarea rows={7} value={headers} onChange={(event) => setHeaders(event.target.value)} spellCheck={false} /></details></> : <><label className="settings-field"><span>启动命令</span><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="npx" /></label><details className="advanced-settings"><summary>高级设置：参数与环境变量</summary><label className="settings-field"><span>启动参数（JSON 数组）</span><textarea rows={5} value={args} onChange={(event) => setArgs(event.target.value)} spellCheck={false} /></label><label className="settings-field"><span>环境变量（JSON 对象）</span><textarea rows={6} value={env} onChange={(event) => setEnv(event.target.value)} spellCheck={false} /></label></details></>}<label className="checkbox-field"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />保存后立即启用并识别工具</label>{formError ? <p className="dialog-error">{formError}</p> : null}<footer className="dialog-actions"><button type="button" className="secondary-button" onClick={() => setEditing(false)}>取消</button><button type="submit" className="primary-button" disabled={save.isPending}>{save.isPending ? '保存中…' : '保存服务器'}</button></footer></form></SettingsDialog> : null}
   </>;
 }

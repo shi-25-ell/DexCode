@@ -654,7 +654,8 @@ export function startRuntimeServer() {
     }
     if (url.pathname === '/api/external-mcp/tools' && req.method === 'GET') {
       try {
-        sendJson(res, 200, { tools: await externalMcpRegistry.listTools() });
+        const tools = await externalMcpRegistry.listTools();
+        sendJson(res, 200, { tools, statuses: externalMcpRegistry.getServerStatuses() });
       } catch (error: unknown) {
         sendJson(res, error instanceof HttpError ? error.status : 500, {
           error: error instanceof Error ? error.message : 'Unknown error',

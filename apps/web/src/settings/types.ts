@@ -59,3 +59,12 @@ export type McpServer =
   | { name: string; type: 'http'; url: string; enabled?: boolean; headers?: Record<string, string> }
   | { name: string; type: 'stdio'; command: string; enabled?: boolean; args?: string[]; env?: Record<string, string> };
 export type McpTool = { server: string; name: string; description: string; inputSchema?: Record<string, unknown> };
+export type McpServerStatus = {
+  name: string;
+  type: McpServer['type'];
+  state: 'idle' | 'connecting' | 'ready' | 'error';
+  toolCount: number;
+  protocolVersion?: string;
+  serverName?: string;
+  error?: string;
+};

@@ -104,10 +104,21 @@ declare module 'child_process' {
     options: { cwd?: string; windowsHide?: boolean; maxBuffer?: number },
     callback: (error: unknown, stdout: string, stderr: string) => void,
   ): void;
-  export function spawn(command: string, args?: string[], options?: { env?: Record<string, string | undefined>; stdio?: Array<'pipe' | 'ignore' | 'inherit'> }): {
+  export function spawn(command: string, args?: string[], options?: {
+    env?: Record<string, string | undefined>;
+    stdio?: Array<'pipe' | 'ignore' | 'inherit'>;
+    shell?: boolean;
+    windowsHide?: boolean;
+  }): {
+    on(event: 'error', listener: (error: Error) => void): void;
+    on(event: 'exit', listener: (code: number | null, signal: string | null) => void): void;
     stdout: { on(event: 'data', listener: (chunk: { toString(encoding?: string): string }) => void): void };
     stderr: { on(event: 'data', listener: (chunk: { toString(encoding?: string): string }) => void): void };
-    stdin: { write(data: string): void };
+    stdin: {
+      on(event: 'error', listener: (error: Error) => void): void;
+      write(data: string, callback?: (error?: Error | null) => void): void;
+      end(): void;
+    };
     kill(): void;
   };
 }

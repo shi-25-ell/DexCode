@@ -221,6 +221,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .settings-row-title span { padding: 3px 6px; border-radius: 5px; background: var(--subtle); color: var(--muted); font-size: 10px; }
 .settings-row p { margin: 0 0 7px; color: #4b5563; font-size: 12px; line-height: 1.6; }
 .settings-meta { color: #9ca3af; font-size: 11px; }
+.settings-meta.error { color: var(--red); }
 .settings-warning { color: var(--amber); font-size: 11px; }
 .settings-row details { margin-top: 8px; color: var(--muted); font-size: 11px; }
 .settings-row details code { display: inline-block; margin-top: 6px; }

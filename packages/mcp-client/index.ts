@@ -1,5 +1,13 @@
 import { spawn } from 'child_process';
 
+const MCP_PROTOCOL_VERSION = '2025-06-18';
+type SpawnedChild = ReturnType<typeof spawn>;
+type StdioChild = Omit<SpawnedChild, 'stdin' | 'stdout' | 'stderr'> & {
+  stdin: NonNullable<SpawnedChild['stdin']>;
+  stdout: NonNullable<SpawnedChild['stdout']>;
+  stderr: NonNullable<SpawnedChild['stderr']>;
+};
+
 export type ExternalMcpServerConfig =
   | {
       name: string;
@@ -24,6 +32,16 @@ export type ExternalMcpTool = {
   inputSchema: Record<string, unknown>;
 };
 
+export type ExternalMcpServerStatus = {
+  name: string;
+  type: ExternalMcpServerConfig['type'];
+  state: 'idle' | 'connecting' | 'ready' | 'error';
+  toolCount: number;
+  protocolVersion?: string;
+  serverName?: string;
+  error?: string;
+};
+
 type JsonRpcRequest = {
   jsonrpc: '2.0';
   id: string;
@@ -41,6 +59,7 @@ type JsonRpcResponse = {
 type Transport = {
   listTools(): Promise<ExternalMcpTool[]>;
   callTool(toolName: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+  metadata(): { protocolVersion?: string; serverName?: string };
   close(): void;
 };
 
@@ -94,47 +113,57 @@ function createHttpTransport(config: Extract<ExternalMcpServerConfig, { type: 'h
       const result = asObject(response.result);
       return 'data' in result ? result.data : result;
     },
+    metadata() {
+      return {};
+    },
     close() {},
   };
 }
 
 function createStdioTransport(config: Extract<ExternalMcpServerConfig, { type: 'stdio' }>): Transport {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let child: any = null;
-  let initError: Error | null = null;
+  let child: StdioChild | null = null;
+  let initialization: Promise<void> | null = null;
+  let negotiatedProtocolVersion: string | undefined;
+  let connectedServerName: string | undefined;
   let nextId = 1;
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>();
   let buffer = '';
 
+  function rejectPending(error: Error) {
+    for (const item of pending.values()) item.reject(error);
+    pending.clear();
+  }
+
+  function resetConnection(expectedChild: StdioChild, error: Error) {
+    if (child !== expectedChild) return;
+    rejectPending(error);
+    child = null;
+    initialization = null;
+    negotiatedProtocolVersion = undefined;
+    connectedServerName = undefined;
+    buffer = '';
+  }
+
   function ensureChild() {
     if (child) return child;
-    if (initError) throw initError;
-    try {
-      child = spawn(config.command, config.args ?? [], {
-        env: { ...(process.env as Record<string, string | undefined>), ...(config.env ?? {}) },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-        windowsHide: true,
-      } as Record<string, unknown>);
-    } catch (err) {
-      initError = err instanceof Error ? err : new Error(String(err));
-      throw initError;
-    }
-    child.on('error', (err: Error) => {
-      initError = err;
-      for (const item of pending.values()) item.reject(err);
-      pending.clear();
-      child = null;
+    const spawned = spawn(config.command, config.args ?? [], {
+      env: { ...process.env, ...(config.env ?? {}) },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
+      windowsHide: true,
+    }) as StdioChild;
+    child = spawned;
+    spawned.on('error', (error: Error) => resetConnection(spawned, error));
+    spawned.on('exit', (code, signal) => {
+      resetConnection(
+        spawned,
+        new Error(`MCP stdio server exited: ${config.name} (${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`})`),
+      );
     });
-    child.on('exit', () => {
-      const error = new Error(`MCP stdio server exited: ${config.name}`);
-      for (const item of pending.values()) item.reject(error);
-      pending.clear();
-      child = null;
-    });
-    child.stdout.on('data', childStdout);
-    child.stderr.on('data', () => { /* stderr is intentionally not mixed into JSON-RPC stdout */ });
-    return child;
+    spawned.stdin.on('error', (error: Error) => resetConnection(spawned, error));
+    spawned.stdout.on('data', childStdout);
+    spawned.stderr.on('data', () => { /* stderr is intentionally not mixed into JSON-RPC stdout */ });
+    return spawned;
   }
 
   const childStdout = (chunk: { toString(encoding?: string): string }) => {
@@ -190,12 +219,56 @@ function createStdioTransport(config: Extract<ExternalMcpServerConfig, { type: '
         reject: (reason) => settle(() => reject(reason)),
       });
       signal?.addEventListener('abort', onAbort, { once: true });
-      c.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+      c.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`, (error) => {
+        if (!error || !pending.delete(id)) return;
+        settle(() => reject(error));
+      });
     });
+  }
+
+  function notify(method: string, params?: unknown): Promise<void> {
+    const c = ensureChild();
+    return new Promise((resolve, reject) => {
+      c.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  }
+
+  async function ensureInitialized(): Promise<void> {
+    if (negotiatedProtocolVersion) return;
+    if (initialization) return initialization;
+    initialization = (async () => {
+      const result = asObject(await request('initialize', {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'DexCode', version: '0.1.0' },
+      }));
+      const protocolVersion = typeof result.protocolVersion === 'string' ? result.protocolVersion : '';
+      if (!protocolVersion) throw new Error(`MCP server ${config.name} returned no protocol version`);
+      const serverInfo = asObject(result.serverInfo);
+      await notify('notifications/initialized');
+      negotiatedProtocolVersion = protocolVersion;
+      connectedServerName = typeof serverInfo.name === 'string' ? serverInfo.name : undefined;
+    })();
+    try {
+      await initialization;
+    } catch (error) {
+      initialization = null;
+      const failedChild = child;
+      if (failedChild) {
+        resetConnection(failedChild, error instanceof Error ? error : new Error(String(error)));
+        failedChild.stdin.end();
+        failedChild.kill();
+      }
+      throw error;
+    }
   }
 
   return {
     async listTools() {
+      await ensureInitialized();
       const result = asObject(await request('tools/list'));
       const tools = Array.isArray(result.tools) ? result.tools : [];
       return tools.map((tool) => {
@@ -209,24 +282,42 @@ function createStdioTransport(config: Extract<ExternalMcpServerConfig, { type: '
       });
     },
     async callTool(toolName: string, args: Record<string, unknown> = {}, signal?: AbortSignal) {
+      await ensureInitialized();
       const result = asObject(await request('tools/call', { name: toolName, arguments: args }, signal));
       return 'data' in result ? result.data : result;
     },
+    metadata() {
+      return { protocolVersion: negotiatedProtocolVersion, serverName: connectedServerName };
+    },
     close() {
       if (!child) return;
-      child.kill();
+      const current = child;
       child = null;
+      initialization = null;
+      negotiatedProtocolVersion = undefined;
+      connectedServerName = undefined;
+      rejectPending(new Error(`MCP stdio server closed: ${config.name}`));
+      current.stdin.end();
+      current.kill();
     },
   };
 }
 
 export function createExternalMcpRegistry(configs: ExternalMcpServerConfig[]) {
-  const transports: Array<{ config: ExternalMcpServerConfig; transport: Transport }> = [];
+  const transports: Array<{
+    config: ExternalMcpServerConfig;
+    transport: Transport;
+    status: ExternalMcpServerStatus;
+  }> = [];
 
   function addServer(config: ExternalMcpServerConfig) {
     removeServer(config.name);
     const transport = config.type === 'stdio' ? createStdioTransport(config) : createHttpTransport(config);
-    transports.push({ config, transport });
+    transports.push({
+      config,
+      transport,
+      status: { name: config.name, type: config.type, state: 'idle', toolCount: 0 },
+    });
   }
 
   function removeServer(name: string) {
@@ -245,12 +336,23 @@ export function createExternalMcpRegistry(configs: ExternalMcpServerConfig[]) {
   return {
     async listTools(): Promise<ExternalMcpTool[]> {
       const all: ExternalMcpTool[] = [];
-      for (const { transport, config } of transports) {
+      for (const entry of transports) {
+        const { transport, config } = entry;
+        entry.status = { name: config.name, type: config.type, state: 'connecting', toolCount: 0 };
         try {
           const tools = await transport.listTools();
           all.push(...tools);
+          entry.status = {
+            name: config.name,
+            type: config.type,
+            state: 'ready',
+            toolCount: tools.length,
+            ...transport.metadata(),
+          };
         } catch (err) {
-          console.error(`[mcp] listTools failed for ${config.name}:`, (err as Error).message);
+          const message = err instanceof Error ? err.message : String(err);
+          entry.status = { name: config.name, type: config.type, state: 'error', toolCount: 0, error: message };
+          console.error(`[mcp] listTools failed for ${config.name}:`, message);
         }
       }
       return all;
@@ -270,6 +372,9 @@ export function createExternalMcpRegistry(configs: ExternalMcpServerConfig[]) {
     removeServer,
     listServers() {
       return transports.map((t) => ({ ...t.config }));
+    },
+    getServerStatuses(): ExternalMcpServerStatus[] {
+      return transports.map((entry) => ({ ...entry.status }));
     },
     normalizeToolName,
   };
