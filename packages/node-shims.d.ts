@@ -77,6 +77,7 @@ declare module 'node:http' {
     writeHead(statusCode: number, headers?: Record<string, string>): void;
     write(chunk: string): void;
     end(chunk?: string): void;
+    on(event: 'close', listener: () => void): void;
   };
   export function createServer(handler: (req: IncomingMessage, res: ServerResponse) => Promise<void> | void): {
     listen(port: number, callback?: () => void): void;

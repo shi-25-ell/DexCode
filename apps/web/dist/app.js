@@ -1667,8 +1667,11 @@ async function streamChat(prompt) {
                         scheduleWorkspaceRefresh(300);
                     }
                 }
-                else if (event.type === 'plan') {
-                    appendToolDetail('multi-agent', `Agent plan\n\n${event.steps.map((step) => `- ${step}`).join('\n')}`);
+                else if (event.type === 'reasoning_chunk') {
+                    setTaskPhase('editing', '模型正在推理');
+                }
+                else if (event.type === 'tool_status' && event.status === 'running') {
+                    appendToolDetail(event.tool, `正在执行工具（${event.callId}）`);
                 }
                 else if (event.type === 'skill') {
                     appendSkillEvent(event);
@@ -1698,6 +1701,7 @@ async function streamChat(prompt) {
                         summarizing: 'running',
                         waiting_confirm: 'waiting_confirm',
                         done: 'idle',
+                        aborted: 'idle',
                         error: 'idle',
                     };
                     if (statusMap[event.status]) {
@@ -1709,6 +1713,7 @@ async function streamChat(prompt) {
                         summarizing: 'validating',
                         waiting_confirm: 'waiting_user',
                         done: 'succeeded',
+                        aborted: 'failed',
                         error: 'failed',
                     };
                     if (phaseMap[event.status])

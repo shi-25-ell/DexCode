@@ -1813,10 +1813,11 @@ async function streamChat(prompt: string) {
           | ToolEvent
           | SkillEvent
           | { type: 'chunk'; chunk: string }
+          | { type: 'reasoning_chunk'; chunk: string }
+          | { type: 'tool_status'; callId: string; tool: string; status: string }
           | { type: 'result'; result: PreviewResult }
           | { type: 'error'; message: string }
           | { type: 'session'; sessionId: string }
-          | { type: 'plan'; taskId: string; steps: string[] }
           | { type: 'task_status'; taskId: string; status: string }
           | { type: 'confirm_request'; confirmId: string; question: string; options?: string[] }
           | {
@@ -1844,8 +1845,10 @@ async function streamChat(prompt: string) {
             sawWriteFileSuccess = true;
             scheduleWorkspaceRefresh(300);
           }
-        } else if (event.type === 'plan') {
-          appendToolDetail('multi-agent', `Agent plan\n\n${event.steps.map((step) => `- ${step}`).join('\n')}`);
+        } else if (event.type === 'reasoning_chunk') {
+          setTaskPhase('editing', '模型正在推理');
+        } else if (event.type === 'tool_status' && event.status === 'running') {
+          appendToolDetail(event.tool, `正在执行工具（${event.callId}）`);
         } else if (event.type === 'skill') {
           appendSkillEvent(event);
         } else if (event.type === 'result') {
@@ -1870,6 +1873,7 @@ async function streamChat(prompt: string) {
             summarizing: 'running',
             waiting_confirm: 'waiting_confirm',
             done: 'idle',
+            aborted: 'idle',
             error: 'idle',
           };
           if (statusMap[event.status]) {
@@ -1881,6 +1885,7 @@ async function streamChat(prompt: string) {
             summarizing: 'validating',
             waiting_confirm: 'waiting_user',
             done: 'succeeded',
+            aborted: 'failed',
             error: 'failed',
           };
           if (phaseMap[event.status]) setTaskPhase(phaseMap[event.status], `状态：${event.status}`);

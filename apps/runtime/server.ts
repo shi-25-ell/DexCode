@@ -318,6 +318,7 @@ export function startRuntimeServer() {
     // ── MCP 端点 ──
     if (url.pathname === '/mcp' && req.method === 'GET') {
       res.writeHead(200, sseHeaders());
+
       res.write(`event: ready\n`);
       res.write(`data: ${JSON.stringify({ ok: true, serverInfo: { name: 'ai-coding-agent-mcp', version: '0.1.0' } })}\n\n`);
       return;
@@ -855,6 +856,12 @@ export function startRuntimeServer() {
 
       res.writeHead(200, sseHeaders());
 
+      const runController = new AbortController();
+      let responseFinished = false;
+      res.on('close', () => {
+        if (!responseFinished) runController.abort('HTTP client disconnected');
+      });
+
       const writeEvent = (event: AgentEvent) => {
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       };
@@ -872,12 +879,14 @@ export function startRuntimeServer() {
           selectedFile ?? null,
           writeEvent,
           { onConfirm: confirmHook, onCommandConfirm: commandConfirmHook },
+          { runId: taskId, signal: runController.signal },
         );
       } catch (error: unknown) {
         writeEvent({ type: 'error', message: error instanceof Error ? error.message : 'Unknown error' });
       }
 
       res.write('data: [DONE]\n\n');
+      responseFinished = true;
       res.end();
       return;
     }
@@ -928,6 +937,12 @@ export function startRuntimeServer() {
 
       res.writeHead(200, sseHeaders());
 
+      const previewController = new AbortController();
+      let previewFinished = false;
+      res.on('close', () => {
+        if (!previewFinished) previewController.abort('HTTP client disconnected');
+      });
+
       const writeEvent = (event: AgentEvent) => {
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       };
@@ -939,7 +954,7 @@ export function startRuntimeServer() {
             return;
           }
           if (isAgentEvent(chunk)) writeEvent(chunk);
-        });
+        }, { signal: previewController.signal });
 
         writeEvent({ type: 'result', result });
       } catch (error: unknown) {
@@ -950,6 +965,7 @@ export function startRuntimeServer() {
       }
 
       res.write('data: [DONE]\n\n');
+      previewFinished = true;
       res.end();
       return;
     }
