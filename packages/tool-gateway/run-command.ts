@@ -3,7 +3,7 @@ import type { CommandValidation } from './command-safety.ts';
 
 export type RunCommandResult = {
   command: string;
-  status: 'success' | 'failed' | 'denied' | 'blocked';
+  status: 'success' | 'failed' | 'denied' | 'blocked' | 'cancelled';
   code?: number;
   stdout?: string;
   stderr?: string;
@@ -58,6 +58,7 @@ export function executeCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<RunCommandResult> {
   const parts = splitCommand(command);
   if (parts.length === 0) {
@@ -69,6 +70,9 @@ export function executeCommand(
   }
 
   const [cmd, ...args] = parts;
+  if (signal?.aborted) {
+    return Promise.resolve({ command, status: 'cancelled', error: '命令执行已取消' });
+  }
   const options: ExecFileOpts = {
     cwd,
     maxBuffer: 2 * 1024 * 1024,
@@ -77,14 +81,28 @@ export function executeCommand(
 
   return new Promise((resolve) => {
     let settled = false;
+    let child: { kill: () => void; pid?: number } | undefined;
+    const terminateTree = () => {
+      if (!child) return;
+      if (process.platform === 'win32' && child.pid) {
+        execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});
+      } else {
+        child.kill();
+      }
+    };
+    const onAbort = () => {
+      terminateTree();
+      finish({ command, status: 'cancelled', error: '命令执行已取消' });
+    };
     const finish = (result: RunCommandResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       resolve(result);
     };
 
-    const child = execFile(
+    child = execFile(
       cmd,
       args,
       options as Parameters<typeof execFile>[2],
@@ -104,10 +122,12 @@ export function executeCommand(
             : {}),
         });
       },
-    ) as unknown as { kill: () => void };
+    ) as unknown as { kill: () => void; pid?: number };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     const timer = setTimeout(() => {
-      child.kill();
+      terminateTree();
       finish({
         command,
         status: 'failed',

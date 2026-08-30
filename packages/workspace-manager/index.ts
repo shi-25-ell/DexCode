@@ -1,5 +1,5 @@
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve } from 'node:path';
+import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DEFAULT_PROJECT_ID, type VersionSnapshot } from '../shared/index.ts';
 import {
   applyAtLineAnchor,
@@ -50,7 +50,14 @@ function createDefaultTree(): TreeNode[] {
 }
 
 function normalizePath(path: string) {
-  return path.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/');
+  const candidate = path.replace(/\\/g, '/').replace(/\/+/g, '/').trim();
+  if (!candidate || candidate === '.') return '';
+  if (candidate.includes('\0') || candidate.startsWith('/') || /^[a-zA-Z]:\//.test(candidate) || candidate.startsWith('//')) {
+    throw new Error('Workspace path must be relative');
+  }
+  const segments = candidate.split('/');
+  if (segments.some((segment) => segment === '..')) throw new Error('Workspace path escapes the root');
+  return segments.filter((segment) => segment && segment !== '.').join('/');
 }
 
 function createNodeId(type: 'file' | 'folder', path: string) {
@@ -227,7 +234,11 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
   }
 
   function resolveWorkspacePath(...parts: string[]) {
-    return [state.rootDir, ...parts.filter(Boolean)].join('/').replace(/\/+/g, '/');
+    const normalized = normalizePath(parts.filter(Boolean).join('/'));
+    const target = resolve(state.rootDir, normalized);
+    const relation = relative(resolve(state.rootDir), target);
+    if (relation.startsWith('..') || isAbsolute(relation)) throw new Error('Workspace path escapes the root');
+    return target;
   }
   const state: WorkspaceServiceState = {
     tree: options.initialTree ?? createDefaultTree(),
@@ -237,6 +248,22 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
 
   async function ensureWorkspaceDir() {
     await mkdir(state.rootDir, { recursive: true });
+  }
+
+  async function assertNoReparsePoint(path: string): Promise<void> {
+    const normalized = normalizePath(path);
+    let current = resolve(state.rootDir);
+    for (const segment of normalized.split('/').filter(Boolean)) {
+      current = resolve(current, segment);
+      try {
+        if ((await lstat(current)).isSymbolicLink()) {
+          throw new Error(`Workspace path crosses a symlink or junction: ${normalized}`);
+        }
+      } catch (error) {
+        if ((error as { code?: string }).code === 'ENOENT') return;
+        throw error;
+      }
+    }
   }
 
   async function ensureProjectLayout() {
@@ -251,7 +278,8 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
 
   async function ensureDirectoryNode(dirPath: string) {
     const normalized = normalizePath(dirPath);
-    const absolute = `${state.rootDir}/${normalized}`;
+    await assertNoReparsePoint(normalized);
+    const absolute = resolveWorkspacePath(normalized);
     await mkdir(absolute, { recursive: true });
   }
 
@@ -499,8 +527,9 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
       }
     }
 
+    await assertNoReparsePoint(normalized);
     state.tree = upsertNode(state.tree, normalized.split('/').filter(Boolean), after);
-    const filePath = `${state.rootDir}/${normalized}`;
+    const filePath = resolveWorkspacePath(normalized);
     const dirPath = filePath.slice(0, filePath.lastIndexOf('/'));
     if (dirPath) await mkdir(dirPath, { recursive: true });
     await writeFile(filePath, after, 'utf8');
@@ -517,6 +546,7 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
   async function updateFile(path: string, content: string) {
     await ensureWorkspaceDir();
     const normalized = normalizePath(path);
+    await assertNoReparsePoint(normalized);
     const segments = normalized.split('/').filter(Boolean);
     const existedBefore = Boolean(findFile(normalized));
     state.tree = upsertNode(state.tree, segments, content);
@@ -557,11 +587,14 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
   async function renameItem(path: string, nextName: string) {
     await ensureWorkspaceDir();
     const normalized = normalizePath(path);
+    if (normalizePath(nextName).includes('/')) throw new Error('nextName must be one path segment');
     const segments = normalized.split('/').filter(Boolean);
     const parentPath = segments.slice(0, -1).join('/');
     const oldAbsolute = resolveWorkspacePath(normalized);
     const nextPath = parentPath ? `${parentPath}/${nextName}` : nextName;
-    const nextAbsolute = `${state.rootDir}/${nextPath}`;
+    await assertNoReparsePoint(normalized);
+    await assertNoReparsePoint(nextPath);
+    const nextAbsolute = resolveWorkspacePath(nextPath);
 
     const nextDir = nextAbsolute.slice(0, nextAbsolute.lastIndexOf('/'));
     if (nextDir) await mkdir(nextDir, { recursive: true });
@@ -581,6 +614,7 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
   async function deleteItem(path: string) {
     await ensureWorkspaceDir();
     const normalized = normalizePath(path);
+    await assertNoReparsePoint(normalized);
     const segments = normalized.split('/').filter(Boolean);
     const absolute = resolveWorkspacePath(normalized);
     const stats = await stat(absolute);

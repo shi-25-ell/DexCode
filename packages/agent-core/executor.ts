@@ -30,7 +30,7 @@ import { LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitio
 export type CodingToolHost = {
   readFile: (path: string) => Promise<unknown> | unknown;
   writeFile: (path: string, content: string) => unknown;
-  runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook }) => unknown;
+  runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook; signal?: AbortSignal }) => unknown;
   readLints?: (path?: string) => unknown;
   diffFile?: (path: string, snapshotId?: string) => unknown;
   listWorkspace: () => unknown;
@@ -149,6 +149,46 @@ function toolSummary(result: unknown): string {
   }
 }
 
+function validationError(
+  definitions: Array<{ function: { name: string; parameters?: unknown } }>,
+  name: string,
+  args: Record<string, unknown>,
+): string | undefined {
+  const definition = definitions.find((item) => item.function.name === name);
+  if (!definition) return `unknown or disabled tool: ${name}`;
+  const schema = definition.function.parameters;
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
+  const shape = schema as { required?: unknown; properties?: unknown; additionalProperties?: unknown };
+  const required = Array.isArray(shape.required) ? shape.required.filter((value): value is string => typeof value === 'string') : [];
+  for (const key of required) if (!(key in args)) return `missing required tool argument: ${key}`;
+  const properties = shape.properties && typeof shape.properties === 'object' && !Array.isArray(shape.properties)
+    ? shape.properties as Record<string, { type?: unknown }>
+    : {};
+  if (shape.additionalProperties === false) {
+    const unknown = Object.keys(args).find((key) => !(key in properties));
+    if (unknown) return `unknown tool argument: ${unknown}`;
+  }
+  for (const [key, value] of Object.entries(args)) {
+    const expected = properties[key]?.type;
+    if (typeof expected !== 'string') continue;
+    const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+    if (actual !== expected) return `tool argument ${key} must be ${expected}`;
+  }
+  return undefined;
+}
+
+async function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (error) => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+  });
+}
+
 async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return false;
   return new Promise((resolve) => {
@@ -239,6 +279,7 @@ export function createExecutor(
       let modelTurnCount = 0;
       let modelAttemptCount = 0;
       let usage: LoopResult['usage'] = { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 };
+      let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
       const base = () => ({ messages: loopMessages, finalContent, toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage });
       const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
       const maxAttempts = options.maxModelAttempts ?? maxTurns * 2;
@@ -256,6 +297,7 @@ export function createExecutor(
           modelAttemptCount += 1;
           onEvent({ type: 'task_status', taskId: runId, status: 'executing', note: `model attempt ${modelAttemptCount}` });
           const definitions = await buildToolDefinitions();
+          currentDefinitions = definitions;
           const turn = await collectModelTurn(observeModelEvents(modelClient.streamMessage(workingMessages, {
             tools: definitions,
             tool_choice: 'auto',
@@ -320,13 +362,20 @@ export function createExecutor(
             type: 'function',
             function: { name: call.name, arguments: JSON.stringify(call.arguments) },
           };
-          await options.semantic?.toolStarted(legacyCall);
           const args = call.arguments as JsonObject & Record<string, unknown>;
           toolsUsed.push(toolName);
-          onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'running' });
           let toolResult: unknown;
+          const invalid = validationError(currentDefinitions, toolName, args);
           try {
-            if (toolName === 'ask_user') {
+            if (invalid) {
+              toolResult = { status: 'rejected', error: invalid };
+            } else {
+              await options.semantic?.toolStarted(legacyCall);
+              onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'running' });
+            }
+            if (invalid) {
+              // Rejected calls still receive a paired tool result but never reach an execution adapter.
+            } else if (toolName === 'ask_user') {
               if (!onConfirm) toolResult = { error: 'confirmation unavailable' };
               else {
                 onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
@@ -355,7 +404,7 @@ export function createExecutor(
               const fn = toolFns[toolName];
               if (fn) {
                 if (toolName === 'run_command' && onCommandConfirm) {
-                  toolResult = await codingToolHost.runCommand(String(args.command ?? ''), { onCommandConfirm });
+                  toolResult = await codingToolHost.runCommand(String(args.command ?? ''), { onCommandConfirm, signal });
                 } else if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
                   const captured = await captureFileDiff(codingToolHost.readFile, args.path, () => fn(args));
                   toolResult = captured.result;
@@ -365,7 +414,15 @@ export function createExecutor(
                   toolResult = await fn(args);
                 }
               } else if (toolName.startsWith('mcp__') && externalMcpRegistry) {
-                toolResult = await externalMcpRegistry.callTool(toolName, args);
+                if (!onConfirm) {
+                  toolResult = { status: 'denied', error: 'external MCP tool requires an approval channel' };
+                } else {
+                  onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
+                  const decision = await onConfirm(`Allow external MCP tool ${toolName}?`, ['allow', 'deny']);
+                  toolResult = decision === 'allow'
+                    ? await abortable(externalMcpRegistry.callTool(toolName, args), signal)
+                    : { status: 'denied', error: 'external MCP tool denied' };
+                }
               } else {
                 toolResult = { error: `unknown tool: ${toolName}` };
               }

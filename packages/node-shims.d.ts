@@ -1,6 +1,7 @@
 declare const process: {
   cwd(): string;
   env: Record<string, string | undefined>;
+  platform: string;
 };
 
 declare type FsDirent = {
@@ -17,6 +18,8 @@ declare module 'node:fs' {
     rm(path: string, options?: { recursive?: boolean; force?: boolean; maxRetries?: number; retryDelay?: number }): Promise<void>;
     cp(source: string, destination: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
     stat(path: string): Promise<{ isDirectory(): boolean }>;
+    lstat(path: string): Promise<{ isSymbolicLink(): boolean }>;
+    realpath(path: string): Promise<string>;
     readdir(path: string, options?: { withFileTypes?: boolean }): Promise<Array<string | FsDirent>>;
   };
 }
@@ -29,6 +32,8 @@ declare module 'node:fs/promises' {
   export const rename: typeof import('node:fs').promises.rename;
   export const rm: typeof import('node:fs').promises.rm;
   export const stat: typeof import('node:fs').promises.stat;
+  export const lstat: typeof import('node:fs').promises.lstat;
+  export const realpath: typeof import('node:fs').promises.realpath;
   export const readdir: typeof import('node:fs').promises.readdir;
 }
 
@@ -44,6 +49,8 @@ declare module 'fs/promises' {
   export const rename: typeof import('node:fs').promises.rename;
   export const rm: typeof import('node:fs').promises.rm;
   export const stat: typeof import('node:fs').promises.stat;
+  export const lstat: typeof import('node:fs').promises.lstat;
+  export const realpath: typeof import('node:fs').promises.realpath;
   export const readdir: typeof import('node:fs').promises.readdir;
 }
 
@@ -53,6 +60,7 @@ declare module 'node:path' {
   export function join(...parts: string[]): string;
   export function relative(from: string, to: string): string;
   export function resolve(...parts: string[]): string;
+  export function isAbsolute(path: string): boolean;
 }
 
 declare module 'path' {
@@ -92,7 +100,7 @@ declare module 'child_process' {
   export function execFile(
     file: string,
     args: string[],
-    options: { cwd?: string },
+    options: { cwd?: string; windowsHide?: boolean; maxBuffer?: number },
     callback: (error: unknown, stdout: string, stderr: string) => void,
   ): void;
   export function spawn(command: string, args?: string[], options?: { env?: Record<string, string | undefined>; stdio?: Array<'pipe' | 'ignore' | 'inherit'> }): {

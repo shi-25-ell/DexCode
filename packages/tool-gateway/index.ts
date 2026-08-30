@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { TreeNode, WorkspaceFile } from '../workspace-manager/index.ts';
 import type { ToolInfo } from '../shared/types.ts';
 import { createMcpServer, type McpServer } from '../mcp-server/index.ts';
@@ -46,7 +46,24 @@ function buildInputSchema(properties: Record<string, unknown>, required: string[
 
 type RunCommandContext = {
   onCommandConfirm?: CommandConfirmHook;
+  signal?: AbortSignal;
 };
+
+function isWithinRoot(root: string, target: string): boolean {
+  const relation = relative(resolve(root), resolve(target));
+  return relation === '' || (!relation.startsWith('..') && !isAbsolute(relation));
+}
+
+async function safeExistingPath(root: string, requested: string): Promise<string | null> {
+  const lexical = resolve(root, requested);
+  if (!isWithinRoot(root, lexical)) return null;
+  try {
+    const [realRoot, realTarget] = await Promise.all([realpath(root), realpath(lexical)]);
+    return isWithinRoot(realRoot, realTarget) ? realTarget : null;
+  } catch {
+    return null;
+  }
+}
 
 function buildToolDefinitions(
   workspaceService: WorkspaceService,
@@ -61,8 +78,8 @@ function buildToolDefinitions(
       inputSchema: buildInputSchema({ path: { type: 'string', minLength: 1 } }, ['path']),
       handler: async ({ path }: Record<string, unknown>) => {
         const rootDir = workspaceService.getRootDir();
-        const absPath = resolve(join(rootDir, String(path ?? '')));
-        if (!absPath.startsWith(resolve(rootDir))) return null;
+        const absPath = await safeExistingPath(rootDir, String(path ?? ''));
+        if (!absPath) return null;
         try {
           const content = await readFile(absPath, 'utf8');
           return { path, content };
@@ -284,7 +301,7 @@ export function createCodingToolHost(workspaceService: WorkspaceService) {
     }
 
     if (!validation.needsConfirmation) {
-      const result = await executeCommand(validation.normalizedCommand, cwd(), validation.timeoutMs);
+      const result = await executeCommand(validation.normalizedCommand, cwd(), validation.timeoutMs, ctx.signal);
       return { ...result, risk: validation.risk, whitelisted: true };
     }
 
@@ -316,7 +333,7 @@ export function createCodingToolHost(workspaceService: WorkspaceService) {
       await whitelistStore.addFromCommand(validation.normalizedCommand);
     }
 
-    const result = await executeCommand(validation.normalizedCommand, cwd(), validation.timeoutMs);
+    const result = await executeCommand(validation.normalizedCommand, cwd(), validation.timeoutMs, ctx.signal);
     return {
       ...result,
       risk: validation.risk,
@@ -444,8 +461,8 @@ export function createCodingToolHost(workspaceService: WorkspaceService) {
   return {
     readFile: wrapWithStats('read_file', '读取工作区中的文件内容', async (path: string) => {
       const rootDir = workspaceService.getRootDir();
-      const absPath = resolve(join(rootDir, String(path)));
-      if (!absPath.startsWith(resolve(rootDir))) return null;
+      const absPath = await safeExistingPath(rootDir, String(path));
+      if (!absPath) return null;
       try {
         const content = await readFile(absPath, 'utf8');
         return { path, content };
