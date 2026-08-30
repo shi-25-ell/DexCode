@@ -13,6 +13,8 @@ import type { CommandConfirmHook } from '../../packages/tool-gateway/run-command
 import type { McpJsonRpcRequest } from '../../packages/mcp-server/index.ts';
 import { createExternalMcpRegistry, type ExternalMcpServerConfig } from '../../packages/mcp-client/index.ts';
 import { createSkillRegistry, importSkill, previewSkillImport, type SkillImportRequest } from '../../packages/skill-system/index.ts';
+import { createTemplateGenerator } from '../../packages/template-generator/index.ts';
+import { createSuccessResponse } from '../../packages/shared/index.ts';
 
 type RequestContext = {
   path?: string;
@@ -228,6 +230,7 @@ const skillRegistry: SkillRegistry = createSkillRegistry({
   workspaceRoot: workspaceService.getRootDir(),
 });
 const codingAgent: CodingAgent = createCodingAgent(contextManager, codingToolHost, modelClient, sessionRepository, externalMcpRegistry, skillRegistry);
+const templateGenerator = createTemplateGenerator();
 
 await workspaceService.loadFromDisk();
 await sessionRepository.getOrCreateCurrentSession();
@@ -885,7 +888,7 @@ export function startRuntimeServer() {
         return;
       }
 
-      const result = await codingAgent.runCommand(command);
+      const result = await codingToolHost.runCommand(command);
       sendJson(res, 200, result);
       return;
     }
@@ -1038,7 +1041,7 @@ export function startRuntimeServer() {
 
     // ── 项目模板列表 / 详情 ──
     if (url.pathname === '/api/templates' && req.method === 'GET') {
-      const templates = codingAgent.getTemplates();
+      const templates = templateGenerator.getTemplateList();
       sendJson(res, 200, { templates });
       return;
     }
@@ -1050,7 +1053,7 @@ export function startRuntimeServer() {
       const category = decodeURIComponent(
         url.pathname.replace('/api/templates/category/', ''),
       );
-      const templates = codingAgent.getTemplatesByCategory(category);
+      const templates = templateGenerator.getTemplatesByCategory(category);
       sendJson(res, 200, { category, templates });
       return;
     }
@@ -1059,7 +1062,7 @@ export function startRuntimeServer() {
       const templateId = decodeURIComponent(
         url.pathname.replace('/api/templates/', ''),
       );
-      const template = codingAgent.getTemplateDetail(templateId);
+      const template = templateGenerator.getTemplateDetail(templateId);
       if (!template) {
         sendJson(res, 404, { error: '模板不存在' });
         return;
@@ -1090,7 +1093,17 @@ export function startRuntimeServer() {
           author: parsed.author,
           description: parsed.description,
         };
-        const result = await codingAgent.generateScaffold(projectParams, writeEvent);
+        const generated = templateGenerator.generateProject(projectParams.templateId, projectParams);
+        for (const file of generated.files) {
+          await codingToolHost.writeFile(file.path, file.content);
+          writeEvent({ type: 'tool', tool: 'write_file', summary: `Created file: ${file.path}` });
+        }
+        const result = createSuccessResponse({
+          status: 'scaffold_ok',
+          scaffoldInfo: generated.scaffoldInfo,
+          files: generated.files.map((file) => ({ path: file.path })),
+          output: generated.summary,
+        });
         writeEvent({ type: 'result', result });
       } catch (error: unknown) {
         writeEvent({

@@ -187,12 +187,6 @@ export type ErrorEvent = {
   message: string;
 };
 
-export type PlanEvent = {
-  type: 'plan';
-  taskId: string;
-  steps: string[];
-};
-
 export type CommandRisk = 'low' | 'medium' | 'high';
 
 export type ConfirmRequestEvent = {
@@ -248,7 +242,6 @@ export type AgentEvent =
   | ToolEvent
   | ResultEvent
   | ErrorEvent
-  | PlanEvent
   | ConfirmRequestEvent
   | CommandConfirmRequestEvent
   | ConfirmResolvedEvent

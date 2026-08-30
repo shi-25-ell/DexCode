@@ -14,10 +14,7 @@ import type { ModelClient } from '../llm-client/index.ts';
 import { createExecutor } from './executor.ts';
 import type { ConfirmHook, ExecutorHooks, ExecutorSemanticHooks, LoopResult } from './executor.ts';
 import type { SessionRepository } from './session-contracts.ts';
-import type { CommandConfirmHook } from '../tool-gateway/run-command.ts';
 import { createExternalMcpRegistry } from '../mcp-client/index.ts';
-import { createTemplateGenerator } from '../template-generator/index.ts';
-import type { TemplateParams } from '../template-generator/types.ts';
 import {
   buildAvailableSkillsBlock,
   createSkillRegistry,
@@ -205,7 +202,6 @@ export function createCodingAgent(
   skillRegistry?: SkillRegistry,
 ) {
   const executor = createExecutor(codingToolHost, externalMcpRegistry, skillRegistry);
-  const templateGenerator = createTemplateGenerator();
 
   async function execute(
     runId: string,
@@ -336,18 +332,5 @@ export function createCodingAgent(
   return {
     runTask,
     preview,
-    async generateScaffold(projectParams: TemplateParams, onChunk?: (chunk: unknown) => void) {
-      const generated = templateGenerator.generateProject(projectParams.templateId, projectParams);
-      for (const file of generated.files) {
-        await codingToolHost.writeFile(file.path, file.content);
-        onChunk?.({ type: 'tool', tool: 'write_file', summary: `Created file: ${file.path}` });
-      }
-      return createSuccessResponse({ status: 'scaffold_ok', scaffoldInfo: generated.scaffoldInfo, files: generated.files.map((file) => ({ path: file.path })), output: generated.summary });
-    },
-    getTemplates: () => templateGenerator.getTemplateList(),
-    getTemplatesByCategory: (category: string) => templateGenerator.getTemplatesByCategory(category),
-    getTemplateDetail: (templateId: string) => templateGenerator.getTemplateDetail(templateId),
-    writeFile: (path: string, content: string) => codingToolHost.writeFile(path, content),
-    runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook }) => codingToolHost.runCommand(command, ctx),
   };
 }

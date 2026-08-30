@@ -1,5 +1,7 @@
 # DexCode Core 重构计划
 
+> 实施状态：本计划已在 `core-update` 分支执行。实际完成内容、验证结果和明确保留的限制见 [`core-refactor-implementation-report.md`](core-refactor-implementation-report.md)。
+
 ## 1. 目标
 
 本次重构把 DexCode 的 Agent 后端从“通过 SSE 返回整轮结果的 ReAct demo”升级为具有明确协议、取消、持久化、安全和恢复语义的生产链路。

@@ -1,5 +1,7 @@
 # DexCode 应用技术方案（Agent First 版）
 
+> 历史文档说明：本文中的 Orchestrator、多角色 Agent 和强制 Review 流程已废止，仅保留为早期设计记录。当前生产链路见 [`架构.md`](架构.md)。
+
 ## 1. 项目目标
 
 本项目是一款面向全栈工程师的轻量级 DexCode 应用。

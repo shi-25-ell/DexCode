@@ -1,5 +1,7 @@
 # DexCode
 
+> 当前核心架构以 [`架构.md`](架构.md)、[`core-refactor-plan.md`](core-refactor-plan.md) 和 [`core-refactor-implementation-report.md`](core-refactor-implementation-report.md) 为准。其他含 Orchestrator 或多 Agent 的文档属于历史记录。
+
 这是一个面向本地工作区的 DexCode，目标是验证一条最核心的闭环：
 
 1. 用户输入需求

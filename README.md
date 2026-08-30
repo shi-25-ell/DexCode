@@ -4,17 +4,20 @@
 
 ## 功能
 
-- **聊天驱动**：向 AI 下达自然语言编码指令，Agent 自主规划并执行（ReAct 循环，最多 20 轮）
+- **聊天驱动**：向 AI 下达自然语言编码指令，单 Agent Run 通过 ReAct 循环直接执行，不包含 Orchestrator 或多 Agent 调度
 - **智能文件编辑**：Agent 优先用 `patch_file` 做局部修改，仅在新建或整文件重写时使用 `write_file`；支持 `search_in_workspace` 先定位再修改
 - **文件管理**：浏览、编辑、创建、重命名、删除工作区文件
-- **实时流式输出**：通过 Server-Sent Events 显示 Agent 执行进度
-- **会话管理**：多会话独立隔离，支持切换历史会话并还原完整对话
+- **真实流式输出**：OpenAI-compatible SSE 会被解析为统一的文本、reasoning、tool call 和 terminal 事件，再通过有界 SSE 队列输出
+- **可恢复会话**：多会话独立隔离，持久化 Run ledger、终态报告、上下文清单和压缩 checkpoint
 - **MCP 兼容**：内置 MCP server（JSON-RPC 2.0），可作为标准 MCP 工具服务被外部客户端接入
 - **Mock 模式**：未配置 LLM 凭据时自动降级，不影响文件管理功能
 
 ## 环境要求
 
+- Windows 10/11
 - Node.js 22+（使用 `--experimental-strip-types` 直接运行 TypeScript，无需编译）
+
+DexCode 当前只维护 Windows 本地执行语义；不承诺 Linux、WSL 或 macOS 兼容。
 
 ## 快速开始
 
@@ -23,7 +26,7 @@
 npm install
 
 # 2. 配置 LLM（见下方"LLM 配置"章节）
-cp .env.example .env
+Copy-Item .env.example .env
 # 编辑 .env 填入你的 API Key
 
 # 3. 启动
@@ -147,17 +150,18 @@ LLM_PROVIDER=doubao
 │   ├── runtime/server.ts        # HTTP 服务器 + API 路由
 │   └── web/                     # 前端（原生 TypeScript）
 ├── packages/
-│   ├── agent-core/              # Agent 流程（ReAct 循环，最多 20 轮）
+│   ├── agent-core/              # 单 Agent Run、ReAct 循环、终态报告与 Session contract
 │   ├── mcp-server/              # MCP server（JSON-RPC 2.0，工具/资源/提示词注册）
-│   ├── llm-client/              # LLM 客户端抽象层
-│   │   ├── types.ts             # ModelClient 接口定义
-│   │   ├── openai.ts            # OpenAI-compatible 实现
+│   ├── llm-client/              # OpenAI-compatible canonical streaming
+│   │   ├── types.ts             # ModelEvent、ModelResponse、failure taxonomy
+│   │   ├── openai.ts            # OpenAI-compatible SSE transport/parser
+│   │   ├── turn-accumulator.ts  # 严格归约并校验完整 Model Turn
 │   │   ├── mock.ts              # Mock 实现
 │   │   └── index.ts             # 工厂函数 createModelClient()
 │   ├── tool-gateway/            # 工具调用（读写文件、执行命令，按需磁盘读取，MCP 注册）
 │   ├── workspace-manager/       # 工作区文件树管理（运行时可切换根目录）
-│   ├── session-store/           # 会话持久化（JSON 文件，支持列举/切换）
-│   ├── context-builder/         # 构建 LLM 上下文（按相关性选文件）
+│   ├── session-store/           # 原子 JSON 会话仓库、Run ledger 与中断恢复
+│   ├── context-builder/         # 当前工作区上下文来源
 │   └── shared/                  # 公共类型和工具函数
 ├── workspaces/
 │   └── demo-project/            # 默认工作区（可通过 WORKSPACE_DIR 覆盖）
@@ -199,6 +203,11 @@ npm run typecheck
 # 前端编译（修改 app.ts 后需执行）
 npm run build:web
 
+# 关键链路测试
+npm test
+
 # 启动（热重载需手动重启）
 npm run dev
 ```
+
+详细架构见 [`docs/架构.md`](docs/架构.md)，本轮重构计划和实际结果分别见 [`docs/core-refactor-plan.md`](docs/core-refactor-plan.md) 与 [`docs/core-refactor-implementation-report.md`](docs/core-refactor-implementation-report.md)。
