@@ -43,6 +43,19 @@ test('Session repository commits one terminal report and preserves ledger order'
     const session = await repository.createSession();
     const runId = crypto.randomUUID();
     await repository.beginRun({ sessionId: session.sessionId, runId, userMessage: { role: 'user', content: 'test' } });
+    await repository.commitContext({
+      sessionId: session.sessionId,
+      runId,
+      manifest: {
+        version: 1,
+        id: 'manifest-1',
+        runId,
+        estimatedInputTokens: 12,
+        selectedMessageCount: 1,
+        omittedMessageCount: 0,
+        requestDigest: 'fnv1a-test',
+      },
+    });
     await repository.appendRunMessage({ sessionId: session.sessionId, runId, message: { role: 'assistant', content: 'done' } });
     const terminalValue = terminal(runId);
     const first = await repository.finishRun({ sessionId: session.sessionId, ...terminalValue });
@@ -52,7 +65,8 @@ test('Session repository commits one terminal report and preserves ledger order'
     const loaded = await repository.loadSession(session.sessionId);
     assert.equal(loaded?.activeTaskId, null);
     assert.equal(loaded?.runReports?.length, 1);
-    assert.deepEqual(loaded?.ledger?.map((record) => record.type), ['run_started', 'message', 'message', 'run_terminal']);
+    assert.equal(loaded?.contextManifests?.at(-1)?.requestDigest, 'fnv1a-test');
+    assert.deepEqual(loaded?.ledger?.map((record) => record.type), ['run_started', 'message', 'context_committed', 'message', 'run_terminal']);
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }

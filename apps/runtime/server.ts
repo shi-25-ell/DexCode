@@ -264,6 +264,72 @@ function sseHeaders() {
   };
 }
 
+function createBoundedSseWriter(
+  res: ServerResponse,
+  onOverflow: () => void,
+  capacity = 256,
+) {
+  const queue: AgentEvent[] = [];
+  let scheduled = false;
+  let active = Promise.resolve();
+  const droppable = (event: AgentEvent) =>
+    event.type === 'chunk' ||
+    event.type === 'reasoning_chunk' ||
+    event.type === 'tool_status' ||
+    (event.type === 'task_status' && event.status === 'executing');
+
+  const waitForDrain = () => new Promise<void>((resolve) => res.once('drain', resolve));
+  const pump = async () => {
+    while (queue.length > 0) {
+      const event = queue.shift();
+      if (event && !res.write(`data: ${JSON.stringify(event)}\n\n`)) await waitForDrain();
+    }
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    active = (async () => {
+      await Promise.resolve();
+      try {
+        await pump();
+      } finally {
+        scheduled = false;
+        if (queue.length > 0) schedule();
+      }
+    })();
+  };
+
+  return {
+    write(event: AgentEvent) {
+      const last = queue.at(-1);
+      if (event.type === 'chunk' && last?.type === 'chunk' && last.chunk.length + event.chunk.length <= 16_384) {
+        last.chunk += event.chunk;
+        return;
+      }
+      if (event.type === 'reasoning_chunk' && last?.type === 'reasoning_chunk' && last.chunk.length + event.chunk.length <= 16_384) {
+        last.chunk += event.chunk;
+        return;
+      }
+      if (queue.length >= capacity) {
+        const discardIndex = queue.findIndex(droppable);
+        if (discardIndex >= 0) queue.splice(discardIndex, 1);
+        else {
+          onOverflow();
+          return;
+        }
+      }
+      queue.push(event);
+      schedule();
+    },
+    async drain() {
+      while (scheduled || queue.length > 0) {
+        await active;
+        if (!scheduled && queue.length > 0) schedule();
+      }
+    },
+  };
+}
+
 export function startRuntimeServer() {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -862,9 +928,8 @@ export function startRuntimeServer() {
         if (!responseFinished) runController.abort('HTTP client disconnected');
       });
 
-      const writeEvent = (event: AgentEvent) => {
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
-      };
+      const writer = createBoundedSseWriter(res, () => runController.abort('SSE consumer is too slow'));
+      const writeEvent = (event: AgentEvent) => writer.write(event);
 
       writeEvent({ type: 'session', sessionId: session.sessionId, isNew: false });
 
@@ -885,6 +950,7 @@ export function startRuntimeServer() {
         writeEvent({ type: 'error', message: error instanceof Error ? error.message : 'Unknown error' });
       }
 
+      await writer.drain();
       res.write('data: [DONE]\n\n');
       responseFinished = true;
       res.end();
@@ -943,9 +1009,8 @@ export function startRuntimeServer() {
         if (!previewFinished) previewController.abort('HTTP client disconnected');
       });
 
-      const writeEvent = (event: AgentEvent) => {
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
-      };
+      const writer = createBoundedSseWriter(res, () => previewController.abort('SSE consumer is too slow'));
+      const writeEvent = (event: AgentEvent) => writer.write(event);
 
       try {
         const result = await codingAgent.preview(parsed.prompt ?? '', parsed.selectedFile ?? null, (chunk) => {
@@ -964,6 +1029,7 @@ export function startRuntimeServer() {
         });
       }
 
+      await writer.drain();
       res.write('data: [DONE]\n\n');
       previewFinished = true;
       res.end();

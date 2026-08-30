@@ -1,5 +1,7 @@
 import type {
   ChatMessage,
+  CompactionCheckpoint,
+  ContextManifest,
   RunReport,
   Session,
   TaskSummary,
@@ -36,6 +38,7 @@ export interface SessionRepository {
   beginRun(input: BeginRunInput): Promise<Session>;
   appendRunMessage(input: AppendRunMessageInput): Promise<Session>;
   markToolStarted(input: MarkToolStartedInput): Promise<Session>;
+  commitContext(input: { sessionId: string; runId: string; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }): Promise<Session>;
   finishRun(input: FinishRunInput): Promise<{ session: Session; report: RunReport; committed: boolean }>;
   readProjectMemory(): Promise<string>;
 }

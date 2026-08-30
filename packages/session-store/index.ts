@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { DEFAULT_PROJECT_ID } from '../shared/index.ts';
 import type {
   ChatMessage,
+  CompactionCheckpoint,
+  ContextManifest,
   RunReport,
   Session,
   SessionLedgerRecord,
@@ -58,6 +60,8 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       revision: session.revision ?? 0,
       ledger: session.ledger ?? [],
       runReports: session.runReports ?? [],
+      contextManifests: session.contextManifests ?? [],
+      compactionCheckpoints: session.compactionCheckpoints ?? [],
     };
   }
 
@@ -167,6 +171,8 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       revision: 0,
       ledger: [],
       runReports: [],
+      contextManifests: [],
+      compactionCheckpoints: [],
     };
     await saveSession(session);
     await setCurrentSessionId(sessionId);
@@ -254,6 +260,31 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         ...session,
         revision: (session.revision ?? 0) + 1,
         ledger: [...(session.ledger ?? []), { seq, at: new Date().toISOString(), runId: input.runId, type: 'tool_started', callId: input.callId, tool: input.tool }],
+      });
+    });
+  }
+
+  async function commitContext(input: { sessionId: string; runId: string; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }): Promise<Session> {
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      return saveUnlocked({
+        ...session,
+        revision: (session.revision ?? 0) + 1,
+        contextManifests: [...(session.contextManifests ?? []), input.manifest],
+        compactionCheckpoints: input.checkpoint
+          ? [...(session.compactionCheckpoints ?? []), input.checkpoint]
+          : session.compactionCheckpoints,
+        ledger: [...(session.ledger ?? []), {
+          seq,
+          at: new Date().toISOString(),
+          runId: input.runId,
+          type: 'context_committed',
+          manifest: input.manifest,
+          ...(input.checkpoint ? { checkpoint: input.checkpoint } : {}),
+        }],
       });
     });
   }
@@ -440,6 +471,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     beginRun,
     appendRunMessage,
     markToolStarted,
+    commitContext,
     finishRun,
     readProjectMemory,
     getProjectMemory,

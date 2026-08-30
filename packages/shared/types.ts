@@ -71,10 +71,31 @@ export type RunReport = {
   error?: { code: string; message: string };
 };
 
+export type ContextManifest = {
+  version: 1;
+  id: string;
+  runId: string;
+  estimatedInputTokens: number;
+  selectedMessageCount: number;
+  omittedMessageCount: number;
+  requestDigest: string;
+  checkpointId?: string;
+};
+
+export type CompactionCheckpoint = {
+  version: 1;
+  id: string;
+  sourceMessageCount: number;
+  sourceDigest: string;
+  summary: string;
+  strategyVersion: 'deterministic-summary-v1';
+};
+
 export type SessionLedgerRecord =
   | { seq: number; at: string; runId: string; type: 'run_started' }
   | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage }
   | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string }
+  | { seq: number; at: string; runId: string; type: 'context_committed'; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }
   | { seq: number; at: string; runId: string; type: 'run_terminal'; report: RunReport }
   | { seq: number; at: string; runId: string; type: 'recovery'; reason: 'interrupted' };
 
@@ -99,6 +120,8 @@ export type Session = {
   revision?: number;
   ledger?: SessionLedgerRecord[];
   runReports?: RunReport[];
+  contextManifests?: ContextManifest[];
+  compactionCheckpoints?: CompactionCheckpoint[];
 };
 
 export type SessionMeta = {

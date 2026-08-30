@@ -371,7 +371,7 @@ Context source 顺序：
 
 ### C6：Context、连续 Session 与 compaction
 
-Red/green slices：
+实施切片：
 
 1. complete-turn transcript continuity。
 2. token budget selection manifest。

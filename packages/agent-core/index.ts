@@ -2,6 +2,8 @@ import { createSuccessResponse } from '../shared/index.ts';
 import type {
   AgentEvent,
   ChatMessage,
+  CompactionCheckpoint,
+  ContextManifest,
   RunReport,
   Session,
   SystemMessage,
@@ -50,14 +52,19 @@ type ContextManager = {
 
 type SkillRegistry = ReturnType<typeof createSkillRegistry>;
 
-function completeTurns(messages: ChatMessage[], maxCount = 40): ChatMessage[] {
-  if (messages.length <= maxCount) return messages;
-  const tail = messages.slice(-maxCount);
-  const firstUser = tail.findIndex((message) => message.role === 'user');
-  const candidate = firstUser >= 0 ? tail.slice(firstUser) : [];
+function digest(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+function pairedMessages(messages: ChatMessage[]): ChatMessage[] {
   const knownCalls = new Set<string>();
   const result: ChatMessage[] = [];
-  for (const message of candidate) {
+  for (const message of messages) {
     if (message.role === 'assistant') {
       for (const call of message.tool_calls ?? []) knownCalls.add(call.id);
       result.push(message);
@@ -68,6 +75,78 @@ function completeTurns(messages: ChatMessage[], maxCount = 40): ChatMessage[] {
     }
   }
   return result;
+}
+
+function messagePreview(message: ChatMessage): string {
+  if (message.role === 'assistant') {
+    const tools = message.tool_calls?.map((call) => call.function.name).join(', ');
+    return `assistant: ${(message.content ?? '').slice(0, 600)}${tools ? ` [tools: ${tools}]` : ''}`;
+  }
+  if (message.role === 'tool') return `tool(${message.name}): ${message.content.slice(0, 400)}`;
+  return `${message.role}: ${message.content.slice(0, 600)}`;
+}
+
+function projectHistory(runId: string, messages: ChatMessage[], maxEstimatedTokens = 12_000): {
+  messages: ChatMessage[];
+  manifest: ContextManifest;
+  checkpoint?: CompactionCheckpoint;
+} {
+  const paired = pairedMessages(messages);
+  const serialized = JSON.stringify(paired);
+  const estimated = Math.ceil(serialized.length / 4);
+  if (estimated <= maxEstimatedTokens) {
+    return {
+      messages: paired,
+      manifest: {
+        version: 1,
+        id: crypto.randomUUID(),
+        runId,
+        estimatedInputTokens: estimated,
+        selectedMessageCount: paired.length,
+        omittedMessageCount: 0,
+        requestDigest: digest(serialized),
+      },
+    };
+  }
+
+  const retainedCharBudget = Math.floor(maxEstimatedTokens * 4 * 0.65);
+  let retainedChars = 0;
+  let start = paired.length;
+  while (start > 0 && retainedChars < retainedCharBudget) {
+    start -= 1;
+    retainedChars += JSON.stringify(paired[start]).length;
+  }
+  while (start < paired.length && paired[start]?.role !== 'user') start += 1;
+  const retained = paired.slice(start);
+  const omitted = paired.slice(0, start);
+  const summary = omitted.map(messagePreview).join('\n').slice(0, 8_000);
+  const checkpoint: CompactionCheckpoint = {
+    version: 1,
+    id: crypto.randomUUID(),
+    sourceMessageCount: omitted.length,
+    sourceDigest: digest(JSON.stringify(omitted)),
+    summary,
+    strategyVersion: 'deterministic-summary-v1',
+  };
+  const checkpointMessage: SystemMessage = {
+    role: 'system',
+    content: `## Previous conversation checkpoint\n${summary}`,
+  };
+  const selected = [checkpointMessage, ...retained];
+  return {
+    messages: selected,
+    manifest: {
+      version: 1,
+      id: crypto.randomUUID(),
+      runId,
+      estimatedInputTokens: Math.ceil(JSON.stringify(selected).length / 4),
+      selectedMessageCount: retained.length,
+      omittedMessageCount: omitted.length,
+      requestDigest: digest(JSON.stringify(selected)),
+      checkpointId: checkpoint.id,
+    },
+    checkpoint,
+  };
 }
 
 function buildSystemPrompt(
@@ -160,13 +239,14 @@ export function createCodingAgent(
       content: buildSystemPrompt(context, projectMemory, session.taskSummaries, skillsBlock(skillRegistry, userPrompt)),
     };
     const user: UserMessage = { role: 'user', content: userPrompt };
-    const history = completeTurns(session.messages);
+    const history = projectHistory(runId, session.messages);
     await sessionRepository.beginRun({ sessionId, runId, userMessage: user });
+    await sessionRepository.commitContext({ sessionId, runId, manifest: history.manifest, checkpoint: history.checkpoint });
     let result: LoopResult;
     try {
       result = await execute(
         runId,
-        [system, ...history, user],
+        [system, ...history.messages, user],
         onEvent,
         hooks,
         options.signal,

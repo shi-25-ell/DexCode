@@ -44,7 +44,7 @@ export type CodingToolHost = {
 
 type ExternalMcpRegistry = {
   listTools: () => Promise<ExternalMcpTool[]>;
-  callTool: (qualifiedName: string, args?: Record<string, unknown>) => Promise<unknown>;
+  callTool: (qualifiedName: string, args?: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
   hasExternalTools: () => boolean;
   normalizeToolName: (serverName: string, toolName: string) => string;
 };
@@ -420,7 +420,7 @@ export function createExecutor(
                   onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
                   const decision = await onConfirm(`Allow external MCP tool ${toolName}?`, ['allow', 'deny']);
                   toolResult = decision === 'allow'
-                    ? await abortable(externalMcpRegistry.callTool(toolName, args), signal)
+                    ? await externalMcpRegistry.callTool(toolName, args, signal)
                     : { status: 'denied', error: 'external MCP tool denied' };
                 }
               } else {

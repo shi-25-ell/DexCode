@@ -40,7 +40,8 @@ type JsonRpcResponse = {
 
 type Transport = {
   listTools(): Promise<ExternalMcpTool[]>;
-  callTool(toolName: string, args?: Record<string, unknown>): Promise<unknown>;
+  callTool(toolName: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+  close(): void;
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -51,7 +52,8 @@ function normalizeToolName(serverName: string, toolName: string) {
   return `mcp__${serverName}__${toolName}`;
 }
 
-async function postJson(url: string, body: JsonRpcRequest, headers: Record<string, string> = {}) {
+async function postJson(url: string, body: JsonRpcRequest, headers: Record<string, string> = {}, signal?: AbortSignal) {
+  const timeout = AbortSignal.timeout(120_000);
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -60,6 +62,7 @@ async function postJson(url: string, body: JsonRpcRequest, headers: Record<strin
       ...headers,
     },
     body: JSON.stringify(body),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   if (!response.ok) {
     const text = await response.text().catch(() => '');
@@ -85,12 +88,13 @@ function createHttpTransport(config: Extract<ExternalMcpServerConfig, { type: 'h
         } as ExternalMcpTool;
       });
     },
-    async callTool(toolName: string, args: Record<string, unknown> = {}) {
-      const response = await postJson(config.url, { jsonrpc: '2.0', id: `tools-call-${config.name}-${Date.now()}`, method: 'tools/call', params: { name: toolName, arguments: args } }, config.headers);
+    async callTool(toolName: string, args: Record<string, unknown> = {}, signal?: AbortSignal) {
+      const response = await postJson(config.url, { jsonrpc: '2.0', id: `tools-call-${config.name}-${Date.now()}`, method: 'tools/call', params: { name: toolName, arguments: args } }, config.headers, signal);
       if (response.error) throw new Error(response.error.message || `Failed to call tool ${toolName} on ${config.name}`);
       const result = asObject(response.result);
       return 'data' in result ? result.data : result;
     },
+    close() {},
   };
 }
 
@@ -109,14 +113,27 @@ function createStdioTransport(config: Extract<ExternalMcpServerConfig, { type: '
       child = spawn(config.command, config.args ?? [], {
         env: { ...(process.env as Record<string, string | undefined>), ...(config.env ?? {}) },
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: true,
+        shell: false,
+        windowsHide: true,
       } as Record<string, unknown>);
     } catch (err) {
       initError = err instanceof Error ? err : new Error(String(err));
       throw initError;
     }
-    child.on('error', (err: Error) => { initError = err; child = null; });
-    child.on('exit', () => { child = null; });
+    child.on('error', (err: Error) => {
+      initError = err;
+      for (const item of pending.values()) item.reject(err);
+      pending.clear();
+      child = null;
+    });
+    child.on('exit', () => {
+      const error = new Error(`MCP stdio server exited: ${config.name}`);
+      for (const item of pending.values()) item.reject(error);
+      pending.clear();
+      child = null;
+    });
+    child.stdout.on('data', childStdout);
+    child.stderr.on('data', () => { /* stderr is intentionally not mixed into JSON-RPC stdout */ });
     return child;
   }
 
@@ -144,20 +161,36 @@ function createStdioTransport(config: Extract<ExternalMcpServerConfig, { type: '
     }
   };
 
-  function request(method: string, params?: unknown) {
+  function request(method: string, params?: unknown, signal?: AbortSignal) {
+    if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('MCP request aborted'));
     const id = String(nextId++);
     const c = ensureChild();
-    c.stdout.on('data', childStdout);
-    c.stderr.on('data', () => { /* ignore */ });
     return new Promise<unknown>((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      let settled = false;
+      const settle = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        signal?.removeEventListener('abort', onAbort);
+        action();
+      };
+      const onAbort = () => {
+        if (!pending.delete(id)) return;
+        try {
+          c.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: 'caller aborted' } })}\n`);
+        } catch { /* the child may already be gone */ }
+        settle(() => reject(signal?.reason ?? new Error(`MCP stdio request aborted: ${method}`)));
+      };
+      const timeoutId = setTimeout(() => {
+        if (!pending.delete(id)) return;
+        settle(() => reject(new Error(`MCP stdio request timeout: ${method}`)));
+      }, 120_000);
+      pending.set(id, {
+        resolve: (value) => settle(() => resolve(value)),
+        reject: (reason) => settle(() => reject(reason)),
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
       c.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
-      setTimeout(() => {
-        if (pending.has(id)) {
-          pending.delete(id);
-          reject(new Error(`MCP stdio request timeout: ${method}`));
-        }
-      }, 120000);
     });
   }
 
@@ -175,9 +208,14 @@ function createStdioTransport(config: Extract<ExternalMcpServerConfig, { type: '
         } as ExternalMcpTool;
       });
     },
-    async callTool(toolName: string, args: Record<string, unknown> = {}) {
-      const result = asObject(await request('tools/call', { name: toolName, arguments: args }));
+    async callTool(toolName: string, args: Record<string, unknown> = {}, signal?: AbortSignal) {
+      const result = asObject(await request('tools/call', { name: toolName, arguments: args }, signal));
       return 'data' in result ? result.data : result;
+    },
+    close() {
+      if (!child) return;
+      child.kill();
+      child = null;
     },
   };
 }
@@ -193,7 +231,10 @@ export function createExternalMcpRegistry(configs: ExternalMcpServerConfig[]) {
 
   function removeServer(name: string) {
     const idx = transports.findIndex((t) => t.config.name === name);
-    if (idx >= 0) transports.splice(idx, 1);
+    if (idx >= 0) {
+      transports[idx].transport.close();
+      transports.splice(idx, 1);
+    }
   }
 
   // Initialize from constructor configs
@@ -214,13 +255,13 @@ export function createExternalMcpRegistry(configs: ExternalMcpServerConfig[]) {
       }
       return all;
     },
-    async callTool(qualifiedName: string, args: Record<string, unknown> = {}) {
+    async callTool(qualifiedName: string, args: Record<string, unknown> = {}, signal?: AbortSignal) {
       const match = /^mcp__([^_]+)__(.+)$/.exec(qualifiedName);
       if (!match) throw new Error(`Invalid external MCP tool name: ${qualifiedName}`);
       const [, serverName, toolName] = match;
       const item = transports.find((t) => t.config.name === serverName);
       if (!item) throw new Error(`External MCP server not found: ${serverName}`);
-      return item.transport.callTool(toolName, args);
+      return item.transport.callTool(toolName, args, signal);
     },
     hasExternalTools() {
       return transports.length > 0;
