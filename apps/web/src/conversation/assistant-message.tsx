@@ -1,9 +1,19 @@
 import { Check, Copy, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 type CopyState = 'idle' | 'copied' | 'failed';
+
+const markdownComponents: Components = {
+  table({ node: _node, ...props }) {
+    return (
+      <div className="markdown-table-scroll" role="region" aria-label="表格，可横向滚动" tabIndex={0}>
+        <table {...props} />
+      </div>
+    );
+  },
+};
 
 async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -50,7 +60,7 @@ export function AssistantMessage({ content }: { content: string }) {
   return (
     <article className="assistant-message">
       <div className="assistant-content">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{content}</ReactMarkdown>
       </div>
       <div className="assistant-actions">
         <button
