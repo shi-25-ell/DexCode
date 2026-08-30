@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DexCode</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local Coding Agent</p>
+          <h1>DexCode</h1>
+        </div>
+        <div class="status-pill">最小可运行版本</div>
+      </header>
+
+      <main class="layout">
+        <section class="panel chat-panel">
+          <div class="panel-header">
+            <h2>Chat</h2>
+            <span>流式输出 / 任务状态</span>
+          </div>
+          <div id="chatLog" class="chat-log"></div>
+          <form id="chatForm" class="chat-form">
+            <textarea id="promptInput" placeholder="输入需求，例如：帮我生成一个 Next.js 项目骨架"></textarea>
+            <button type="submit">发送给 Agent</button>
+          </form>
+        </section>
+
+        <section class="panel sidebar">
+          <div class="panel-header">
+            <h2>工作区</h2>
+            <button id="refreshBtn" type="button">刷新</button>
+          </div>
+          <div id="fileTree" class="file-tree"></div>
+        </section>
+
+        <section class="panel editor-panel">
+          <div class="panel-header">
+            <h2>代码编辑器</h2>
+            <span id="currentFile">未选择文件</span>
+          </div>
+          <textarea id="editor" spellcheck="false" placeholder="点击文件查看内容"></textarea>
+        </section>
+
+        <section class="panel log-panel">
+          <div class="panel-header">
+            <h2>执行摘要</h2>
+            <span>计划 / 变更 / 验证</span>
+          </div>
+          <pre id="summary" class="summary-box">等待任务开始…</pre>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
