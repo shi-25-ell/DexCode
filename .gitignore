@@ -1,0 +1,28 @@
+# Dependencies and package-manager caches
+node_modules/
+.npm-cache/
+
+# Local runtime state
+workspaces/
+.env
+.env.*
+!.env.example
+runtime*.log
+*.log
+*.pid
+
+# Test and tool output
+coverage/
+.nyc_output/
+.playwright-mcp/
+.cache/
+
+# Local editor and operating-system files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Local scratch artifacts
+todo/
+测试/

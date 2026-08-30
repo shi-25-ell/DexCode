@@ -1,0 +1,19 @@
+{
+  "name": "dexcode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-strip-types server.ts",
+    "start": "node --experimental-strip-types server.ts",
+    "build:web": "tsc -p apps/web/tsconfig.build.json",
+    "dev:web": "tsc -w -p apps/web/tsconfig.build.json",
+    "lint": "tsc -p tsconfig.json --noEmit && tsc -p apps/web/tsconfig.build.json --noEmit",
+    "test": "node --experimental-strip-types --test packages/agent-core/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3"
+  }
+}
