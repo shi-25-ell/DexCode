@@ -46,16 +46,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .brand-icon-fallback { width: 22px; height: 22px; border: 1.5px solid var(--blue); border-radius: 5px; }
 .brand-name { font-size: 18px; font-weight: 720; letter-spacing: -0.02em; }
 
-.workspace-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.workspace-form { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .workspace-picker { position: relative; flex: 0 0 auto; }
-.workspace-combobox { position: relative; min-width: 0; }
+.workspace-combobox { position: static; min-width: 0; }
 .workspace-form input { min-width: 0; height: 40px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: 8px; background: #fff; color: var(--text); font-size: 13px; }
 .workspace-form input:focus { border-color: #93c5fd; outline: 3px solid rgba(59,130,246,0.1); }
 .workspace-form button, .inline-settings-form button, .primary-button { height: 40px; padding: 0 14px; border: 0; border-radius: 8px; background: var(--blue); color: #fff; font-weight: 650; cursor: pointer; }
 .workspace-form button:disabled, .primary-button:disabled { opacity: 0.55; cursor: default; }
 .primary-button { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; }
 .inline-error { margin: 7px 2px 0; color: var(--red); font-size: 12px; }
-.workspace-suggestions { position: absolute; z-index: 50; top: calc(100% + 6px); left: 0; width: min(520px, calc(100vw - 32px)); max-height: 260px; margin: 0; padding: 5px; overflow-y: auto; list-style: none; border: 1px solid var(--border-strong); border-radius: 9px; background: #fff; box-shadow: 0 14px 32px rgba(15,23,42,0.12); }
+.workspace-suggestions { position: absolute; z-index: 50; top: calc(100% + 6px); right: 0; left: 0; max-height: 260px; margin: 0; padding: 5px; overflow-y: auto; list-style: none; border: 1px solid var(--border-strong); border-radius: 9px; background: #fff; box-shadow: 0 14px 32px rgba(15,23,42,0.12); }
 .workspace-suggestions li { display: grid; grid-template-columns: 18px minmax(0,1fr) auto; align-items: center; gap: 7px; min-height: 38px; padding: 6px 8px; border-radius: 6px; color: #4b5563; cursor: pointer; }
 .workspace-suggestions li:hover, .workspace-suggestions li.active { background: var(--blue-soft); color: #1d4ed8; }
 .workspace-suggestions li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
