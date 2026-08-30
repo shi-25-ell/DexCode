@@ -41,15 +41,12 @@ export type TaskSummary = {
   prompt: string;
   startedAt: string;
   completedAt: string;
-  status: 'completed' | 'aborted';
+  status: 'completed' | 'aborted' | 'failed' | 'limited';
   summary: string;
   toolsUsed: string[];
   filesModified: string[];
   skillsUsed?: string[];
-  trace?: TaskTrace;
 };
-
-export type TaskType = 'read-heavy' | 'code-only' | 'compound';
 
 export type FileDiff = {
   path: string;
@@ -57,53 +54,6 @@ export type FileDiff = {
   after: string | null;
 };
 
-export type SubTask = {
-  id: string;
-  description: string;
-  dependsOn?: string[];
-  assignedTo: 'code-agent' | 'worker-pool';
-  status: 'pending' | 'running' | 'done' | 'failed';
-  result?: string;
-};
-
-export type AgentMessage = {
-  from: 'orchestrator' | 'worker' | 'code-agent' | 'review-agent';
-  to: 'orchestrator' | 'worker' | 'code-agent' | 'review-agent';
-  taskId: string;
-  subTaskId?: string;
-  payload: {
-    prompt?: string;
-    context?: string;
-    result?: string;
-    fileChanges?: FileDiff[];
-  };
-  timestamp: number;
-};
-
-export type ReviewIssue = {
-  severity: 'error' | 'warning' | 'suggestion';
-  file: string;
-  description: string;
-};
-
-export type ReviewOutput = {
-  passed: boolean;
-  issues: ReviewIssue[];
-  suggestions: string[];
-  retryInstruction?: string;
-};
-
-export type TaskTrace = {
-  taskId: string;
-  classifiedAs: TaskType;
-  workerTaskCount: number;
-  workerParallelDurationMs: number;
-  serialDurationMs: number;
-  codeAgentIterations: number;
-  reviewPassed: boolean;
-  reviewRetries: number;
-  subTaskCount: number;
-};
 
 // ── 会话对象 ──
 
@@ -150,6 +100,18 @@ export type ToolCallLogEntry = {
 export type ChunkEvent = {
   type: 'chunk';
   chunk: string;
+};
+
+export type ReasoningChunkEvent = {
+  type: 'reasoning_chunk';
+  chunk: string;
+};
+
+export type ToolStatusEvent = {
+  type: 'tool_status';
+  callId: string;
+  tool: string;
+  status: 'running' | 'settled';
 };
 
 export type ToolEvent = {
@@ -204,7 +166,7 @@ export type ConfirmResolvedEvent = {
 export type TaskStatusEvent = {
   type: 'task_status';
   taskId: string;
-  status: 'planning' | 'executing' | 'waiting_confirm' | 'summarizing' | 'done' | 'error';
+  status: 'planning' | 'executing' | 'waiting_confirm' | 'summarizing' | 'done' | 'aborted' | 'error';
   note?: string;
 };
 
@@ -225,6 +187,8 @@ export type SkillEvent = {
 
 export type AgentEvent =
   | ChunkEvent
+  | ReasoningChunkEvent
+  | ToolStatusEvent
   | ToolEvent
   | ResultEvent
   | ErrorEvent

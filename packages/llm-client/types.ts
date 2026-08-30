@@ -85,6 +85,4 @@ export type ModelClient = {
   readonly model: string;
   readonly baseUrl: string;
   streamMessage(messages: unknown[], options?: ChatOptions): AsyncIterable<ModelEvent>;
-  /** Migration adapter. Production Agent code must consume streamMessage directly. */
-  createMessage(messages: unknown[], options?: ChatOptions): Promise<unknown>;
 };

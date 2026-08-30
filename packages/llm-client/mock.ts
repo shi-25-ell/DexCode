@@ -5,19 +5,6 @@ export function createMockModelClient(): ModelClient {
     model: 'mock',
     baseUrl: 'mock://localhost',
 
-    async createMessage(_messages, _options) {
-      return {
-        choices: [{
-          message: {
-            role: 'assistant',
-            content: '[Mock LLM] No API credentials configured.',
-          },
-          finish_reason: 'stop',
-        }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-      };
-    },
-
     async *streamMessage(_messages, _options) {
       const content = '[Mock LLM] No API credentials configured.';
       yield { version: 1, type: 'turn_started', attemptId: 'mock-attempt' } as const;

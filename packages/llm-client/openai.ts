@@ -1,4 +1,3 @@
-import { collectModelTurn } from './turn-accumulator.ts';
 import type {
   ChatOptions,
   ModelClient,
@@ -251,24 +250,5 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
     }
   }
 
-  async function createMessage(messages: unknown[], options: ChatOptions = {}) {
-    const turn = await collectModelTurn(streamMessage(messages, options));
-    if (turn.status === 'failed') throw new Error(turn.failure.message);
-    const message = {
-      role: 'assistant',
-      content: turn.response.content || null,
-      ...(turn.response.toolCalls.length > 0
-        ? {
-            tool_calls: turn.response.toolCalls.map((call) => ({
-              id: call.id,
-              type: 'function',
-              function: { name: call.name, arguments: JSON.stringify(call.arguments) },
-            })),
-          }
-        : {}),
-    };
-    return { choices: [{ message, finish_reason: turn.response.finishReason }], usage: turn.response.usage };
-  }
-
-  return { model, baseUrl, createMessage, streamMessage };
+  return { model, baseUrl, streamMessage };
 }
