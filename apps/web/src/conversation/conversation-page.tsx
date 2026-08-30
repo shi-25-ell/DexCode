@@ -6,8 +6,10 @@ import { apiJson, getConversation, scopeWorkspaceRef, streamConversation } from 
 import { AppShell } from '../shell/app-shell';
 import type { ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, StreamEvent, ToolPresentation } from '../types';
 import { AssistantMessage } from './assistant-message';
+import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { isTimelineNearBottom } from './scroll-follow';
+import { UserMessage } from './user-message';
 
 type LiveState = {
   items: ConversationItem[];
@@ -255,9 +257,12 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
               <p>{scope.kind === 'general' ? '这里不会启用项目文件与命令工具。加载项目后可以让 Agent 阅读和修改代码。' : '描述你的目标，DexCode 会在对话中展示每一步工具调用。'}</p>
             </div>
           ) : null}
-          {timeline.map((item) => {
-            if (item.kind === 'user') return <div key={item.id} className="user-message">{item.content}</div>;
-            if (item.kind === 'assistant') return <AssistantMessage key={item.id} content={item.content} />;
+          {timeline.map((item, index) => {
+            if (item.kind === 'user') return <UserMessage key={item.id} content={item.content} />;
+            if (item.kind === 'assistant') {
+              const showCopy = isCompleteAssistantResponse(timeline, index, state.status);
+              return <AssistantMessage key={item.id} content={item.content} copyContent={showCopy ? assistantResponseCopyText(timeline, index) : item.content} showCopy={showCopy} />;
+            }
             if (item.kind === 'tool') return <ToolCard key={item.id} tool={item.tool} />;
             if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} onResolve={(answer) => dispatch({ type: 'resolve', approvalRef: item.approvalRef, answer })} />;
             return <div key={item.id} className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;

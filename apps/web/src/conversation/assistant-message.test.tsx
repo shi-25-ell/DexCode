@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AssistantMessage } from './assistant-message';
+import { UserMessage } from './user-message';
 
 const writeText = vi.fn<(text: string) => Promise<void>>();
 
@@ -16,6 +17,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('AssistantMessage', () => {
+  it('can hide the action for an intermediate assistant segment', () => {
+    render(<AssistantMessage content="我先调用工具" showCopy={false} />);
+    expect(screen.queryByRole('button', { name: '复制回答' })).not.toBeInTheDocument();
+  });
+
+  it('lets users copy their own complete message', async () => {
+    const content = '使用 GitHub MCP 搜索仓库';
+    render(<UserMessage content={content} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '复制我的消息' }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(content));
+    expect(screen.getByRole('button', { name: '已复制我的消息' })).toBeInTheDocument();
+  });
+
   it('keeps long links breakable and wraps GFM tables in a local scroll region', () => {
     const longUrl = 'https://example.com/oauth/authorize?client_id=client&code_challenge=an-extremely-long-unbroken-value';
     const content = `${longUrl}\n\n| 编号 | 标题 | 创建时间 |\n| --- | --- | --- |\n| #3181 | A very long issue title | 2026-08-29 |`;
