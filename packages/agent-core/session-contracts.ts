@@ -1,0 +1,41 @@
+import type {
+  ChatMessage,
+  RunReport,
+  Session,
+  TaskSummary,
+} from '../shared/types.ts';
+
+export type BeginRunInput = {
+  sessionId: string;
+  runId: string;
+  userMessage: ChatMessage;
+};
+
+export type AppendRunMessageInput = {
+  sessionId: string;
+  runId: string;
+  message: ChatMessage;
+};
+
+export type MarkToolStartedInput = {
+  sessionId: string;
+  runId: string;
+  callId: string;
+  tool: string;
+};
+
+export type FinishRunInput = {
+  sessionId: string;
+  report: RunReport;
+  summary: TaskSummary;
+};
+
+export interface SessionRepository {
+  loadSession(id: string): Promise<Session | null>;
+  getOrCreateCurrentSession(): Promise<Session>;
+  beginRun(input: BeginRunInput): Promise<Session>;
+  appendRunMessage(input: AppendRunMessageInput): Promise<Session>;
+  markToolStarted(input: MarkToolStartedInput): Promise<Session>;
+  finishRun(input: FinishRunInput): Promise<{ session: Session; report: RunReport; committed: boolean }>;
+  readProjectMemory(): Promise<string>;
+}

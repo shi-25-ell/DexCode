@@ -9,7 +9,7 @@
     "build:web": "tsc -p apps/web/tsconfig.build.json",
     "dev:web": "tsc -w -p apps/web/tsconfig.build.json",
     "lint": "tsc -p tsconfig.json --noEmit && tsc -p apps/web/tsconfig.build.json --noEmit",
-    "test": "node --experimental-strip-types --test packages/agent-core/*.test.ts packages/llm-client/*.test.ts",
+    "test": "node --experimental-strip-types --test packages/agent-core/*.test.ts packages/llm-client/*.test.ts packages/session-store/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

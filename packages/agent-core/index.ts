@@ -2,6 +2,7 @@ import { createSuccessResponse } from '../shared/index.ts';
 import type {
   AgentEvent,
   ChatMessage,
+  RunReport,
   Session,
   SystemMessage,
   TaskSummary,
@@ -9,7 +10,8 @@ import type {
 } from '../shared/types.ts';
 import type { ModelClient } from '../llm-client/index.ts';
 import { createExecutor } from './executor.ts';
-import type { ConfirmHook, ExecutorHooks, LoopResult } from './executor.ts';
+import type { ConfirmHook, ExecutorHooks, ExecutorSemanticHooks, LoopResult } from './executor.ts';
+import type { SessionRepository } from './session-contracts.ts';
 import type { CommandConfirmHook } from '../tool-gateway/run-command.ts';
 import { createExternalMcpRegistry } from '../mcp-client/index.ts';
 import { createTemplateGenerator } from '../template-generator/index.ts';
@@ -36,14 +38,6 @@ type PromptContext = {
 
 type CodingToolHost = Parameters<typeof createExecutor>[0] & {
   writeFile: (...args: any[]) => unknown;
-};
-
-type SessionRepository = {
-  loadSession: (id: string) => Promise<Session | null>;
-  getOrCreateCurrentSession: () => Promise<Session>;
-  appendMessages: (sessionId: string, messages: ChatMessage[]) => Promise<Session>;
-  appendTaskSummary: (sessionId: string, summary: TaskSummary) => Promise<Session>;
-  readProjectMemory: () => Promise<string>;
 };
 
 type ContextManager = {
@@ -140,8 +134,9 @@ export function createCodingAgent(
     onEvent: (event: AgentEvent) => void,
     hooks?: ConfirmHook | ExecutorHooks,
     signal?: AbortSignal,
+    semantic?: ExecutorSemanticHooks,
   ) {
-    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, signal });
+    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, signal, semantic });
   }
 
   async function runTask(
@@ -165,10 +160,38 @@ export function createCodingAgent(
       content: buildSystemPrompt(context, projectMemory, session.taskSummaries, skillsBlock(skillRegistry, userPrompt)),
     };
     const user: UserMessage = { role: 'user', content: userPrompt };
-    await sessionRepository.appendMessages(sessionId, [user]);
     const history = completeTurns(session.messages);
-    const result = await execute(runId, [system, ...history, user], onEvent, hooks, options.signal);
-    if (result.messages.length > 0) await sessionRepository.appendMessages(sessionId, result.messages);
+    await sessionRepository.beginRun({ sessionId, runId, userMessage: user });
+    let result: LoopResult;
+    try {
+      result = await execute(
+        runId,
+        [system, ...history, user],
+        onEvent,
+        hooks,
+        options.signal,
+        {
+          assistantCommitted: (message) => sessionRepository.appendRunMessage({ sessionId, runId, message }).then(() => undefined),
+          toolStarted: (call) => sessionRepository.markToolStarted({ sessionId, runId, callId: call.id, tool: call.function.name }).then(() => undefined),
+          toolOutcome: (message) => sessionRepository.appendRunMessage({ sessionId, runId, message }).then(() => undefined),
+        },
+      );
+    } catch (error) {
+      result = {
+        messages: [],
+        finalContent: '',
+        toolsUsed: [],
+        filesModified: [],
+        fileChanges: [],
+        skillsUsed: [],
+        status: options.signal?.aborted ? 'aborted' : 'failed',
+        terminationReason: options.signal?.aborted ? 'user_abort' : 'model_failure',
+        modelTurnCount: 0,
+        modelAttemptCount: 0,
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 },
+        error: { code: 'RUN_INFRASTRUCTURE_FAILURE', message: error instanceof Error ? error.message : String(error) },
+      };
+    }
     const taskSummary: TaskSummary = {
       taskId: runId,
       prompt: userPrompt,
@@ -180,14 +203,29 @@ export function createCodingAgent(
       filesModified: [...new Set(result.filesModified)],
       skillsUsed: [...new Set(result.skillsUsed)],
     };
-    await sessionRepository.appendTaskSummary(sessionId, taskSummary);
+    const report: RunReport = {
+      version: 1,
+      runId,
+      status: result.status,
+      terminationReason: result.terminationReason,
+      ...(result.finalContent ? { finalAnswer: result.finalContent } : {}),
+      startedAt,
+      completedAt: taskSummary.completedAt,
+      modelTurnCount: result.modelTurnCount,
+      modelAttemptCount: result.modelAttemptCount,
+      usage: result.usage,
+      toolsUsed: taskSummary.toolsUsed,
+      filesModified: taskSummary.filesModified,
+      ...(result.error ? { error: result.error } : {}),
+    };
+    await sessionRepository.finishRun({ sessionId, report, summary: taskSummary });
     onEvent({
       type: 'task_status',
       taskId: runId,
       status: result.status === 'completed' ? 'done' : result.status === 'aborted' ? 'aborted' : 'error',
       note: result.terminationReason,
     });
-    onEvent({ type: 'result', result: { ...taskSummary, output: result.finalContent, run: result } });
+    onEvent({ type: 'result', result: { ...taskSummary, output: result.finalContent, run: result, report } });
     return taskSummary;
   }
 

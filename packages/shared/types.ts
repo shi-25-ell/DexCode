@@ -48,6 +48,36 @@ export type TaskSummary = {
   skillsUsed?: string[];
 };
 
+export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
+
+export type RunReport = {
+  version: 1;
+  runId: string;
+  status: RunStatus;
+  terminationReason: string;
+  finalAnswer?: string;
+  startedAt: string;
+  completedAt: string;
+  modelTurnCount: number;
+  modelAttemptCount: number;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    unknown: number;
+  };
+  toolsUsed: string[];
+  filesModified: string[];
+  error?: { code: string; message: string };
+};
+
+export type SessionLedgerRecord =
+  | { seq: number; at: string; runId: string; type: 'run_started' }
+  | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage }
+  | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string }
+  | { seq: number; at: string; runId: string; type: 'run_terminal'; report: RunReport }
+  | { seq: number; at: string; runId: string; type: 'recovery'; reason: 'interrupted' };
+
 export type FileDiff = {
   path: string;
   before: string | null;
@@ -66,6 +96,9 @@ export type Session = {
   messages: ChatMessage[];
   taskSummaries: TaskSummary[];
   activeTaskId: string | null;
+  revision?: number;
+  ledger?: SessionLedgerRecord[];
+  runReports?: RunReport[];
 };
 
 export type SessionMeta = {

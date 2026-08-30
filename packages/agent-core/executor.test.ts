@@ -28,12 +28,12 @@ function scriptedModel(responses: ModelResponse[]): ModelClient {
   };
 }
 
-function toolHost() {
+function toolHost(timeline: string[] = []) {
   let content = 'before';
   return {
     host: {
       readFile: (path: string) => ({ path, content }),
-      writeFile: (_path: string, next: string) => { content = next; return { ok: true }; },
+      writeFile: (_path: string, next: string) => { timeline.push('effect'); content = next; return { ok: true }; },
       runCommand: () => null,
       listWorkspace: () => [],
       searchInWorkspace: () => [],
@@ -61,8 +61,9 @@ test('streams text deltas and completes a no-tool Run', async () => {
   assert.deepEqual(events.find((event) => (event as { type?: string }).type === 'chunk'), { type: 'chunk', chunk: 'done' });
 });
 
-test('executes a streamed tool call then records the final answer and file diff', async () => {
-  const { host, read } = toolHost();
+test('commits assistant and tool start before effect, then commits outcome', async () => {
+  const timeline: string[] = [];
+  const { host, read } = toolHost(timeline);
   const model = scriptedModel([
     {
       content: '',
@@ -72,11 +73,18 @@ test('executes a streamed tool call then records the final answer and file diff'
     },
     { content: 'finished', reasoning: '', toolCalls: [], finishReason: 'stop' },
   ]);
-  const result = await createExecutor(host).runReActLoop(model, [], () => {});
+  const result = await createExecutor(host).runReActLoop(model, [], () => {}, undefined, {
+    semantic: {
+      assistantCommitted: async () => { timeline.push('assistant'); },
+      toolStarted: async () => { timeline.push('tool_started'); },
+      toolOutcome: async () => { timeline.push('tool_outcome'); },
+    },
+  });
 
   assert.equal(result.status, 'completed');
   assert.equal(result.finalContent, 'finished');
   assert.equal(read(), 'after');
+  assert.deepEqual(timeline.slice(0, 4), ['assistant', 'tool_started', 'effect', 'tool_outcome']);
   assert.deepEqual(result.fileChanges, [{ path: 'a.ts', before: 'before', after: 'after' }]);
 });
 

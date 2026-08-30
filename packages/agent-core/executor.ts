@@ -58,6 +58,11 @@ type SkillRegistry = {
 
 export type ConfirmHook = (question: string, options?: string[]) => Promise<string>;
 export type ExecutorHooks = { onConfirm?: ConfirmHook; onCommandConfirm?: CommandConfirmHook };
+export type ExecutorSemanticHooks = {
+  assistantCommitted(message: AssistantMessage): Promise<void>;
+  toolStarted(call: ToolCall): Promise<void>;
+  toolOutcome(message: ToolResultMessage): Promise<void>;
+};
 export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
 export type TerminationReason =
   | 'natural_completion'
@@ -88,6 +93,7 @@ export type ReActLoopOptions = {
   maxIterations?: number;
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
+  semantic?: ExecutorSemanticHooks;
 };
 
 export type Executor = ReturnType<typeof createExecutor>;
@@ -279,6 +285,7 @@ export function createExecutor(
         usage = usageSummary(usage, response.usage);
         finalContent = response.content || finalContent;
         const assistant = assistantMessage(response);
+        await options.semantic?.assistantCommitted(assistant);
         workingMessages.push(assistant);
         loopMessages.push(assistant);
         if (response.toolCalls.length === 0) {
@@ -308,6 +315,12 @@ export function createExecutor(
           seenCallIds.add(call.id);
           if (signal.aborted) return aborted(base());
           const toolName = call.name;
+          const legacyCall: ToolCall = {
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+          };
+          await options.semantic?.toolStarted(legacyCall);
           const args = call.arguments as JsonObject & Record<string, unknown>;
           toolsUsed.push(toolName);
           onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'running' });
@@ -370,6 +383,7 @@ export function createExecutor(
             name: toolName,
             content: stringifyToolResult(toolResult),
           };
+          await options.semantic?.toolOutcome(toolMessage);
           workingMessages.push(toolMessage);
           loopMessages.push(toolMessage);
         }
