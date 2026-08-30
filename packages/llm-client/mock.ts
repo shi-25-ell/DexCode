@@ -19,7 +19,20 @@ export function createMockModelClient(): ModelClient {
     },
 
     async *streamMessage(_messages, _options) {
-      yield { role: 'assistant', content: '[Mock LLM] No API credentials configured.' };
+      const content = '[Mock LLM] No API credentials configured.';
+      yield { version: 1, type: 'turn_started', attemptId: 'mock-attempt' } as const;
+      yield { version: 1, type: 'text_delta', delta: content } as const;
+      yield {
+        version: 1,
+        type: 'turn_completed',
+        response: {
+          content,
+          reasoning: '',
+          toolCalls: [],
+          finishReason: 'stop',
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        },
+      } as const;
     },
   };
 }

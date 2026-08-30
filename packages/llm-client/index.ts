@@ -2,7 +2,20 @@ import { createOpenAiCompatibleModelClient } from './openai.ts';
 import { createMockModelClient } from './mock.ts';
 import type { ModelClient } from './types.ts';
 
-export type { ModelClient, ChatOptions } from './types.ts';
+export type {
+  ChatOptions,
+  JsonObject,
+  JsonValue,
+  ModelClient,
+  ModelEvent,
+  ModelFailure,
+  ModelFinishReason,
+  ModelResponse,
+  ModelToolCall,
+  ModelTurnResult,
+  ModelUsage,
+} from './types.ts';
+export { collectModelTurn, ModelProtocolError, ModelTurnAccumulator } from './turn-accumulator.ts';
 export { createOpenAiCompatibleModelClient } from './openai.ts';
 export { createMockModelClient } from './mock.ts';
 
@@ -42,7 +55,6 @@ export function createModelClient(): ModelClient {
       top_p: getEnvNumber('LLM_TOP_P'),
       max_tokens: getEnvNumber('LLM_MAX_TOKENS'),
       timeout: getEnvNumber('LLM_TIMEOUT'),
-      max_retries: getEnvNumber('LLM_MAX_RETRIES'),
     },
   });
 }
