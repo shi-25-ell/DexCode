@@ -259,7 +259,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .primary-link { color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 650; }
 .settings-feedback { margin: 14px 0; padding: 18px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--muted); text-align: center; font-size: 12px; }
 .settings-feedback.error { border-color: #fecaca; background: var(--red-soft); color: var(--red); }
-.settings-tail-action { margin-top: 16px; }
+.settings-action-feedback { margin: -10px 0 16px; color: var(--green); text-align: right; font-size: 11px; }
 .skill-detail-grid { display: grid; gap: 5px; margin-top: 8px; overflow-wrap: anywhere; }
 .mcp-tool-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .mcp-tool-list span { padding: 4px 7px; border-radius: 5px; background: var(--purple-soft); color: #6d28d9; }
