@@ -2,6 +2,8 @@
 
 > 当前核心架构以 [`架构.md`](架构.md)、[`core-refactor-plan.md`](core-refactor-plan.md) 和 [`core-refactor-implementation-report.md`](core-refactor-implementation-report.md) 为准。其他含 Orchestrator 或多 Agent 的文档属于历史记录。
 
+> Web 主界面下一阶段的产品与开发基线见 [`web-ui-refactor-development-design.md`](web-ui-refactor-development-design.md)。该文档覆盖流式单列对话、侧边栏、草稿会话、Tool Card、展示投影、浅色主题和 React 定向重构。
+
 这是一个面向本地工作区的 DexCode，目标是验证一条最核心的闭环：
 
 1. 用户输入需求
