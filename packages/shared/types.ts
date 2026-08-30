@@ -89,6 +89,8 @@ export type ContextPolicy = {
   largeToolResultChars: number;
 };
 
+export type ContextCompactionStrategy = 'four_layer' | 'legacy';
+
 export type ContextArtifactRef = {
   version: 1;
   id: string;
@@ -151,6 +153,7 @@ export type RunReport = {
     totalTokens: number;
     unknown: number;
   };
+  contextStrategy?: ContextCompactionStrategy;
   contextSummaryUsage?: {
     inputTokens: number;
     outputTokens: number;

@@ -15,6 +15,7 @@ import { createExecutor } from './executor.ts';
 import type { ConfirmHook, ExecutorHooks, ExecutorSemanticHooks, LoopResult, ReActLoopOptions } from './executor.ts';
 import type { SessionRepository } from './session-contracts.ts';
 import { createContextEngine, defaultContextPolicy, type ContextSection } from '../context-engine/index.ts';
+import { contextCompactionStrategy, projectLegacyHistory } from './context-strategy.ts';
 import { createExternalMcpRegistry } from '../mcp-client/index.ts';
 import {
   buildAvailableSkillsBlock,
@@ -144,8 +145,9 @@ export function createCodingAgent(
     ? { ...codingToolHost, isToolEnabled: () => false }
     : codingToolHost;
   const executor = createExecutor(effectiveToolHost, externalMcpRegistry, effectiveSkillRegistry);
-  const contextPolicy = defaultContextPolicy(modelClient);
-  const contextEngine = sessionRepository ? createContextEngine({
+  const contextStrategy = contextCompactionStrategy();
+  const contextPolicy = contextStrategy === 'four_layer' ? defaultContextPolicy(modelClient) : undefined;
+  const contextEngine = contextStrategy === 'four_layer' && sessionRepository ? createContextEngine({
     modelClient,
     artifactRepository: sessionRepository,
     lifecycle: {
@@ -235,10 +237,23 @@ export function createCodingAgent(
         && session.messages.at(-1)?.content === userPrompt
         ? session.messages.slice(0, -1)
         : session.messages;
-      const canonicalMessages = pairedMessages([...historyMessages, user]);
+      const legacy = contextStrategy === 'legacy'
+        ? projectLegacyHistory(runId, historyMessages)
+        : undefined;
+      if (legacy) {
+        await sessionRepository.commitContext({
+          sessionId,
+          runId,
+          manifest: legacy.manifest,
+          ...(legacy.checkpoint ? { checkpoint: legacy.checkpoint } : {}),
+        });
+      }
+      const executionMessages = legacy
+        ? [{ role: 'system' as const, content: systemSections.map((section) => section.content).join('\n\n') }, ...legacy.messages, user]
+        : pairedMessages([...historyMessages, user]);
       result = await execute(
         runId,
-        canonicalMessages,
+        executionMessages,
         onEvent,
         hooks,
         options.signal,
@@ -258,7 +273,7 @@ export function createCodingAgent(
             ...(prepared.activity ? { activity: prepared.activity } : {}),
           }).then(() => undefined),
         },
-        contextEngine ? {
+        contextEngine && contextPolicy ? {
           engine: contextEngine,
           sessionId,
           activeRequest: userPrompt,
@@ -307,6 +322,7 @@ export function createCodingAgent(
       modelTurnCount: result.modelTurnCount,
       modelAttemptCount: result.modelAttemptCount,
       usage: result.usage,
+      contextStrategy,
       contextSummaryUsage: result.contextSummaryUsage,
       ...(result.latestInputTokens !== undefined ? { latestInputTokens: result.latestInputTokens } : {}),
       ...(result.latestContextUsage ? { latestContextUsage: result.latestContextUsage } : {}),
