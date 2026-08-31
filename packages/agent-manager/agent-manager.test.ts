@@ -6,7 +6,7 @@ import test from 'node:test';
 import { BUILTIN_AGENT_DEFINITIONS, createAgentDefinitionRegistry, parseAgentDefinitionMarkdown } from './agent-definitions.ts';
 import { createAgentStore } from './agent-store.ts';
 import type { AgentRecord, AgentRunRecord } from './contracts.ts';
-import { createAgentManager } from './agent-manager.ts';
+import { createAgentManager, multiAgentEnabled } from './agent-manager.ts';
 import type { AgentRunResult } from '../agent-core/agent-runtime.ts';
 
 function records(sessionId: string) {
@@ -77,6 +77,14 @@ test('child Agent definitions default to 200 model turns', () => {
   assert.equal(BUILTIN_AGENT_DEFINITIONS[1]?.budget.maxModelTurns, 200);
   const parsed = parseAgentDefinitionMarkdown('---\nname: scout\ndescription: test\n---\nInspect source.');
   assert.equal(parsed.budget.maxModelTurns, 200);
+});
+
+test('Multi-Agent is available by default and can be explicitly disabled', () => {
+  assert.equal(multiAgentEnabled({}), true);
+  assert.equal(multiAgentEnabled({ MULTI_AGENT_ENABLED: '' }), true);
+  assert.equal(multiAgentEnabled({ MULTI_AGENT_ENABLED: 'false' }), false);
+  assert.equal(multiAgentEnabled({ MULTI_AGENT_ENABLED: 'off' }), false);
+  assert.equal(multiAgentEnabled({ MULTI_AGENT_ENABLED: 'true' }), true);
 });
 
 test('AgentManager runs parallel children, waits, follows up and stops without deleting identity', async () => {

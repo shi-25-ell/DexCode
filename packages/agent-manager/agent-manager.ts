@@ -63,7 +63,7 @@ function resultView(run: AgentRunRecord, maxBytes: number) {
 
 export function multiAgentEnabled(env: Record<string, string | undefined> = process.env): boolean {
   const value = env.MULTI_AGENT_ENABLED?.trim().toLowerCase();
-  if (value === undefined || value === '') return false;
+  if (value === undefined || value === '') return true;
   if (['1', 'true', 'on'].includes(value)) return true;
   if (['0', 'false', 'off'].includes(value)) return false;
   throw new Error('MULTI_AGENT_ENABLED must be true or false');
