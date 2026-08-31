@@ -1,6 +1,6 @@
 export type ConversationScope = { kind: 'general' } | { kind: 'workspace'; workspaceRef: string };
 
-export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'snapshots' | 'project-knowledge';
+export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge';
 export type ApprovalMode = 'read_only' | 'allowlist' | 'full_access';
 export type ApprovalEffect = 'read' | 'write' | 'execute' | 'external' | 'interactive';
 export type ApprovalOption = 'allow_once' | 'allow_whitelist' | 'deny';
@@ -9,7 +9,7 @@ export type Capability = {
   id: CapabilityId;
   label: string;
   route: string;
-  icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'camera' | 'book';
+  icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'book';
   workspaceRequired: boolean;
 };
 

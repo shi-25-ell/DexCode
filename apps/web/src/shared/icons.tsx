@@ -21,7 +21,6 @@ export const capabilityIcons: Record<Capability['icon'], ComponentType<{ size?: 
   wrench: Wrench,
   sparkles: Sparkles,
   shield: ShieldCheck,
-  camera: Camera,
   book: BookOpen,
 };
 

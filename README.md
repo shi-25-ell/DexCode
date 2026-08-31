@@ -63,11 +63,11 @@ npm start
 
 ### 能力中心与品牌资源
 
-MCP、工具、Skill、白名单、快照、项目知识均从统一 React 外壳进入。入口来自 `CapabilityRegistry`，不是 Sidebar 内的固定数组：
+MCP、工具、Skill、白名单、项目知识均从统一 React 外壳进入。入口来自 `CapabilityRegistry`，不是 Sidebar 内的固定数组：
 
 ```dotenv
 # 逗号分隔；移除注册项后，侧边栏和设置路由同时收口
-DEX_DISABLED_CAPABILITIES=snapshots,project-knowledge
+DEX_DISABLED_CAPABILITIES=project-knowledge
 
 # 构建时替换品牌图标；缺省使用 public/dexcode-icon.png
 VITE_BRAND_ICON_URL=/my-brand.svg

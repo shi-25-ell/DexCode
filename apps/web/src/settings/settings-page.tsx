@@ -8,7 +8,6 @@ import type { CapabilityId, ConversationScope } from '../types';
 import { McpPanel } from './mcp-panel';
 import { ProjectKnowledgePanel } from './project-knowledge-panel';
 import { SkillsPanel } from './skills-panel';
-import { SnapshotsPanel } from './snapshots-panel';
 import { ToolsPanel } from './tools-panel';
 import { ApprovalModePanel } from './approval-mode-panel';
 
@@ -19,7 +18,6 @@ const CAPABILITY_PANELS: Record<CapabilityId, ComponentType<CapabilityPanelProps
   tools: ({ workspaceRef }) => <ToolsPanel workspaceRef={workspaceRef!} />,
   skills: ({ workspaceRef }) => <SkillsPanel workspaceRef={workspaceRef!} />,
   approval: ({ workspaceRef }) => <ApprovalModePanel workspaceRef={workspaceRef} />,
-  snapshots: ({ workspaceRef }) => <SnapshotsPanel workspaceRef={workspaceRef!} />,
   'project-knowledge': ({ workspaceRef }) => <ProjectKnowledgePanel workspaceRef={workspaceRef!} />,
 };
 
