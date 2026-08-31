@@ -6,6 +6,7 @@ import { statusIcons, toolIcons } from '../shared/icons';
 
 export function ToolCard({ tool }: { tool: ToolPresentation }) {
   const [open, setOpen] = useState(false);
+  if (tool.category === 'memory' && tool.name !== '更新记忆' && tool.name !== '删除记忆') return null;
   const ToolIcon = toolIcons[tool.category];
   const StatusIcon = statusIcons[tool.status];
   const hasDetails = Boolean(tool.rawOutput);

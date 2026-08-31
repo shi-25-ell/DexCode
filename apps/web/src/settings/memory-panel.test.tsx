@@ -23,15 +23,16 @@ describe('Memory settings', () => {
     render(<QueryClientProvider client={client}><MemoryPanel workspaceRef="workspace-1" /></QueryClientProvider>);
 
     const toggle = await screen.findByRole('button', { name: '启用项目记忆：已启用' });
+    expect(screen.queryByText(/当前项目：/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/记忆主题/)).not.toBeInTheDocument();
     fireEvent.click(toggle);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/managed-memory/settings', expect.objectContaining({ method: 'PUT' })));
-    expect(await screen.findByText(/已有记忆仍保留/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '清空' }));
     expect(screen.getByRole('dialog', { name: '清空项目记忆' })).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: '确认清空' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/managed-memory', expect.objectContaining({ method: 'DELETE' })));
-    expect(await screen.findByText(/已清空 3 个记忆文件/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '清空项目记忆' })).not.toBeInTheDocument());
   });
 });

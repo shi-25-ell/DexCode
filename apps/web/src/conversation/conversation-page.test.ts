@@ -67,6 +67,35 @@ describe('conversation presentation', () => {
     expect(screen.queryByText('opaque-ref')).not.toBeInTheDocument();
   });
 
+  it('shows only memory mutations and expands an upsert with its actual markdown content', () => {
+    const hiddenMemoryTools = ['浏览记忆', '读取记忆', '搜索记忆'];
+    const { rerender } = render(createElement(ToolCard, { tool: {
+      callRef: 'memory-read', category: 'memory', name: '读取记忆', target: 'project.md', status: 'succeeded', summary: '执行完成', rawOutput: '内部读取结果',
+    } }));
+    expect(screen.queryByText('读取记忆')).not.toBeInTheDocument();
+
+    for (const name of hiddenMemoryTools) {
+      rerender(createElement(ToolCard, { tool: {
+        callRef: name, category: 'memory', name, status: 'succeeded', summary: '执行完成',
+      } }));
+      expect(screen.queryByText(name)).not.toBeInTheDocument();
+    }
+
+    rerender(createElement(ToolCard, { tool: {
+      callRef: 'memory-remove', category: 'memory', name: '删除记忆', target: 'obsolete.md', status: 'succeeded', summary: '项目记忆已删除',
+    } }));
+    expect(screen.getByText('删除记忆')).toBeInTheDocument();
+    expect(screen.getByText('项目记忆已删除')).toBeInTheDocument();
+
+    rerender(createElement(ToolCard, { tool: {
+      callRef: 'memory-upsert', category: 'memory', name: '更新记忆', target: 'project.md', status: 'succeeded', summary: '项目记忆已更新',
+      rawOutput: '---\nname: Project\ndescription: Current project facts\ntype: project\n---\n\n# Build\n\nUse npm test.\n',
+    } }));
+    fireEvent.click(screen.getByRole('button', { name: '更新记忆，展开输出内容' }));
+    expect(screen.getByText(/name: Project/)).toBeInTheDocument();
+    expect(screen.queryByText(/operationId|digest/)).not.toBeInTheDocument();
+  });
+
   it('updates one Context Card by operation ref and reports only actions that occurred', () => {
     const context = {
       operationRef: 'context-1',

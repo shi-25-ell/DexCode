@@ -1,4 +1,6 @@
 import type { FileDiff, ToolPresentation, ToolViewStatus } from '../shared/types.ts';
+import type { ManagedMemoryType } from '../managed-memory/contracts.ts';
+import { serializeTopic } from '../managed-memory/format.ts';
 import { safeDisplayOutput } from './output-policy.ts';
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -93,7 +95,17 @@ export function presentTool(input: {
   const args = input.args ?? {};
   const details = descriptor(input.tool, args);
   const status = input.status ?? (input.result === undefined ? 'running' : outcomeStatus(input.result));
-  const raw = input.result === undefined ? { truncated: false } : safeDisplayOutput(input.result);
+  const memoryUpsertContent = input.tool === 'memory_upsert' && status === 'succeeded'
+    ? serializeTopic({
+        name: String(args.name ?? ''),
+        description: String(args.description ?? ''),
+        type: String(args.type ?? '') as ManagedMemoryType,
+        body: String(args.body ?? ''),
+      })
+    : undefined;
+  const raw = input.result === undefined || (input.tool === 'memory_remove' && status === 'succeeded')
+    ? { truncated: false }
+    : safeDisplayOutput(memoryUpsertContent ?? input.result);
   const stat = diffStat(input.fileDiff);
   return {
     callRef: input.callRef,

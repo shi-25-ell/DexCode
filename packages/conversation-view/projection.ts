@@ -1,6 +1,7 @@
 import type { Session, SessionLedgerRecord } from '../shared/types.ts';
 import type { ConversationItem, ConversationListItem, ConversationState, ConversationViewSnapshot, ContextUsageView } from './contracts.ts';
 import { safeDisplayOutput } from './output-policy.ts';
+import { presentTool } from './tool-presentation.ts';
 import { conversationTitle } from './title.ts';
 import { projectQueue } from '../agent-core/queue-reducer.ts';
 
@@ -53,7 +54,21 @@ function contextUsage(session: Session, contextWindow?: number): ContextUsageVie
   return { source: 'unknown', timing: 'next_request' };
 }
 
-function readableStoredPresentation(presentation: Extract<SessionLedgerRecord, { type: 'tool_completed' }>['presentation']) {
+function readableStoredPresentation(
+  presentation: Extract<SessionLedgerRecord, { type: 'tool_completed' }>['presentation'],
+  started?: Extract<SessionLedgerRecord, { type: 'tool_started' }>,
+) {
+  if (started && presentation.status === 'succeeded' && (started.tool === 'memory_upsert' || started.tool === 'memory_remove')) {
+    try {
+      return presentTool({
+        callRef: presentation.callRef,
+        tool: started.tool,
+        args: started.input ?? {},
+        result: { ok: true },
+        status: 'succeeded',
+      });
+    } catch { /* keep the stored presentation if legacy input cannot be reconstructed */ }
+  }
   if (!presentation.rawOutput) return presentation;
   let value: unknown = presentation.rawOutput;
   try { value = JSON.parse(presentation.rawOutput); } catch { /* already display text */ }
@@ -84,6 +99,7 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
     if (candidate?.type === 'message') legacyFinalAssistantSeqs.add(candidate.seq);
   }
   const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && record.tool === 'compact_context' ? [record.callId] : []));
+  const startedTools = new Map(records.flatMap((record) => record.type === 'tool_started' ? [[record.callId, record] as const] : []));
   for (const record of records) {
     if (record.type === 'message') {
       const message = record.message;
@@ -99,7 +115,7 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
       });
     } else if (record.type === 'tool_completed') {
       if (internalContextCalls.has(record.callId)) continue;
-      items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: readableStoredPresentation(record.presentation) });
+      items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: readableStoredPresentation(record.presentation, startedTools.get(record.callId)) });
     } else if (record.type === 'context_compaction_started') {
       items.push({ id: `context-${record.operationRef}`, kind: 'context', context: { operationRef: record.operationRef, status: 'running' } });
     } else if (record.type === 'context_compaction_completed') {

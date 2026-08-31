@@ -31,6 +31,45 @@ test('tool presentation localizes Skill, MCP and file changes', () => {
   assert.deepEqual(file.fileChange, { path: 'src/app.ts', additions: 2, deletions: 1 });
 });
 
+test('memory upsert presentation contains the committed markdown instead of internal ids', () => {
+  const memory = presentTool({
+    callRef: 'call-memory',
+    tool: 'memory_upsert',
+    args: {
+      path: 'project.md',
+      name: 'Project',
+      description: 'Current project facts',
+      type: 'project',
+      body: '# Build\n\nUse npm test.',
+      operationId: 'operation-secret',
+    },
+    result: {
+      ok: true,
+      mutationCommitted: true,
+      operationId: 'operation-secret',
+      digest: 'sha256-secret',
+      indexDigest: 'sha256-index-secret',
+    },
+  });
+  assert.equal(memory.name, '更新记忆');
+  assert.equal(memory.target, 'project.md');
+  assert.equal(memory.rawOutput, '---\nname: Project\ndescription: Current project facts\ntype: project\n---\n\n# Build\n\nUse npm test.\n');
+  assert.doesNotMatch(memory.rawOutput ?? '', /operation-secret|sha256-secret/);
+});
+
+test('memory removal remains visible without exposing mutation ids as expandable output', () => {
+  const memory = presentTool({
+    callRef: 'call-memory-remove',
+    tool: 'memory_remove',
+    args: { path: 'obsolete.md', operationId: 'operation-secret' },
+    result: { ok: true, mutationCommitted: true, operationId: 'operation-secret', indexDigest: 'sha256-index-secret' },
+  });
+  assert.equal(memory.name, '删除记忆');
+  assert.equal(memory.target, 'obsolete.md');
+  assert.equal(memory.summary, '项目记忆已删除');
+  assert.equal(memory.rawOutput, undefined);
+});
+
 test('projection keeps opaque refs out of product titles and restores tool cards', () => {
   const now = new Date().toISOString();
   const session: Session = {
@@ -91,6 +130,52 @@ test('projection upgrades legacy JSON tool output into readable content', () => 
   const tool = projectConversation(session).items[0];
   assert.equal(tool?.kind, 'tool');
   if (tool?.kind === 'tool') assert.equal(tool.tool.rawOutput, '可读正文');
+});
+
+test('projection rebuilds legacy memory mutation cards from their tool inputs', () => {
+  const now = new Date().toISOString();
+  const session: Session = {
+    sessionId: 'session-legacy-memory-output',
+    scope: { kind: 'workspace', workspaceId: 'workspace-test' },
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [
+      {
+        seq: 1,
+        at: now,
+        runId: 'run-memory',
+        type: 'tool_started',
+        callId: 'call-memory',
+        tool: 'memory_upsert',
+        input: { path: 'project.md', name: 'Project', description: 'Facts', type: 'project', body: '# Build\n\nUse npm test.' },
+      },
+      {
+        seq: 2,
+        at: now,
+        runId: 'run-memory',
+        type: 'tool_completed',
+        callId: 'call-memory',
+        presentation: {
+          callRef: 'call-memory',
+          category: 'memory',
+          name: '更新记忆',
+          target: 'project.md',
+          status: 'succeeded',
+          summary: '项目记忆已更新',
+          rawOutput: 'operationId: old-operation-id\n\ndigest: old-digest',
+        },
+      },
+    ],
+  };
+  const tool = projectConversation(session).items[0];
+  assert.equal(tool?.kind, 'tool');
+  if (tool?.kind === 'tool') {
+    assert.match(tool.tool.rawOutput ?? '', /^---\nname: Project/m);
+    assert.doesNotMatch(tool.tool.rawOutput ?? '', /old-operation-id|old-digest/);
+  }
 });
 
 test('tool output renders common content and command streams instead of JSON envelopes', () => {
