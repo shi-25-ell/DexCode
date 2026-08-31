@@ -121,7 +121,12 @@ export type AgentRunView = {
   result?: { finalContent: string; terminationReason: string; toolsUsed: string[]; filesModified: string[]; usage?: { totalTokens: number }; error?: { code: string; message: string } };
 };
 export type AgentTreeSnapshot = { version: 1; sessionId: string; rootAgentId: string; revision: number; agents: AgentRecordView[]; runs: AgentRunView[] };
-export type AgentDetail = { agent: AgentRecordView; runs: AgentRunView[]; messages: Array<{ role: string; content?: string; name?: string }> };
+export type AgentTranscriptMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> }
+  | { role: 'tool'; tool_call_id: string; name: string; content: string };
+export type AgentToolView = { callId: string; name: string; status: 'running' | 'finished'; presentation?: ToolPresentation };
+export type AgentDetail = { agent: AgentRecordView; runs: AgentRunView[]; messages: AgentTranscriptMessage[]; tools: AgentToolView[] };
 export type AgentActivityEnvelope = { version: 1; sessionId: string; seq: number; at: string; event: { type: string; agent?: AgentRecordView; agentId?: string; run?: AgentRunView; status?: AgentRecordView['status']; revision?: number } };
 
 export type QueueDelivery = 'next_run' | 'steer';

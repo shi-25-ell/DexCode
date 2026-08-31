@@ -151,10 +151,19 @@ body.resizing { cursor: col-resize; user-select: none; }
 .agent-tree-row { margin-left: 16px; border-left: 1px solid #d8ded9; }
 .agent-transcript h3 { margin: 4px 4px 2px; font-size: 16px; }
 .agent-transcript > p { margin: 0 4px 16px; color: #6f7973; font-size: 12px; }
-.agent-message { margin: 10px 4px; padding: 11px 12px; border-radius: 10px; background: #f6f7f5; border: 1px solid #e5e8e4; }
-.agent-message.user { background: #eef3ef; }
-.agent-message small { color: #758078; font-size: 10px; text-transform: uppercase; }
-.agent-message pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 12px; line-height: 1.55; color: #303b35; }
+.agent-transcript-stream { min-width: 0; padding: 4px; }
+.agent-transcript-stream .user-message-group { margin: 8px 0 18px; }
+.agent-transcript-stream .user-message { max-width: 88%; padding: 10px 12px; font-size: 13px; }
+.agent-transcript-stream .assistant-message { margin-bottom: 18px; font-size: 13px; line-height: 1.75; }
+.agent-transcript-stream .assistant-message pre { max-width: 100%; padding: 10px; font-size: 12px; }
+.agent-transcript-stream .assistant-content table { min-width: 520px; }
+.agent-transcript-stream .tool-card { margin: 9px 0 14px; }
+.agent-transcript-stream .tool-card-trigger { grid-template-columns: 28px minmax(0, 1fr) 18px; min-height: 58px; padding: 9px 10px; gap: 8px; }
+.agent-transcript-stream .tool-status { display: none; }
+.agent-transcript-stream .tool-title-line { gap: 6px; }
+.agent-transcript-stream .tool-title-line code { max-width: 150px; }
+.agent-transcript-stream .tool-output pre { max-height: 320px; font-size: 11px; }
+.agent-transcript-empty { color: #758078; font-size: 12px; }
 .header-title-wrap { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .header-title-wrap h1 { overflow: hidden; margin: 0; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
 .header-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }

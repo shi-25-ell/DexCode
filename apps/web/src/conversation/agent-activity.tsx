@@ -1,8 +1,12 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Bot, ChevronRight, Square, X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { getAgentDetail } from '../api';
-import type { AgentRecordView, AgentRunView, AgentTreeSnapshot, ConversationScope } from '../types';
+import type { AgentDetail, AgentRecordView, AgentRunView, AgentToolView, AgentTreeSnapshot, ConversationScope, ToolPresentation } from '../types';
+import { AssistantMessage } from './assistant-message';
+import { ToolCard } from './tool-card';
+import { UserMessage } from './user-message';
 
 function runFor(tree: AgentTreeSnapshot, agent: AgentRecordView) {
   return tree.runs.find((run) => run.agentRunId === (agent.currentRunId ?? agent.lastRunId));
@@ -63,14 +67,58 @@ export function AgentInvocationPlaceholder() {
   );
 }
 
+function fallbackToolPresentation(tool: AgentToolView | undefined, input: { callId: string; name: string; output?: string }): ToolPresentation {
+  const running = tool?.status === 'running';
+  return {
+    callRef: input.callId,
+    toolName: tool?.name ?? input.name,
+    category: 'other',
+    name: tool?.name ?? input.name,
+    status: running ? 'running' : 'succeeded',
+    summary: running ? '正在执行…' : '执行完成',
+    ...(input.output ? { rawOutput: input.output } : {}),
+  };
+}
+
+export function AgentTranscript({ detail }: { detail: AgentDetail }) {
+  const detailTools = detail.tools ?? [];
+  const tools = new Map(detailTools.map((tool) => [tool.callId, tool]));
+  const renderedTools = new Set<string>();
+  const entries: ReactNode[] = [];
+  const appendTool = (callId: string, name: string, key: string, output?: string) => {
+    if (renderedTools.has(callId)) return;
+    renderedTools.add(callId);
+    const tool = tools.get(callId);
+    entries.push(<ToolCard key={key} tool={tool?.presentation ?? fallbackToolPresentation(tool, { callId, name, ...(output ? { output } : {}) })} />);
+  };
+
+  detail.messages.forEach((message, index) => {
+    if (message.role === 'user') {
+      entries.push(<UserMessage key={`user-${index}`} content={message.content} />);
+      return;
+    }
+    if (message.role === 'assistant') {
+      if (message.content?.trim()) entries.push(<AssistantMessage key={`assistant-${index}`} content={message.content} />);
+      for (const call of message.tool_calls ?? []) appendTool(call.id, call.function.name, `tool-${call.id}`);
+      return;
+    }
+    if (message.role === 'tool') appendTool(message.tool_call_id, message.name, `tool-${message.tool_call_id}`, message.content);
+  });
+  for (const tool of detailTools) appendTool(tool.callId, tool.name, `tool-${tool.callId}`);
+
+  return <div className="agent-transcript-stream">{entries.length > 0 ? entries : <p className="agent-transcript-empty">尚无对话内容</p>}</div>;
+}
+
 export function AgentDrawer({ open, onOpenChange, tree, scope, sessionId, selectedAgentId, onSelect, onStop }: {
   open: boolean; onOpenChange(open: boolean): void; tree: AgentTreeSnapshot; scope: ConversationScope; sessionId: string;
   selectedAgentId?: string; onSelect(agentId?: string): void; onStop(agentId: string): void;
 }) {
+  const selectedAgentRunning = Boolean(selectedAgentId && tree.agents.some((agent) => agent.agentId === selectedAgentId && (agent.status === 'running' || agent.status === 'stopping')));
   const detail = useQuery({
     queryKey: ['agent-detail', scope, sessionId, selectedAgentId],
     queryFn: () => getAgentDetail(scope, sessionId, selectedAgentId!),
     enabled: open && Boolean(selectedAgentId),
+    refetchInterval: open && selectedAgentRunning ? 1_000 : false,
   });
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -85,9 +133,7 @@ export function AgentDrawer({ open, onOpenChange, tree, scope, sessionId, select
             <div className="agent-transcript">
               <h3>{detail.data?.agent.name ?? 'Agent 对话'}</h3>
               <p>{detail.data?.agent.task}</p>
-              {detail.isPending ? <span>加载中…</span> : detail.data?.messages.map((message, index) => (
-                <article key={index} className={`agent-message ${message.role}`}><small>{message.role === 'user' ? '任务' : message.role === 'assistant' ? 'Agent' : message.name ?? '工具'}</small><pre>{message.content ?? ''}</pre></article>
-              ))}
+              {detail.isPending ? <span>加载中…</span> : detail.data ? <AgentTranscript detail={detail.data} /> : <span>无法加载 Agent 对话</span>}
             </div>
           ) : (
             <div className="agent-tree-list">

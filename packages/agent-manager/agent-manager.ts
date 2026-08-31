@@ -9,6 +9,7 @@ import {
   type AgentOrchestrationPort,
   type AgentRecord,
   type AgentRunRecord,
+  type AgentToolRecord,
   type AgentTreeSnapshot,
   type StoredAgentRunResult,
   DEFAULT_AGENT_DEFINITION_NAME,
@@ -78,7 +79,7 @@ export function createAgentManager(options: {
   limits?: { maxConcurrentAgents?: number; maxAgentsPerSession?: number; maxDepth?: number; maxConcurrentSharedWriters?: number };
 }): AgentOrchestrationPort & {
   list(sessionId: string): Promise<AgentTreeSnapshot | null>;
-  detail(sessionId: string, agentId: string): Promise<{ agent: AgentRecord; runs: AgentRunRecord[]; messages: ChatMessage[] } | null>;
+  detail(sessionId: string, agentId: string): Promise<{ agent: AgentRecord; runs: AgentRunRecord[]; messages: ChatMessage[]; tools: AgentToolRecord[] } | null>;
   stopSession(sessionId: string, reason?: string): Promise<void>;
   shutdown(reason?: string): Promise<void>;
 } {
@@ -286,7 +287,13 @@ export function createAgentManager(options: {
       const tree = await loadTree(sessionId);
       const agent = tree?.agents.find((item) => item.agentId === agentId);
       if (!tree || !agent) return null;
-      return { agent, runs: tree.runs.filter((run) => run.agentId === agentId), messages: tree.conversations.find((item) => item.agentId === agentId)?.messages ?? [] };
+      const conversation = tree.conversations.find((item) => item.agentId === agentId);
+      return {
+        agent,
+        runs: tree.runs.filter((run) => run.agentId === agentId),
+        messages: conversation?.messages ?? [],
+        tools: conversation?.tools ?? [],
+      };
     },
     async stopSession(sessionId, reason = 'Session is closing') {
       const sessionHandles = [...handles.values()].filter((handle) => handle.sessionId === sessionId);

@@ -121,7 +121,9 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     assert.equal(missing.code, 'definition_not_found');
     assert.match(missing.message, /Available agents: assistant, general-purpose, researcher, reviewer/);
     const first = await manager.spawn({ task: 'one' }, caller('spawn-1')) as { agent_id: string };
-    assert.equal((await manager.detail(sessionId, first.agent_id))?.agent.definitionName, 'general-purpose');
+    const firstDetail = await manager.detail(sessionId, first.agent_id);
+    assert.equal(firstDetail?.agent.definitionName, 'general-purpose');
+    assert.deepEqual(firstDetail?.tools, []);
     const firstRun = (await manager.detail(sessionId, first.agent_id))?.runs[0];
     assert.equal(firstRun?.invokedByTurn, 1);
     assert.equal(firstRun?.invokedByToolCallId, 'spawn-1');
