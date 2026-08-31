@@ -547,6 +547,13 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             if (group.kind === 'item') return (
               <ConversationTimelineItem key={group.entry.item.id} item={group.entry.item} status={state.status} workspaceRef={workspaceRef} agentTree={agentTree} onOpenAgent={openAgent} onStopAgent={stopAgent} />
             );
+            if (group.kind === 'execution_history') return (
+              <ExecutionHistoryDisclosure key={`execution-${group.history[0]!.item.id}`} itemCount={group.history.length}>
+                {group.history.map(({ item }) => (
+                  <ConversationTimelineItem key={item.id} item={item} status={state.status} workspaceRef={workspaceRef} agentTree={agentTree} onOpenAgent={openAgent} onStopAgent={stopAgent} />
+                ))}
+              </ExecutionHistoryDisclosure>
+            );
             return (
               <Fragment key={`response-${group.final.item.id}`}>
                 {group.history.length > 0 ? (

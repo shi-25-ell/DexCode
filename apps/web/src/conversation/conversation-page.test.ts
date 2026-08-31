@@ -50,6 +50,31 @@ describe('conversation presentation', () => {
     ]);
   });
 
+  it('folds execution on both sides of Steer messages only after the Run has a final answer', () => {
+    const items: ConversationItem[] = [
+      { id: 'u1', kind: 'user', content: '原始任务' },
+      { id: 'a1', kind: 'assistant', content: 'Steer 前执行', runId: 'run-1' },
+      { id: 't1', kind: 'tool', tool: { callRef: 'call-1', toolName: 'read_file', category: 'read', name: '读取文件', status: 'succeeded', summary: '完成' } },
+      { id: 'u2', kind: 'user', content: '第一次调整方向', delivery: 'steer' },
+      { id: 'a2', kind: 'assistant', content: '第一次 Steer 后执行', runId: 'run-1' },
+      { id: 't2', kind: 'tool', tool: { callRef: 'call-2', toolName: 'search_in_workspace', category: 'search', name: '搜索代码', status: 'succeeded', summary: '完成' } },
+      { id: 'u3', kind: 'user', content: '第二次调整方向', delivery: 'steer' },
+      { id: 'a3', kind: 'assistant', content: '第二次 Steer 后执行', runId: 'run-1' },
+      { id: 't3', kind: 'tool', tool: { callRef: 'call-3', toolName: 'run_command', category: 'command', name: '执行命令', status: 'succeeded', summary: '完成' } },
+      { id: 'a4', kind: 'assistant', content: '最终结果', runId: 'run-1', final: true },
+    ];
+
+    expect(groupConversationHistory(items.slice(0, -1)).some((group) => group.kind === 'execution_history')).toBe(false);
+    expect(groupConversationHistory(items)).toMatchObject([
+      { kind: 'item', entry: { item: { id: 'u1' } } },
+      { kind: 'execution_history', history: [{ item: { id: 'a1' } }, { item: { id: 't1' } }] },
+      { kind: 'item', entry: { item: { id: 'u2', delivery: 'steer' } } },
+      { kind: 'execution_history', history: [{ item: { id: 'a2' } }, { item: { id: 't2' } }] },
+      { kind: 'item', entry: { item: { id: 'u3', delivery: 'steer' } } },
+      { kind: 'completed_response', history: [{ item: { id: 'a3' } }, { item: { id: 't3' } }], final: { item: { id: 'a4' } } },
+    ]);
+  });
+
   it('keeps unfinished and failed response items expanded when no final answer exists', () => {
     const items: ConversationItem[] = [
       { id: 'u1', kind: 'user', content: '运行测试' },
@@ -131,6 +156,23 @@ describe('conversation presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: '更新记忆，展开输出内容' }));
     expect(screen.getByText(/name: Project/)).toBeInTheDocument();
     expect(screen.queryByText(/operationId|digest/)).not.toBeInTheDocument();
+  });
+
+  it('shows a Skill card only for activate_skill', () => {
+    const { rerender } = render(createElement(ToolCard, { tool: {
+      callRef: 'skill-read', toolName: 'read_skill', category: 'skill', name: '使用 Skill', target: 'codebase-design', status: 'succeeded', summary: '已加载能力说明',
+    } }));
+    expect(screen.queryByText('codebase-design')).not.toBeInTheDocument();
+
+    rerender(createElement(ToolCard, { tool: {
+      callRef: 'skill-activate', toolName: 'activate_skill', category: 'skill', name: '使用 Skill', target: 'codebase-design', status: 'succeeded', summary: '已加载能力说明',
+    } }));
+    expect(screen.getByText('codebase-design')).toBeInTheDocument();
+
+    rerender(createElement(ToolCard, { tool: {
+      callRef: 'skill-deactivate', toolName: 'deactivate_skill', category: 'skill', name: '停用 Skill', target: 'codebase-design', status: 'succeeded', summary: '执行完成',
+    } }));
+    expect(screen.queryByText('codebase-design')).not.toBeInTheDocument();
   });
 
   it('updates one Context Card by operation ref and reports only actions that occurred', () => {

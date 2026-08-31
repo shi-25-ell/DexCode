@@ -43,7 +43,7 @@ export type ToolBatchPresentation = {
 };
 
 export type ConversationItem =
-  | { id: string; kind: 'user'; content: string }
+  | { id: string; kind: 'user'; content: string; delivery?: 'steer' }
   | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'tool_batch'; batch: ToolBatchPresentation }

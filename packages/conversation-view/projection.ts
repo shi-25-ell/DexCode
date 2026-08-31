@@ -143,6 +143,15 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
   const finalMessageIds = new Set(records.flatMap((record) => (
     record.type === 'run_terminal' && record.report.finalMessageId ? [record.report.finalMessageId] : []
   )));
+  const steerMessageSeqs = new Set(records.flatMap((record, index) => {
+    if (record.type !== 'queue_consumed' || record.delivery !== 'steer') return [];
+    const message = records[index - 1];
+    return message?.type === 'message'
+      && message.runId === record.runId
+      && message.message.role === 'user'
+      ? [message.seq]
+      : [];
+  }));
   const legacyFinalAssistantSeqs = new Set<number>();
   for (const terminal of records) {
     if (terminal.type !== 'run_terminal' || terminal.report.status !== 'completed' || terminal.report.finalMessageId) continue;
@@ -181,7 +190,12 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
     }
     if (record.type === 'message') {
       const message = record.message;
-      if (message.role === 'user' && !record.origin?.startsWith('agent_notification:')) pushItem({ id: `message-${record.seq}`, kind: 'user', content: message.content });
+      if (message.role === 'user' && !record.origin?.startsWith('agent_notification:')) pushItem({
+        id: `message-${record.seq}`,
+        kind: 'user',
+        content: message.content,
+        ...(steerMessageSeqs.has(record.seq) ? { delivery: 'steer' as const } : {}),
+      });
       if (message.role === 'assistant') {
         if (message.content?.trim()) pushItem({
           id: record.messageId ?? `message-${record.seq}`,

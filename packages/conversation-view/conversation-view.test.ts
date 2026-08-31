@@ -368,6 +368,49 @@ test('projection marks only the explicit final assistant message and upgrades co
   assert.equal(legacy[0]?.kind === 'assistant' ? legacy[0].final : undefined, undefined);
   assert.equal(legacy[1]?.kind === 'assistant' ? legacy[1].final : undefined, true);
 });
+
+test('projection marks a consumed Steer user message without hiding it', () => {
+  const now = new Date().toISOString();
+  const runId = 'run-steer-projection';
+  const projected = projectConversation({
+    sessionId: 'session-steer-projection',
+    scope: { kind: 'general' },
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [
+      { seq: 1, at: now, runId, type: 'run_started', context: { scope: { kind: 'general' } }, profile: 'main', origin: 'user' },
+      { seq: 2, at: now, runId, type: 'message', message: { role: 'user', content: '原始任务' } },
+      { seq: 3, at: now, runId, type: 'message', messageId: 'before-steer', turn: 1, message: { role: 'assistant', content: '先执行一部分' } },
+      { seq: 4, at: now, type: 'queue_enqueued', operationId: 'enqueue-steer', itemId: 'queue-1', message: { role: 'user', content: '调整方向' }, delivery: 'steer', targetRunId: runId, position: 0, sessionRevision: 1 },
+      { seq: 5, at: now, runId, type: 'message', message: { role: 'user', content: '调整方向' } },
+      { seq: 6, at: now, type: 'queue_consumed', operationId: 'consume-steer', itemId: 'queue-1', delivery: 'steer', runId, sessionRevision: 2 },
+      { seq: 7, at: now, runId, type: 'message', messageId: 'final', turn: 2, message: { role: 'assistant', content: '最终结果' } },
+      { seq: 8, at: now, runId, type: 'run_terminal', report: {
+        version: 1,
+        runId,
+        status: 'completed',
+        terminationReason: 'natural_completion',
+        finalAnswer: '最终结果',
+        finalMessageId: 'final',
+        startedAt: now,
+        completedAt: now,
+        modelTurnCount: 2,
+        modelAttemptCount: 2,
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 },
+        toolsUsed: [],
+        filesModified: [],
+      } },
+    ],
+  }).items;
+
+  assert.deepEqual(projected.filter((item) => item.kind === 'user'), [
+    { id: 'message-2', kind: 'user', content: '原始任务' },
+    { id: 'message-5', kind: 'user', content: '调整方向', delivery: 'steer' },
+  ]);
+});
 test('presents background command lifecycle distinctly', () => {
   const started = presentTool({ callRef: 'command-1', tool: 'run_command', args: { command: 'npm test' }, result: { status: 'background', taskId: 'task-1' } });
   const running = presentTool({ callRef: 'command-2', tool: 'read_command_output', args: { task_id: 'task-1' }, result: { status: 'background' } });
