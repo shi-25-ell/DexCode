@@ -84,6 +84,21 @@ describe('RunPresentation', () => {
     ]);
   });
 
+  it('anchors a started child run at the exact orchestration call', () => {
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, {
+      type: 'agent_invocation_started',
+      callId: 'spawn-1',
+      agentId: 'agent-a',
+      agentRunId: 'agent-run-a',
+      turn: 1,
+    }));
+    expect(state.activeRun?.activityOrder).toEqual([
+      { kind: 'assistant', messageId: 'message-1' },
+      { kind: 'agent', callId: 'spawn-1', agentId: 'agent-a', agentRunId: 'agent-run-a', turn: 1 },
+    ]);
+  });
+
   it('marks seq gaps for resync, ignores missing deltas, and accepts authoritative commit', () => {
     let state = started();
     state = reduceRunEvent(state, envelope(4, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 1, kind: 'text', delta: 'incomplete' }));

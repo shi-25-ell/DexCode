@@ -107,6 +107,43 @@ describe('RunActivity', () => {
     expect(child.compareDocumentPosition(finalMessage) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
 
+  it('uses the exact invocation entry before later streamed text', () => {
+    const tree: AgentTreeSnapshot = {
+      version: 1, sessionId: 'session-1', rootAgentId: 'root', revision: 1,
+      agents: [{
+        agentId: 'agent-a', sessionId: 'session-1', rootAgentId: 'root', parentAgentId: 'root', createdByRunId: 'run-1',
+        name: 'greeter', task: '问好', contextMode: 'fresh', isolation: 'shared', definitionName: 'general',
+        status: 'running', currentRunId: 'agent-run-a', lastRunId: 'agent-run-a', createdAt: '', updatedAt: '',
+      }],
+      runs: [{
+        agentRunId: 'agent-run-a', agentId: 'agent-a', invokedByRunId: 'run-1', invokedByTurn: 1,
+        invokedByToolCallId: 'spawn-1', delegationGroupId: 'group-1', trigger: 'spawn', status: 'running', input: '问好', startedAt: '',
+      }],
+    };
+    render(createElement(RunActivity, {
+      run: run({
+        committedMessages: [{ id: 'message-1', kind: 'assistant', content: '现在调用', messageId: 'message-1', runId: 'run-1', turn: 1 }],
+        assistantDraft: { messageId: 'message-2', turn: 2, committed: false, hasToolCalls: false, blocks: { 0: { contentIndex: 0, kind: 'text', content: '已经启动' } } },
+        activityOrder: [
+          { kind: 'assistant', messageId: 'message-1' },
+          { kind: 'agent', callId: 'spawn-1', agentId: 'agent-a', agentRunId: 'agent-run-a', turn: 1 },
+          { kind: 'assistant', messageId: 'message-2' },
+        ],
+      }),
+      needsResync: false,
+      agentTree: tree,
+      agentGroups: [{ key: 'group-1', agentRunIds: ['agent-run-a'], sourceRunId: 'run-1', sourceTurn: 1 }],
+      onOpenAgent: () => {},
+      onStopAgent: () => {},
+    }));
+    const invokingMessage = screen.getByText('现在调用');
+    const child = screen.getByText('greeter');
+    const laterMessage = screen.getByText('已经启动');
+    expect(invokingMessage.compareDocumentPosition(child) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(child.compareDocumentPosition(laterMessage) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.getAllByText('greeter')).toHaveLength(1);
+  });
+
   it('shows an exact phase without rendering an empty reasoning disclosure', () => {
     render(createElement(RunActivity, { run: run(), needsResync: false }));
     expect(screen.getByRole('status')).toHaveTextContent('正在请求模型……');

@@ -169,7 +169,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   }, [agents.data]);
 
   useEffect(() => {
-    if (scope.kind !== 'workspace' || !conversationRef || meta.data?.multiAgentEnabled !== true) return;
+    if (scope.kind !== 'workspace' || !conversationRef || meta.data?.multiAgentEnabled !== true || agents.data === undefined) return;
     const controller = new AbortController();
     void streamAgentActivity({
       scope, sessionId: conversationRef, signal: controller.signal,
@@ -180,7 +180,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       },
     }).catch((error) => { if (!controller.signal.aborted) console.warn('Agent activity stream ended', error); });
     return () => controller.abort();
-  }, [conversationRef, meta.data?.multiAgentEnabled, queryClient, scopeIdentity]);
+  }, [agents.data === undefined, conversationRef, meta.data?.multiAgentEnabled, queryClient, scopeIdentity]);
 
   useEffect(() => {
     if (agentState.needsResync && conversationRef) void queryClient.invalidateQueries({ queryKey: ['agents', scope, conversationRef] });

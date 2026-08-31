@@ -36,6 +36,7 @@ export type AssistantDraftView = {
 export type RunActivityEntry =
   | { kind: 'assistant'; messageId: string }
   | { kind: 'tool'; callId: string }
+  | { kind: 'agent'; callId: string; agentId: string; agentRunId: string; turn: number }
   | { kind: 'approval'; approvalId: string }
   | { kind: 'context'; operationRef: string };
 
@@ -147,6 +148,7 @@ function createActiveRun(envelope: RunEventEnvelope): ActiveRunView {
 function activityKey(entry: RunActivityEntry): string {
   if (entry.kind === 'assistant') return `assistant:${entry.messageId}`;
   if (entry.kind === 'tool') return `tool:${entry.callId}`;
+  if (entry.kind === 'agent') return `agent:${entry.callId}`;
   if (entry.kind === 'approval') return `approval:${entry.approvalId}`;
   return `context:${entry.operationRef}`;
 }
@@ -356,6 +358,21 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
         ...active,
         contextsById: { ...active.contextsById, [event.presentation.operationRef]: event.presentation },
         activityOrder: appendActivity(active, { kind: 'context', operationRef: event.presentation.operationRef }),
+      },
+    };
+  }
+  if (event.type === 'agent_invocation_started') {
+    return {
+      ...state,
+      activeRun: {
+        ...active,
+        activityOrder: appendActivity(active, {
+          kind: 'agent',
+          callId: event.callId,
+          agentId: event.agentId,
+          agentRunId: event.agentRunId,
+          turn: event.turn,
+        }),
       },
     };
   }

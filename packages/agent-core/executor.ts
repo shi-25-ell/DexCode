@@ -933,6 +933,18 @@ export function createExecutor(
           } catch (error) {
             toolResult = { error: error instanceof Error ? error.message : String(error) };
           }
+          if (options.presentation && (toolName === 'spawn_agent' || toolName === 'followup_agent') && toolResult && typeof toolResult === 'object') {
+            const result = toolResult as Record<string, unknown>;
+            if (typeof result.agent_id === 'string' && typeof result.agent_run_id === 'string') {
+              emitPresentation({
+                type: 'agent_invocation_started',
+                callId: call.id,
+                agentId: result.agent_id,
+                agentRunId: result.agent_run_id,
+                turn: modelTurnCount,
+              });
+            }
+          }
           if (!semanticContextTool) {
             onEvent({ type: 'tool', tool: toolName, summary: `Tool call: ${toolName}`, detail: toolSummary(toolResult) });
             if (!options.presentation) onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'settled' });

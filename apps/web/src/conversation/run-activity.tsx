@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm';
 import type { RunPhase } from '../../../../packages/run-protocol/contracts';
 import type { AgentTreeSnapshot } from '../types';
 import { ApprovalCard } from './approval-card';
-import { AgentActivityCard } from './agent-activity';
+import { AgentActivityCard, AgentInvocationPlaceholder } from './agent-activity';
 import type { AgentTimelineGroup } from './agent-timeline';
 import { AssistantMessage } from './assistant-message';
 import { ContextCard } from './context-card';
@@ -67,6 +67,7 @@ function ReasoningDisclosure({ content, truncated, textStarted, startedAt, compl
 function activityKey(entry: RunActivityEntry): string {
   if (entry.kind === 'assistant') return `assistant:${entry.messageId}`;
   if (entry.kind === 'tool') return `tool:${entry.callId}`;
+  if (entry.kind === 'agent') return `agent:${entry.callId}`;
   if (entry.kind === 'approval') return `approval:${entry.approvalId}`;
   return `context:${entry.operationRef}`;
 }
@@ -93,6 +94,7 @@ function RunActivityItem({ entry, run, workspaceRef }: { entry: RunActivityEntry
     const tool = run.toolsByCallId[entry.callId];
     return tool ? <ToolCard tool={tool} /> : null;
   }
+  if (entry.kind === 'agent') return null;
   const approval = run.approvalsById[entry.approvalId];
   return approval ? <ApprovalCard item={approval} workspaceRef={workspaceRef} /> : null;
 }
@@ -113,6 +115,7 @@ export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGr
   onOpenAgent?(agentId: string): void;
   onStopAgent?(agentId: string): void;
 }) {
+  const exactAgentRunIds = new Set(run.activityOrder.flatMap((entry) => entry.kind === 'agent' ? [entry.agentRunId] : []));
   return (
     <section className="run-activity" aria-label="当前运行" aria-live="polite">
       <div className={`run-phase ${run.phase}`} role="status">
@@ -124,10 +127,20 @@ export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGr
       {needsResync ? <div className="run-resync-note">实时片段有缺失，完成后将使用已提交会话校准。</div> : null}
       {run.activityOrder.map((entry) => {
         const turn = turnForActivity(run, entry);
-        const anchoredGroups = turn === undefined ? [] : agentGroups.filter((group) => group.sourceTurn === turn);
+        const anchoredGroups = turn === undefined ? [] : agentGroups
+          .filter((group) => group.sourceTurn === turn)
+          .map((group) => ({ ...group, agentRunIds: group.agentRunIds.filter((agentRunId) => !exactAgentRunIds.has(agentRunId)) }))
+          .filter((group) => group.agentRunIds.length > 0);
+        const invocationReady = entry.kind === 'agent' && agentTree
+          ? agentTree.runs.some((candidate) => candidate.agentRunId === entry.agentRunId)
+          : false;
         return (
           <Fragment key={activityKey(entry)}>
-            <RunActivityItem entry={entry} run={run} workspaceRef={workspaceRef} />
+            {entry.kind === 'agent'
+              ? invocationReady && agentTree && onOpenAgent && onStopAgent
+                ? <AgentActivityCard tree={agentTree} agentRunIds={[entry.agentRunId]} onOpen={onOpenAgent} onStop={onStopAgent} />
+                : <AgentInvocationPlaceholder />
+              : <RunActivityItem entry={entry} run={run} workspaceRef={workspaceRef} />}
             {agentTree && onOpenAgent && onStopAgent ? anchoredGroups.map((group) => (
               <AgentActivityCard key={group.key} tree={agentTree} agentRunIds={group.agentRunIds} onOpen={onOpenAgent} onStop={onStopAgent} />
             )) : null}

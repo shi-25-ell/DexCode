@@ -55,6 +55,14 @@ export function AgentActivityCard({ tree, agentRunIds, onOpen, onStop }: {
   );
 }
 
+export function AgentInvocationPlaceholder() {
+  return (
+    <section className="agent-activity-card" aria-label="子 Agent 正在启动">
+      <div className="agent-card-heading"><span><Bot size={17} />子 Agent</span><small>正在启动…</small></div>
+    </section>
+  );
+}
+
 export function AgentDrawer({ open, onOpenChange, tree, scope, sessionId, selectedAgentId, onSelect, onStop }: {
   open: boolean; onOpenChange(open: boolean): void; tree: AgentTreeSnapshot; scope: ConversationScope; sessionId: string;
   selectedAgentId?: string; onSelect(agentId?: string): void; onStop(agentId: string): void;
