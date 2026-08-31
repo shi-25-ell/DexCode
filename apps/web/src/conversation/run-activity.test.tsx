@@ -24,6 +24,26 @@ function run(overrides: Partial<ActiveRunView> = {}): ActiveRunView {
 }
 
 describe('RunActivity', () => {
+  it('renders one live batch per activity-order segment, including an invisible assistant boundary', () => {
+    const read = (callRef: string) => ({ callRef, toolName: 'read_file', category: 'read' as const, name: '读取文件', target: `${callRef}.ts`, status: 'succeeded' as const, summary: '读取完成' });
+    render(createElement(RunActivity, {
+      run: run({
+        toolsByCallId: { first: read('first'), second: read('second'), third: read('third') },
+        assistantDraft: { messageId: 'empty', turn: 1, committed: false, hasToolCalls: true, blocks: {} },
+        activityOrder: [
+          { kind: 'tool', callId: 'first' },
+          { kind: 'tool', callId: 'second' },
+          { kind: 'assistant', messageId: 'empty' },
+          { kind: 'tool', callId: 'third' },
+        ],
+      }),
+      needsResync: false,
+    }));
+    expect(screen.getAllByText('检查文件')).toHaveLength(2);
+    expect(screen.getByText('检查了 2 个文件 · 2 项操作')).toBeInTheDocument();
+    expect(screen.getByText('检查了 1 个文件 · 1 项操作')).toBeInTheDocument();
+  });
+
   it('renders live assistant, tool, approval, and later assistant output in event order', () => {
     render(createElement(RunActivity, {
       run: run({
@@ -36,7 +56,7 @@ describe('RunActivity', () => {
           turn: 1,
         }],
         toolsByCallId: {
-          'call-1': { callRef: 'call-1', category: 'command', name: '执行命令', status: 'queued', summary: '等待批准' },
+          'call-1': { callRef: 'call-1', toolName: 'run_command', category: 'command', name: '执行命令', status: 'queued', summary: '等待批准' },
         },
         approvalsById: {
           'approval-1': { id: 'approval-1', kind: 'approval', approvalRef: 'approval-1', approvalKind: 'question', title: '允许执行吗？', options: ['允许', '拒绝'] },
@@ -177,7 +197,7 @@ describe('RunActivity', () => {
       run: run({
         phase: 'waiting_approval',
         toolsByCallId: {
-          'call-1': { callRef: 'call-1', category: 'file', name: '修改文件', status: 'queued', summary: '等待批准' },
+          'call-1': { callRef: 'call-1', toolName: 'write_file', category: 'file', name: '修改文件', status: 'queued', summary: '等待批准' },
         },
         approvalsById: {
           'approval-1': { id: 'approval-1', kind: 'approval', approvalRef: 'approval-1', approvalKind: 'question', title: '继续执行吗？', options: ['继续', '停止'] },
@@ -190,7 +210,7 @@ describe('RunActivity', () => {
       needsResync: true,
     }));
     expect(screen.getByRole('status')).toHaveTextContent('等待批准……');
-    expect(screen.getByText('准备中')).toBeInTheDocument();
+    expect(screen.getByText('运行中')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '继续' })).toBeInTheDocument();
     expect(screen.getByText(/实时片段有缺失/)).toBeInTheDocument();
   });

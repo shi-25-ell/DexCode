@@ -24,6 +24,7 @@ export type ConversationListItem = {
 
 export type ToolPresentation = {
   callRef: string;
+  toolName: string;
   category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'memory' | 'other';
   name: string;
   target?: string;
@@ -31,13 +32,20 @@ export type ToolPresentation = {
   summary: string;
   rawOutput?: string;
   truncated?: boolean;
-  fileChange?: { path: string; additions?: number; deletions?: number; binary?: boolean };
+  fileChange?: { path: string; kind: 'created' | 'modified'; additions: number; deletions: number; binary?: boolean; diff: string; truncated: boolean };
+};
+
+export type ToolBatchPresentation = {
+  id: string;
+  type: 'inspection' | 'modification';
+  members: ToolPresentation[];
 };
 
 export type ConversationItem =
   | { id: string; kind: 'user'; content: string }
   | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
+  | { id: string; kind: 'tool_batch'; batch: ToolBatchPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
   | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentRunIds: string[] }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command' | 'tool'; title: string; target?: string; reason?: string; toolName?: string; effect?: ApprovalEffect; fingerprint?: string; options: string[]; resolved?: string }

@@ -1,9 +1,10 @@
-import type { Session, SessionLedgerRecord } from '../shared/types.ts';
+import type { Session, SessionLedgerRecord, ToolPresentation } from '../shared/types.ts';
 import type { AgentTreeSnapshotView, ConversationItem, ConversationListItem, ConversationState, ConversationViewSnapshot, ContextUsageView } from './contracts.ts';
 import { safeDisplayOutput } from './output-policy.ts';
 import { presentTool } from './tool-presentation.ts';
 import { conversationTitle } from './title.ts';
 import { projectQueue } from '../agent-core/queue-reducer.ts';
+import { batchToolSequence } from './tool-batching.ts';
 
 function sessionState(session: Session): ConversationState {
   if (session.activeTaskId) {
@@ -69,13 +70,19 @@ function readableStoredPresentation(
       });
     } catch { /* keep the stored presentation if legacy input cannot be reconstructed */ }
   }
-  if (!presentation.rawOutput) return presentation;
+  const toolName = presentation.toolName || started?.tool || 'unknown';
+  if (toolName === 'write_file' || toolName === 'patch_file') {
+    const { rawOutput: _rawOutput, ...rest } = presentation;
+    return { ...rest, toolName };
+  }
+  if (!presentation.rawOutput) return { ...presentation, toolName };
   let value: unknown = presentation.rawOutput;
   try { value = JSON.parse(presentation.rawOutput); } catch { /* already display text */ }
   const output = safeDisplayOutput(value);
   const { rawOutput: _rawOutput, ...rest } = presentation;
   return {
     ...rest,
+    toolName,
     ...(output.text ? { rawOutput: output.text } : {}),
     ...((presentation.truncated || output.truncated) ? { truncated: true } : {}),
   };
@@ -121,7 +128,13 @@ function agentGroups(agents: AgentTreeSnapshotView | null): AgentGroup[] {
 }
 
 function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshotView | null): ConversationItem[] {
-  const items: ConversationItem[] = [];
+  type Boundary = ConversationItem | undefined;
+  const sequence: Array<
+    | { kind: 'tool'; key: string; tool: ToolPresentation }
+    | { kind: 'boundary'; key: string; value: Boundary }
+  > = [];
+  const pushItem = (item: ConversationItem) => sequence.push({ kind: 'boundary', key: item.id, value: item });
+  const breakBatch = (key: string) => sequence.push({ kind: 'boundary', key, value: undefined });
   const groups = agentGroups(agents);
   const groupsByToolCall = new Map(groups.flatMap((group) => group.runs.flatMap((run) => (
     run.invokedByToolCallId ? [[run.invokedByToolCallId, group] as const] : []
@@ -143,44 +156,61 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
     if (candidate?.type === 'message') legacyFinalAssistantSeqs.add(candidate.seq);
   }
   const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && ['compact_context', 'spawn_agent', 'wait_agent', 'followup_agent', 'stop_agent'].includes(record.tool) ? [record.callId] : []));
-  const startedTools = new Map(records.flatMap((record) => record.type === 'tool_started' ? [[record.callId, record] as const] : []));
+  const completedTools = new Map(records.flatMap((record) => record.type === 'tool_completed' ? [[record.callId, record] as const] : []));
+  let currentRunId: string | undefined;
   for (const record of records) {
+    if ('runId' in record && record.runId !== currentRunId) {
+      if (currentRunId !== undefined) breakBatch(`run-boundary-${record.seq}`);
+      currentRunId = record.runId;
+    }
     if (record.type === 'message') {
       const message = record.message;
-      if (message.role === 'user') items.push({ id: `message-${record.seq}`, kind: 'user', content: message.content });
-      if (message.role === 'assistant' && message.content?.trim()) items.push({
-        id: record.messageId ?? `message-${record.seq}`,
-        kind: 'assistant',
-        content: message.content,
-        ...(record.messageId ? { messageId: record.messageId } : {}),
-        runId: record.runId,
-        ...(record.turn !== undefined ? { turn: record.turn } : {}),
-        ...((record.messageId && finalMessageIds.has(record.messageId)) || legacyFinalAssistantSeqs.has(record.seq) ? { final: true } : {}),
-      });
-    } else if (record.type === 'tool_started' && (record.tool === 'spawn_agent' || record.tool === 'followup_agent')) {
-      const group = groupsByToolCall.get(record.callId);
-      if (group && !placedAgentGroups.has(group.key)) {
-        items.push(group.item);
-        placedAgentGroups.add(group.key);
+      if (message.role === 'user') pushItem({ id: `message-${record.seq}`, kind: 'user', content: message.content });
+      if (message.role === 'assistant') {
+        if (message.content?.trim()) pushItem({
+          id: record.messageId ?? `message-${record.seq}`,
+          kind: 'assistant',
+          content: message.content,
+          ...(record.messageId ? { messageId: record.messageId } : {}),
+          runId: record.runId,
+          ...(record.turn !== undefined ? { turn: record.turn } : {}),
+          ...((record.messageId && finalMessageIds.has(record.messageId)) || legacyFinalAssistantSeqs.has(record.seq) ? { final: true } : {}),
+        });
+        else breakBatch(`assistant-boundary-${record.seq}`);
+      }
+    } else if (record.type === 'tool_started') {
+      if (record.tool === 'spawn_agent' || record.tool === 'followup_agent') {
+        const group = groupsByToolCall.get(record.callId);
+        if (group && !placedAgentGroups.has(group.key)) {
+          pushItem(group.item);
+          placedAgentGroups.add(group.key);
+        } else breakBatch(`agent-boundary-${record.seq}`);
+      } else if (internalContextCalls.has(record.callId)) {
+        breakBatch(`internal-tool-boundary-${record.seq}`);
+      } else {
+        const completed = completedTools.get(record.callId);
+        if (completed) {
+          const tool = readableStoredPresentation(completed.presentation, record);
+          sequence.push({ kind: 'tool', key: `tool-${tool.callRef}`, tool });
+        } else breakBatch(`unfinished-tool-boundary-${record.seq}`);
       }
     } else if (record.type === 'tool_completed') {
-      if (internalContextCalls.has(record.callId)) continue;
-      items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: readableStoredPresentation(record.presentation, startedTools.get(record.callId)) });
+      continue;
     } else if (record.type === 'context_compaction_started') {
-      items.push({ id: `context-${record.operationRef}`, kind: 'context', context: { operationRef: record.operationRef, status: 'running' } });
+      pushItem({ id: `context-${record.operationRef}`, kind: 'context', context: { operationRef: record.operationRef, status: 'running' } });
     } else if (record.type === 'context_compaction_completed') {
       if (!record.summaryRecordId && (record.presentation.summarizedMessages ?? 0) === 0) continue;
-      const existing = items.findIndex((item) => item.kind === 'context' && item.context.operationRef === record.presentation.operationRef);
+      const existing = sequence.findIndex((entry) => entry.kind === 'boundary' && entry.value?.kind === 'context' && entry.value.context.operationRef === record.presentation.operationRef);
       const item = { id: `context-${record.presentation.operationRef}`, kind: 'context' as const, context: record.presentation };
-      if (existing >= 0) items[existing] = item;
-      else items.push(item);
+      if (existing >= 0) sequence[existing] = { kind: 'boundary', key: item.id, value: item };
+      else pushItem(item);
     } else if (record.type === 'context_compaction_failed') {
-      const existing = items.findIndex((item) => item.kind === 'context' && item.context.operationRef === record.operationRef);
+      const existing = sequence.findIndex((entry) => entry.kind === 'boundary' && entry.value?.kind === 'context' && entry.value.context.operationRef === record.operationRef);
       const item = { id: `context-${record.operationRef}`, kind: 'context' as const, context: { operationRef: record.operationRef, status: 'failed' as const, reason: record.reason } };
-      if (existing >= 0) items[existing] = item;
-      else items.push(item);
+      if (existing >= 0) sequence[existing] = { kind: 'boundary', key: item.id, value: item };
+      else pushItem(item);
     } else if (record.type === 'approval_requested') {
-      items.push({
+      pushItem({
         id: `approval-${record.approvalId}`,
         kind: 'approval',
         approvalRef: record.approvalId,
@@ -194,15 +224,22 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
         options: record.request.options,
       });
     } else if (record.type === 'approval_resolved') {
-      const existing = items.findIndex((item) => item.kind === 'approval' && item.approvalRef === record.approvalId);
+      const existing = sequence.findIndex((entry) => entry.kind === 'boundary' && entry.value?.kind === 'approval' && entry.value.approvalRef === record.approvalId);
       if (existing >= 0) {
-        const item = items[existing];
-        if (item?.kind === 'approval') items[existing] = { ...item, resolved: record.decision };
+        const entry = sequence[existing];
+        if (entry?.kind === 'boundary' && entry.value?.kind === 'approval') sequence[existing] = { ...entry, value: { ...entry.value, resolved: record.decision } };
       }
+    } else if (record.type === 'context_committed' || record.type === 'context_prepare_committed' || record.type === 'context_usage_observed') {
+      breakBatch(`context-boundary-${record.seq}`);
     } else if (record.type === 'run_terminal' && record.report.error) {
-      items.push({ id: `error-${record.seq}`, kind: 'error', title: '本次运行未完成', message: record.report.error.message });
+      pushItem({ id: `error-${record.seq}`, kind: 'error', title: '本次运行未完成', message: record.report.error.message });
     }
   }
+  const items = batchToolSequence(sequence).flatMap((entry): ConversationItem[] => {
+    if (entry.kind === 'boundary') return entry.value ? [entry.value] : [];
+    if (entry.kind === 'tool') return [{ id: entry.key, kind: 'tool', tool: entry.tool }];
+    return [{ id: entry.batch.id, kind: 'tool_batch', batch: entry.batch }];
+  });
   return withAgentActivities(items, agents, placedAgentGroups);
 }
 

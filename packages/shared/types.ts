@@ -259,6 +259,7 @@ export type ToolViewStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'de
 
 export type ToolPresentation = {
   callRef: string;
+  toolName: string;
   category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'memory' | 'other';
   name: string;
   target?: string;
@@ -268,10 +269,21 @@ export type ToolPresentation = {
   truncated?: boolean;
   fileChange?: {
     path: string;
-    additions?: number;
-    deletions?: number;
+    kind: 'created' | 'modified';
+    additions: number;
+    deletions: number;
     binary?: boolean;
+    diff: string;
+    truncated: boolean;
   };
+};
+
+export type ToolBatchType = 'inspection' | 'modification';
+
+export type ToolBatchPresentation = {
+  id: string;
+  type: ToolBatchType;
+  members: ToolPresentation[];
 };
 
 export type QueueDelivery = 'next_run' | 'steer';

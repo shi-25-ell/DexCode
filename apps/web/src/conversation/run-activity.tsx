@@ -1,6 +1,6 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { ChevronDown, LoaderCircle } from 'lucide-react';
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { RunPhase } from '../../../../packages/run-protocol/contracts';
@@ -12,6 +12,8 @@ import { AssistantMessage } from './assistant-message';
 import { ContextCard } from './context-card';
 import { draftReasoning, draftText, type ActiveRunView, type RunActivityEntry } from './run-presentation';
 import { ToolCard } from './tool-card';
+import { ToolBatchCard } from './tool-batch-card';
+import { batchToolSequence } from '../../../../packages/conversation-view/tool-batching';
 
 export const phaseLabels: Record<RunPhase, string> = {
   preparing_context: '正在准备上下文……',
@@ -115,7 +117,14 @@ export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGr
   onOpenAgent?(agentId: string): void;
   onStopAgent?(agentId: string): void;
 }) {
-  const exactAgentRunIds = new Set(run.activityOrder.flatMap((entry) => entry.kind === 'agent' ? [entry.agentRunId] : []));
+  const exactAgentRunIds = useMemo(() => new Set(run.activityOrder.flatMap((entry) => entry.kind === 'agent' ? [entry.agentRunId] : [])), [run.activityOrder]);
+  const displayOrder = useMemo(() => batchToolSequence(run.activityOrder.map((entry) => {
+    if (entry.kind === 'tool') {
+      const tool = run.toolsByCallId[entry.callId];
+      if (tool) return { kind: 'tool' as const, key: activityKey(entry), tool };
+    }
+    return { kind: 'boundary' as const, key: activityKey(entry), value: entry };
+  })), [run.activityOrder, run.toolsByCallId]);
   return (
     <section className="run-activity" aria-label="当前运行" aria-live="polite">
       <div className={`run-phase ${run.phase}`} role="status">
@@ -125,7 +134,10 @@ export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGr
         {run.note ? <small>{run.note}</small> : null}
       </div>
       {needsResync ? <div className="run-resync-note">实时片段有缺失，完成后将使用已提交会话校准。</div> : null}
-      {run.activityOrder.map((entry) => {
+      {displayOrder.map((displayEntry) => {
+        if (displayEntry.kind === 'tool_batch') return <ToolBatchCard key={displayEntry.key} batch={displayEntry.batch} />;
+        if (displayEntry.kind === 'tool') return <ToolCard key={displayEntry.key} tool={displayEntry.tool} />;
+        const entry = displayEntry.value;
         const turn = turnForActivity(run, entry);
         const anchoredGroups = turn === undefined ? [] : agentGroups
           .filter((group) => group.sourceTurn === turn)
@@ -135,7 +147,7 @@ export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGr
           ? agentTree.runs.some((candidate) => candidate.agentRunId === entry.agentRunId)
           : false;
         return (
-          <Fragment key={activityKey(entry)}>
+          <Fragment key={displayEntry.key}>
             {entry.kind === 'agent'
               ? invocationReady && agentTree && onOpenAgent && onStopAgent
                 ? <AgentActivityCard tree={agentTree} agentRunIds={[entry.agentRunId]} onOpen={onOpenAgent} onStop={onStopAgent} />

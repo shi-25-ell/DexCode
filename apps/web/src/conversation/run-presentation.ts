@@ -319,7 +319,7 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
       ...(!event.message.toolCalls.length ? { finalMessageId: event.message.messageId } : {}),
     };
   }
-  if (event.type === 'tool_started' || event.type === 'tool_progress' || event.type === 'tool_finished') {
+  if (event.type === 'tool_started') {
     return {
       ...state,
       activeRun: {
@@ -358,6 +358,16 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
         ...active,
         contextsById: { ...active.contextsById, [event.presentation.operationRef]: event.presentation },
         activityOrder: appendActivity(active, { kind: 'context', operationRef: event.presentation.operationRef }),
+      },
+    };
+  }
+  if (event.type === 'tool_progress' || event.type === 'tool_finished') {
+    if (!active.toolsByCallId[event.callId]) return { ...state, needsResync: true };
+    return {
+      ...state,
+      activeRun: {
+        ...active,
+        toolsByCallId: { ...active.toolsByCallId, [event.callId]: boundedTool(event.presentation as ToolPresentation) },
       },
     };
   }

@@ -67,7 +67,7 @@ describe('RunPresentation', () => {
 
   it('updates one Tool Card and one approval in place', () => {
     let state = started();
-    const runningTool = { callRef: 'call-1', category: 'read' as const, name: '读取文件', status: 'queued' as const, summary: '准备执行' };
+    const runningTool = { callRef: 'call-1', toolName: 'read_file', category: 'read' as const, name: '读取文件', status: 'queued' as const, summary: '准备执行' };
     state = reduceRunEvent(state, envelope(3, { type: 'tool_started', callId: 'call-1', presentation: runningTool }));
     state = reduceRunEvent(state, envelope(4, { type: 'tool_progress', callId: 'call-1', presentation: { ...runningTool, status: 'running', summary: '正在执行' } }));
     state = reduceRunEvent(state, envelope(5, { type: 'tool_finished', callId: 'call-1', presentation: { ...runningTool, status: 'succeeded', summary: '完成' } }));
@@ -82,6 +82,15 @@ describe('RunPresentation', () => {
       { kind: 'tool', callId: 'call-1' },
       { kind: 'approval', approvalId: 'approval-1' },
     ]);
+  });
+
+  it('never creates a new activity member from progress or finish', () => {
+    let state = started();
+    const stray = { callRef: 'stray', toolName: 'read_file', category: 'read' as const, name: '读取文件', status: 'running' as const, summary: '正在执行' };
+    state = reduceRunEvent(state, envelope(3, { type: 'tool_progress', callId: 'stray', presentation: stray }));
+    expect(state.activeRun?.activityOrder).toEqual([{ kind: 'assistant', messageId: 'message-1' }]);
+    expect(state.activeRun?.toolsByCallId.stray).toBeUndefined();
+    expect(state.needsResync).toBe(true);
   });
 
   it('anchors a started child run at the exact orchestration call', () => {
@@ -187,7 +196,7 @@ describe('RunPresentation', () => {
   it('bounds reasoning and tool progress display buffers and marks truncation', () => {
     let state = started();
     state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'r'.repeat(70_000) }));
-    const queued = { callRef: 'call-1', category: 'command' as const, name: '运行命令', status: 'queued' as const, summary: '准备中' };
+    const queued = { callRef: 'call-1', toolName: 'run_command', category: 'command' as const, name: '运行命令', status: 'queued' as const, summary: '准备中' };
     state = reduceRunEvent(state, envelope(4, { type: 'tool_started', callId: 'call-1', presentation: queued }));
     state = reduceRunEvent(state, envelope(5, { type: 'tool_progress', callId: 'call-1', presentation: { ...queued, status: 'running', rawOutput: 'o'.repeat(40_000) } }));
     expect(draftReasoning(state.activeRun?.assistantDraft ?? null)).toMatchObject({ truncated: true });

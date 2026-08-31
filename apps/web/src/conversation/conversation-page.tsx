@@ -10,6 +10,7 @@ import { ApprovalCard } from './approval-card';
 import { AssistantMessage } from './assistant-message';
 import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
+import { ToolBatchCard } from './tool-batch-card';
 import { ContextCard } from './context-card';
 import { RunActivity } from './run-activity';
 import {
@@ -514,6 +515,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
               return <AssistantMessage key={item.id} content={item.content} copyContent={showCopy ? assistantResponseCopyText(timeline, index) : item.content} showCopy={showCopy} />;
             }
             if (item.kind === 'tool') return <ToolCard key={item.id} tool={item.tool} />;
+            if (item.kind === 'tool_batch') return <ToolBatchCard key={item.id} batch={item.batch} />;
             if (item.kind === 'context') return <ContextCard key={item.id} context={item.context} />;
             if (item.kind === 'agent_activity') return agentTree ? <AgentActivityCard key={item.id} tree={agentTree} agentRunIds={item.agentRunIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} /> : null;
             if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} />;

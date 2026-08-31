@@ -1,4 +1,5 @@
 import type { FileDiff, ToolPresentation, ToolViewStatus } from '../shared/types.ts';
+import { createTwoFilesPatch, structuredPatch } from 'diff';
 import type { ManagedMemoryType } from '../managed-memory/contracts.ts';
 import { serializeTopic } from '../managed-memory/format.ts';
 import { safeDisplayOutput } from './output-policy.ts';
@@ -7,27 +8,33 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function normalizedLines(value: string | null): string[] {
-  if (value === null || value === '') return [];
-  return value.replace(/\r\n/g, '\n').split('\n');
-}
+const MAX_FILE_DIFF_CHARS = 64_000;
 
-export function diffStat(diff?: FileDiff): { additions: number; deletions: number } | undefined {
+export function fileChangePresentation(diff?: FileDiff): ToolPresentation['fileChange'] {
   if (!diff) return undefined;
-  const before = normalizedLines(diff.before);
-  const after = normalizedLines(diff.after);
-  const prefixLimit = Math.min(before.length, after.length);
-  let prefix = 0;
-  while (prefix < prefixLimit && before[prefix] === after[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < before.length - prefix
-    && suffix < after.length - prefix
-    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-  ) suffix += 1;
+  const path = diff.path.replaceAll('\\', '/');
+  const before = (diff.before ?? '').replace(/\r\n/g, '\n');
+  const after = (diff.after ?? '').replace(/\r\n/g, '\n');
+  const oldName = diff.before === null ? '/dev/null' : `a/${path}`;
+  const newName = `b/${path}`;
+  const structured = structuredPatch(oldName, newName, before, after, '', '', { context: 3 });
+  let additions = 0;
+  let deletions = 0;
+  for (const hunk of structured.hunks) {
+    for (const line of hunk.lines) {
+      if (line.startsWith('+')) additions += 1;
+      else if (line.startsWith('-')) deletions += 1;
+    }
+  }
+  const complete = createTwoFilesPatch(oldName, newName, before, after, '', '', { context: 3 });
+  const truncated = complete.length > MAX_FILE_DIFF_CHARS;
   return {
-    additions: Math.max(0, after.length - prefix - suffix),
-    deletions: Math.max(0, before.length - prefix - suffix),
+    path,
+    kind: diff.before === null ? 'created' : 'modified',
+    additions,
+    deletions,
+    diff: truncated ? `${complete.slice(0, MAX_FILE_DIFF_CHARS)}\n… unified diff 已截断 …\n` : complete,
+    truncated,
   };
 }
 
@@ -44,6 +51,7 @@ function outcomeStatus(result: unknown): ToolViewStatus {
 function descriptor(tool: string, args: Record<string, unknown>) {
   const targetPath = typeof args.path === 'string' ? args.path.replaceAll('\\', '/') : undefined;
   if (tool === 'read_file') return { category: 'read' as const, name: '读取文件', target: targetPath };
+  if (tool === 'diff_file') return { category: 'read' as const, name: '比较文件', target: targetPath };
   if (tool === 'write_file' || tool === 'patch_file') return { category: 'file' as const, name: '修改文件', target: targetPath };
   if (tool === 'run_command') return { category: 'command' as const, name: '执行命令', target: String(args.command ?? '') };
   if (tool === 'read_command_output') return { category: 'command' as const, name: '读取命令输出', target: String(args.task_id ?? '') };
@@ -108,22 +116,19 @@ export function presentTool(input: {
         body: String(args.body ?? ''),
       })
     : undefined;
-  const raw = input.result === undefined || (input.tool === 'memory_remove' && status === 'succeeded')
+  const isFileMutation = input.tool === 'write_file' || input.tool === 'patch_file';
+  const raw = input.result === undefined || isFileMutation || (input.tool === 'memory_remove' && status === 'succeeded')
     ? { truncated: false }
     : safeDisplayOutput(memoryUpsertContent ?? input.result);
-  const stat = diffStat(input.fileDiff);
+  const fileChange = fileChangePresentation(input.fileDiff);
   return {
     callRef: input.callRef,
+    toolName: input.tool,
     ...details,
     status,
     summary: status === 'queued' ? '准备执行…' : status === 'running' ? '正在执行…' : successSummary(input.tool, input.result, status),
     ...(raw.text ? { rawOutput: raw.text } : {}),
     ...(raw.truncated ? { truncated: true } : {}),
-    ...(input.fileDiff ? {
-      fileChange: {
-        path: input.fileDiff.path.replaceAll('\\', '/'),
-        ...(stat ?? {}),
-      },
-    } : {}),
+    ...(fileChange ? { fileChange } : {}),
   };
 }

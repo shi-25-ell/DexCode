@@ -30,11 +30,11 @@ describe('conversation presentation', () => {
     const items: ConversationItem[] = [
       { id: 'u1', kind: 'user', content: '搜索仓库' },
       { id: 'a1', kind: 'assistant', content: '我先搜索' },
-      { id: 't1', kind: 'tool', tool: { callRef: 'call-1', category: 'mcp', name: '调用 MCP', status: 'succeeded', summary: '完成' } },
+      { id: 't1', kind: 'tool', tool: { callRef: 'call-1', toolName: 'mcp__one', category: 'mcp', name: '调用 MCP', status: 'succeeded', summary: '完成' } },
       { id: 'a2', kind: 'assistant', content: '请完成授权', final: true },
       { id: 'u2', kind: 'user', content: '授权完成' },
       { id: 'a3', kind: 'assistant', content: '我重新尝试' },
-      { id: 't2', kind: 'tool', tool: { callRef: 'call-2', category: 'mcp', name: '调用 MCP', status: 'succeeded', summary: '完成' } },
+      { id: 't2', kind: 'tool', tool: { callRef: 'call-2', toolName: 'mcp__two', category: 'mcp', name: '调用 MCP', status: 'succeeded', summary: '完成' } },
       { id: 'a4', kind: 'assistant', content: '这是最终结果', final: true },
     ];
 
@@ -57,12 +57,13 @@ describe('conversation presentation', () => {
   it('renders file stats and keeps readable output behind an explicit disclosure', () => {
     render(createElement(ToolCard, { tool: {
       callRef: 'opaque-ref',
+      toolName: 'patch_file',
       category: 'file',
       name: '修改文件',
       target: 'src/app.ts',
       status: 'succeeded',
       summary: '文件已更新',
-      fileChange: { path: 'src/app.ts', additions: 18, deletions: 6 },
+      fileChange: { path: 'src/app.ts', kind: 'modified', additions: 18, deletions: 6, diff: '--- a/src/app.ts\n+++ b/src/app.ts\n', truncated: false },
       rawOutput: '受控原始输出',
     } }));
     expect(screen.getByText('+18')).toBeInTheDocument();
@@ -76,25 +77,25 @@ describe('conversation presentation', () => {
   it('shows only memory mutations and expands an upsert with its actual markdown content', () => {
     const hiddenMemoryTools = ['浏览记忆', '读取记忆', '搜索记忆'];
     const { rerender } = render(createElement(ToolCard, { tool: {
-      callRef: 'memory-read', category: 'memory', name: '读取记忆', target: 'project.md', status: 'succeeded', summary: '执行完成', rawOutput: '内部读取结果',
+      callRef: 'memory-read', toolName: 'memory_read', category: 'memory', name: '读取记忆', target: 'project.md', status: 'succeeded', summary: '执行完成', rawOutput: '内部读取结果',
     } }));
     expect(screen.queryByText('读取记忆')).not.toBeInTheDocument();
 
     for (const name of hiddenMemoryTools) {
       rerender(createElement(ToolCard, { tool: {
-        callRef: name, category: 'memory', name, status: 'succeeded', summary: '执行完成',
+        callRef: name, toolName: 'memory_list', category: 'memory', name, status: 'succeeded', summary: '执行完成',
       } }));
       expect(screen.queryByText(name)).not.toBeInTheDocument();
     }
 
     rerender(createElement(ToolCard, { tool: {
-      callRef: 'memory-remove', category: 'memory', name: '删除记忆', target: 'obsolete.md', status: 'succeeded', summary: '项目记忆已删除',
+      callRef: 'memory-remove', toolName: 'memory_remove', category: 'memory', name: '删除记忆', target: 'obsolete.md', status: 'succeeded', summary: '项目记忆已删除',
     } }));
     expect(screen.getByText('删除记忆')).toBeInTheDocument();
     expect(screen.getByText('项目记忆已删除')).toBeInTheDocument();
 
     rerender(createElement(ToolCard, { tool: {
-      callRef: 'memory-upsert', category: 'memory', name: '更新记忆', target: 'project.md', status: 'succeeded', summary: '项目记忆已更新',
+      callRef: 'memory-upsert', toolName: 'memory_upsert', category: 'memory', name: '更新记忆', target: 'project.md', status: 'succeeded', summary: '项目记忆已更新',
       rawOutput: '---\nname: Project\ndescription: Current project facts\ntype: project\n---\n\n# Build\n\nUse npm test.\n',
     } }));
     fireEvent.click(screen.getByRole('button', { name: '更新记忆，展开输出内容' }));
