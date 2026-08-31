@@ -386,6 +386,15 @@ export function createManagedMemoryStore(options: StoreOptions) {
     assertWorkspace(workspaceId);
     return withMutation(async () => {
       const current = await settings();
+      const allowed = new Set(['enabled', 'extractionEnabled', 'recallEnabled', 'consolidationEnabled', 'extractionEveryCompletedRuns', 'consolidationMinHours', 'consolidationMinSessions']);
+      const unknown = Object.keys(patch).find((key) => !allowed.has(key));
+      if (unknown) throw new ManagedMemoryValidationError(`Unknown memory setting: ${unknown}`);
+      for (const key of ['enabled', 'extractionEnabled', 'recallEnabled', 'consolidationEnabled'] as const) {
+        if (patch[key] !== undefined && typeof patch[key] !== 'boolean') throw new ManagedMemoryValidationError(`${key} must be boolean`);
+      }
+      for (const key of ['extractionEveryCompletedRuns', 'consolidationMinHours', 'consolidationMinSessions'] as const) {
+        if (patch[key] !== undefined && (!Number.isInteger(patch[key]) || patch[key]! <= 0)) throw new ManagedMemoryValidationError(`${key} must be a positive integer`);
+      }
       const next = {
         ...current,
         ...patch,

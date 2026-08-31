@@ -951,7 +951,7 @@ export function startRuntimeServer() {
     }
 
     if (url.pathname === '/api/managed-memory/consolidate' && req.method === 'POST') {
-      sendJson(res, 202, await requestRuntime.managedMemory.consolidate(true));
+      sendJson(res, 202, await requestRuntime.managedMemory.consolidate());
       return;
     }
 

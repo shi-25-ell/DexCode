@@ -94,6 +94,16 @@ function successfulMemoryMutations(messages: ChatMessage[]): number {
     .length;
 }
 
+function hasUnresolvedMemoryMutation(messages: ChatMessage[]): boolean {
+  return messages.some((message) => {
+    if (message.role !== 'tool' || (message.name !== 'memory_upsert' && message.name !== 'memory_remove')) return false;
+    try {
+      const outcome = JSON.parse(message.content) as { mutationCommitted?: unknown; code?: unknown; error?: unknown };
+      return outcome.mutationCommitted !== true && Boolean(outcome.code || outcome.error);
+    } catch { return true; }
+  });
+}
+
 export function parseManagedMemoryMode(environment: Record<string, string | undefined> = process.env): ManagedMemoryMode {
   const value = environment.DEXCODE_MANAGED_MEMORY_MODE?.trim().toLowerCase();
   if (!value) return 'on';
@@ -109,6 +119,7 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
   const activeControllers = new Set<AbortController>();
   let runner: InternalMemoryRunner | undefined;
   let worker: Promise<void> | undefined;
+  let pendingConsolidation = false;
   let accepting = true;
   let lastExtractionAt: string | undefined;
   let lastConsolidationAt: string | undefined;
@@ -187,6 +198,7 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
         signal: controller.signal,
       }));
       if (result.status !== 'completed') throw new Error(result.error?.message ?? `memory agent ended ${result.status}`);
+      if (hasUnresolvedMemoryMutation(result.messages)) throw new Error('Memory Agent left a mutation conflict or write failure unresolved');
       await advanceCheckpoint(input);
       await noteCompletedSession(input.sessionId);
       lastExtractionAt = now().toISOString();
@@ -258,12 +270,16 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
   }
 
   async function workLoop() {
-    while (pendingBySession.size > 0) {
+    while (pendingBySession.size > 0 || pendingConsolidation) {
       const next = pendingBySession.entries().next().value as [string, EnqueueMemoryExtractionInput] | undefined;
-      if (!next) break;
-      pendingBySession.delete(next[0]);
-      await runExtraction(next[1]);
-      if (await shouldAutoConsolidate()) await runConsolidation(true);
+      if (next) {
+        pendingBySession.delete(next[0]);
+        await runExtraction(next[1]);
+        if (await shouldAutoConsolidate()) await runConsolidation(true);
+      } else if (pendingConsolidation) {
+        pendingConsolidation = false;
+        await runConsolidation(true);
+      }
     }
   }
 
@@ -302,6 +318,16 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
     pendingBySession.set(input.sessionId, structuredClone(input));
     metric(coalesced ? 'managed_memory.extraction.coalesced' : 'managed_memory.extraction.enqueued', { runId: input.runId });
     startWorker();
+  }
+
+  async function requestConsolidation(): Promise<{ started: boolean; reason?: string }> {
+    const settings = await options.store.settings();
+    if (!accepting || !runner || options.mode !== 'on') return { started: false, reason: 'unavailable' };
+    if (!settings.enabled) return { started: false, reason: 'disabled' };
+    if (pendingConsolidation) return { started: false, reason: 'coalesced' };
+    pendingConsolidation = true;
+    startWorker();
+    return { started: true };
   }
 
   async function drain(input: { timeoutMs?: number } = {}): Promise<ManagedMemoryDrainResult> {
@@ -344,6 +370,7 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
   async function clearProjectMemory(workspaceId: string, input: ClearProjectMemoryInput) {
     if (input.confirmationToken !== 'CLEAR_MANAGED_MEMORY') throw new Error('Managed memory clear confirmation token is invalid');
     pendingBySession.clear();
+    pendingConsolidation = false;
     for (const controller of activeControllers) controller.abort();
     if (worker) {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -368,7 +395,7 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
     },
     setInternalRunner(value: InternalMemoryRunner) { runner = value; },
     async rebuildIndex(workspaceId: string) { return options.store.rebuildIndex(workspaceId); },
-    consolidate: runConsolidation,
+    consolidate: requestConsolidation,
     toolPolicy: MEMORY_AGENT_TOOL_POLICY,
     mode: options.mode,
     workspaceId: options.workspaceId,
