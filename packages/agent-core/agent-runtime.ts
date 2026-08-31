@@ -5,6 +5,7 @@ import type { RunEventPayload } from '../run-protocol/index.ts';
 import {
   createExecutor,
   type CodingToolHost,
+  type ConfirmHook,
   type ExecutorHooks,
   type ExecutorSemanticHooks,
   type ExternalMcpRegistry,
@@ -119,9 +120,10 @@ export interface AgentRunSpec {
   persistenceHooks?: AgentPersistenceHooks;
   budget: AgentRunBudget;
   signal?: AbortSignal;
+  productSessionId?: string;
   modelClient?: ModelClient;
   toolHost?: CodingToolHost;
-  executorHooks?: ExecutorHooks;
+  executorHooks?: ConfirmHook | ExecutorHooks;
   commandSource?: RunCommandSource;
   presentation?: { emit(event: RunEventPayload): void };
   onExecutorEvent?: (event: AgentEvent) => void;
@@ -311,6 +313,7 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
         spec.executorHooks,
         {
           runId: identity.runId,
+          sessionId: spec.productSessionId,
           signal: spec.signal,
           maxIterations: spec.budget.maxModelTurns,
           maxModelAttempts: spec.budget.maxModelAttempts,
@@ -321,7 +324,7 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
           commandSource: spec.commandSource,
           presentation: spec.presentation,
           ...(contextPolicy.mode === 'managed' ? {
-            sessionId: contextPolicy.sessionId,
+            sessionId: spec.productSessionId ?? contextPolicy.sessionId,
             context: {
               engine: contextPolicy.engine,
               sessionId: contextPolicy.sessionId,

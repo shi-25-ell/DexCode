@@ -121,3 +121,87 @@ test('backend strategy selects the legacy or four-layer request path and records
     await Promise.all(projectDirs.map((directory) => rm(directory, { recursive: true, force: true })));
   }
 });
+
+test('main Agent keeps the durable tool loop while lifecycle extension failures stay warnings', async () => {
+  const previousStrategy = process.env.CONTEXT_COMPACTION_STRATEGY;
+  const projectId = `workspace-runtime-main-${crypto.randomUUID()}`;
+  const repository = createSessionRepository({ projectId });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    process.env.CONTEXT_COMPACTION_STRATEGY = 'legacy';
+    const scope = { kind: 'workspace' as const, workspaceId: projectId };
+    const session = await repository.createSession(scope);
+    let modelTurn = 0;
+    const model: ModelClient = {
+      model: 'runtime-main-test',
+      baseUrl: 'memory://runtime-main-test',
+      reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+      async *streamMessage(): AsyncIterable<ModelEvent> {
+        modelTurn += 1;
+        yield { version: 1, type: 'turn_started', attemptId: `main-${modelTurn}` };
+        const response = modelTurn === 1
+          ? {
+              content: '',
+              reasoning: '',
+              toolCalls: [{ id: 'read-main', name: 'read_file', arguments: { path: 'README.md' } }],
+              finishReason: 'tool_calls' as const,
+            }
+          : {
+              content: 'main complete',
+              reasoning: '',
+              toolCalls: [],
+              finishReason: 'stop' as const,
+            };
+        if (response.content) yield { version: 1, type: 'text_delta', delta: response.content };
+        for (const [toolIndex, call] of response.toolCalls.entries()) {
+          yield {
+            version: 1,
+            type: 'tool_call_delta',
+            index: toolIndex,
+            id: call.id,
+            name: call.name,
+            argumentsDelta: JSON.stringify(call.arguments),
+          };
+        }
+        yield { version: 1, type: 'turn_completed', response };
+      },
+    };
+    const agent = createCodingAgent(
+      { buildForPrompt: async (prompt) => ({ prompt, selectedFile: null, selectedFileContent: null, workspaceSummary: 'README.md', contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0 } }) },
+      toolHost(),
+      model,
+      repository,
+      undefined,
+      undefined,
+      { scope, rootPath: projectDir },
+    );
+    const lifecycle: string[] = [];
+
+    const summary = await agent.runTask(
+      session.sessionId,
+      'read then answer',
+      null,
+      () => {},
+      async () => 'confirm',
+      {
+        lifecycle: {
+          onAgentStart: () => { lifecycle.push('start'); },
+          onTurnEnd: ({ turn }) => { lifecycle.push(`turn-${turn}`); },
+          onAgentEnd: () => { lifecycle.push('end'); throw new Error('post-run extension failed'); },
+        },
+      },
+    );
+
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.equal(summary.status, 'completed', JSON.stringify(loaded?.runReports?.at(-1)));
+    assert.deepEqual(lifecycle, ['start', 'turn-1', 'turn-2', 'end']);
+    assert.deepEqual(loaded?.messages.map((message) => message.role), ['user', 'assistant', 'tool', 'assistant']);
+    assert.deepEqual(loaded?.runReports?.at(-1)?.runtimeWarnings, [
+      { stage: 'agent_end', message: 'post-run extension failed' },
+    ]);
+  } finally {
+    if (previousStrategy === undefined) delete process.env.CONTEXT_COMPACTION_STRATEGY;
+    else process.env.CONTEXT_COMPACTION_STRATEGY = previousStrategy;
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});

@@ -1,5 +1,6 @@
 import type { AgentEvent, QueueDelivery, QueueItemView, QueuePauseReason, RunContext, Session, TaskSummary } from '../shared/types.ts';
 import type { ExecutorHooks } from './executor.ts';
+import type { AgentLifecycleHooks } from './agent-runtime.ts';
 import type { QueueMutationOutcome, SessionRepository } from './session-contracts.ts';
 import type { RunCommandSource } from './run-commands.ts';
 import type { RunEventEnvelope, RunEventPayload } from '../run-protocol/contracts.ts';
@@ -25,6 +26,7 @@ type AgentRunner = {
       onRunEvent?: (event: RunEventEnvelope) => void;
       legacyEvents?: boolean;
       presentationHooks?: (emit: (event: RunEventPayload) => void) => ExecutorHooks;
+      lifecycle?: AgentLifecycleHooks;
     },
   ): Promise<TaskSummary>;
 };
@@ -101,6 +103,7 @@ export function createConversationRunCoordinator(dependencies: {
   repository: SessionRepository;
   resolveEnvironment(session: Session): Promise<RunEnvironment>;
   createHooks(sessionId: string, runId: string, sink: EventSink, emit?: (event: RunEventPayload) => void): ExecutorHooks;
+  createLifecycleHooks?(sessionId: string, runId: string): AgentLifecycleHooks;
   cancelPending?(sessionId: string, runId: string, reason: QueuePauseReason): void;
   observe?(observation: QueueObservation): void;
 }) {
@@ -295,6 +298,9 @@ export function createConversationRunCoordinator(dependencies: {
             ...(current.clientRequestId ? { clientRequestId: current.clientRequestId } : {}),
             ...(current.sourceItemId ? { sourceItemId: current.sourceItemId } : {}),
             commandSource: commandSource(handle),
+            ...(dependencies.createLifecycleHooks ? {
+              lifecycle: dependencies.createLifecycleHooks(current.sessionId, current.runId),
+            } : {}),
             beforeFinish: async ({ status }) => {
               if (status !== 'completed' && !handle.stoppedFor) await requeueAndPause(handle, 'failure', status);
             },

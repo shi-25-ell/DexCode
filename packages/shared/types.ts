@@ -166,6 +166,10 @@ export type RunReport = {
   filesModified: string[];
   error?: { code: string; message: string };
   contextRefreshWarnings?: Array<{ itemId: string; message: string }>;
+  runtimeWarnings?: Array<{
+    stage: 'event' | 'agent_start' | 'turn_end' | 'before_tool_call' | 'after_tool_call' | 'agent_end';
+    message: string;
+  }>;
 };
 
 export type ContextManifestV1 = {

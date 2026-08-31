@@ -11,8 +11,9 @@ import type {
   UserMessage,
 } from '../shared/types.ts';
 import type { ModelClient } from '../llm-client/index.ts';
-import { createExecutor } from './executor.ts';
-import type { ConfirmHook, ExecutorHooks, ExecutorSemanticHooks, LoopResult, ReActLoopOptions } from './executor.ts';
+import type { CodingToolHost, ConfirmHook, ExecutorHooks } from './executor.ts';
+import { createAgentRuntime } from './agent-runtime.ts';
+import type { AgentLifecycleHooks, AgentRunResult } from './agent-runtime.ts';
 import type { SessionRepository } from './session-contracts.ts';
 import { projectConversation } from '../conversation-view/index.ts';
 import {
@@ -44,10 +45,6 @@ type PromptContext = {
     maxFiles: number;
     strategy?: string;
   };
-};
-
-type CodingToolHost = Parameters<typeof createExecutor>[0] & {
-  writeFile: (...args: any[]) => unknown;
 };
 
 type ContextManager = {
@@ -127,7 +124,7 @@ function skillsBlock(registry: SkillRegistry | undefined, prompt: string): strin
   );
 }
 
-function summaryFor(prompt: string, result: LoopResult): string {
+function summaryFor(prompt: string, result: AgentRunResult): string {
   const facts = [
     result.finalContent || `Task ${result.status}: ${result.terminationReason}`,
     result.filesModified.length > 0
@@ -153,7 +150,12 @@ export function createCodingAgent(
   const effectiveToolHost = agentEnvironment.scope.kind === 'general'
     ? { ...codingToolHost, isToolEnabled: () => false }
     : codingToolHost;
-  const executor = createExecutor(effectiveToolHost, externalMcpRegistry, effectiveSkillRegistry);
+  const runtime = createAgentRuntime({
+    toolHost: effectiveToolHost,
+    modelClient,
+    externalMcpRegistry,
+    skillRegistry: effectiveSkillRegistry,
+  });
   const contextStrategy = contextCompactionStrategy();
   const contextPolicy = contextStrategy === 'four_layer' ? defaultContextPolicy(modelClient) : undefined;
   const contextEngine = contextStrategy === 'four_layer' && sessionRepository ? createContextEngine({
@@ -166,22 +168,6 @@ export function createCodingAgent(
       recordContextProviderUsage: (input) => sessionRepository.recordContextProviderUsage(input),
     },
   }) : undefined;
-
-  async function execute(
-    runId: string,
-    messages: ChatMessage[],
-    onEvent: (event: AgentEvent) => void,
-    hooks?: ConfirmHook | ExecutorHooks,
-    signal?: AbortSignal,
-    semantic?: ExecutorSemanticHooks,
-    context?: ReActLoopOptions['context'],
-    commandSource?: RunCommandSource,
-    refreshDirective?: ReActLoopOptions['refreshDirective'],
-    sessionId?: string,
-    presentation?: ReActLoopOptions['presentation'],
-  ) {
-    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, sessionId, signal, semantic, context, commandSource, refreshDirective, presentation });
-  }
 
   async function runTask(
     sessionId: string,
@@ -197,10 +183,11 @@ export function createCodingAgent(
       clientRequestId?: string;
       commandSource?: RunCommandSource;
       sourceItemId?: string;
-      beforeFinish?: (result: { status: LoopResult['status'] }) => Promise<void>;
+      beforeFinish?: (result: { status: AgentRunResult['status'] }) => Promise<void>;
       onRunEvent?: (event: RunEventEnvelope) => void;
       legacyEvents?: boolean;
       presentationHooks?: (emit: (event: RunEventPayload) => void) => ExecutorHooks;
+      lifecycle?: AgentLifecycleHooks;
     } = {},
   ): Promise<TaskSummary> {
     if (!sessionRepository) throw new Error('sessionRepository is required for runTask');
@@ -255,7 +242,7 @@ export function createCodingAgent(
     }
     publish({ type: 'run_started', sessionId, isNew: options.isNew ?? false, ...(options.sourceItemId ? { sourceItemId: options.sourceItemId } : {}) });
     publish({ type: 'run_phase_changed', phase: 'preparing_context' });
-    let result: LoopResult;
+    let result: AgentRunResult;
     try {
       const projectMemory = await sessionRepository.readProjectMemory(
         agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : undefined,
@@ -294,15 +281,14 @@ export function createCodingAgent(
         });
       }
       const executionMessages = legacy
-        ? [{ role: 'system' as const, content: systemSections.map((section) => section.content).join('\n\n') }, ...legacy.messages, user]
+        ? [...legacy.messages, user]
         : pairedMessages([...historyMessages, user]);
-      result = await execute(
-        runId,
-        executionMessages,
-        onEvent,
-        resolvedHooks,
-        options.signal,
-        {
+      result = await runtime.runAgent({
+        identity: { runId, profile: 'main', origin: 'user' },
+        messages: executionMessages,
+        systemSections,
+        persistence: 'session',
+        persistenceHooks: {
           assistantCommitted: (message, identity) => sessionRepository.appendRunMessage({ sessionId, runId, message, ...identity }).then(() => undefined),
           toolStarted: (call) => {
             let input: Record<string, unknown> | undefined;
@@ -318,41 +304,50 @@ export function createCodingAgent(
             ...(prepared.activity ? { activity: prepared.activity } : {}),
           }).then(() => undefined),
         },
-        contextEngine && contextPolicy ? {
+        budget: { maxModelTurns: 20 },
+        signal: options.signal,
+        productSessionId: sessionId,
+        executorHooks: resolvedHooks,
+        commandSource: options.commandSource,
+        presentation: { emit: publish },
+        onExecutorEvent: onEvent,
+        lifecycle: options.lifecycle,
+        metadata: { sessionId },
+        contextPolicy: contextEngine && contextPolicy ? {
+          mode: 'managed',
           engine: contextEngine,
           sessionId,
           activeRequest: userPrompt,
-          systemSections,
           policy: contextPolicy,
           readArtifact: (input) => sessionRepository.readContextArtifact({ sessionId, ...input }),
-        } : undefined,
-        options.commandSource,
-        async (directive) => {
-          const refreshedContext = agentEnvironment.scope.kind === 'workspace'
-            ? await contextManager.buildForPrompt(directive, null, { projectMemory })
-            : {
-                prompt: directive,
-                selectedFile: null,
-                selectedFileContent: null,
-                workspaceSummary: '',
-                projectMemorySummary: '',
-                contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
-              };
-          return {
-            systemSections: buildSystemSections(
-              refreshedContext,
-              projectMemory,
-              session.taskSummaries,
-              skillsBlock(effectiveSkillRegistry, directive),
-              agentEnvironment.scope,
-            ),
-          };
-        },
-        sessionId,
-        { emit: publish },
-      );
+          refreshDirective: async (directive) => {
+            const refreshedContext = agentEnvironment.scope.kind === 'workspace'
+              ? await contextManager.buildForPrompt(directive, null, { projectMemory })
+              : {
+                  prompt: directive,
+                  selectedFile: null,
+                  selectedFileContent: null,
+                  workspaceSummary: '',
+                  projectMemorySummary: '',
+                  contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
+                };
+            return {
+              systemSections: buildSystemSections(
+                refreshedContext,
+                projectMemory,
+                session.taskSummaries,
+                skillsBlock(effectiveSkillRegistry, directive),
+                agentEnvironment.scope,
+              ),
+            };
+          },
+        } : { mode: 'isolated' },
+      });
     } catch (error) {
       result = {
+        runId,
+        profile: 'main',
+        origin: 'user',
         messages: [],
         finalContent: '',
         toolsUsed: [],
@@ -366,6 +361,10 @@ export function createCodingAgent(
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 },
         contextSummaryUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         contextRefreshWarnings: [],
+        runtimeWarnings: [],
+        startedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: 0,
         error: { code: 'RUN_INFRASTRUCTURE_FAILURE', message: error instanceof Error ? error.message : String(error) },
       };
     }
@@ -402,6 +401,7 @@ export function createCodingAgent(
       filesModified: taskSummary.filesModified,
       ...(result.error ? { error: result.error } : {}),
       ...(result.contextRefreshWarnings.length > 0 ? { contextRefreshWarnings: result.contextRefreshWarnings } : {}),
+      ...(result.runtimeWarnings.length > 0 ? { runtimeWarnings: result.runtimeWarnings } : {}),
     };
     publish({ type: 'run_phase_changed', phase: 'finalizing' });
     const finished = await sessionRepository.finishRun({ sessionId, report, summary: taskSummary });
@@ -447,7 +447,15 @@ export function createCodingAgent(
       content: buildSystemPrompt(context, '', [], skillsBlock(effectiveSkillRegistry, prompt), agentEnvironment.scope),
     };
     const onEvent = (event: AgentEvent) => onChunk?.(event);
-    const result = await execute(crypto.randomUUID(), [system, { role: 'user', content: prompt }], onEvent, undefined, options.signal);
+    const result = await runtime.runAgent({
+      identity: { profile: 'main', origin: 'user' },
+      messages: [{ role: 'user', content: prompt }],
+      systemSections: [{ source: 'systemPrompt', content: system.content }],
+      persistence: 'none',
+      budget: { maxModelTurns: 20 },
+      signal: options.signal,
+      onExecutorEvent: onEvent,
+    });
     return createSuccessResponse({
       status: result.status,
       model: modelClient.model,
@@ -464,3 +472,20 @@ export function createCodingAgent(
     preview,
   };
 }
+
+export { createAgentRuntime, INTERNAL_READONLY_TOOL_POLICY } from './agent-runtime.ts';
+export type {
+  AgentContextPolicy,
+  AgentLifecycleHooks,
+  AgentOrigin,
+  AgentPersistencePolicy,
+  AgentProfile,
+  AgentRunBudget,
+  AgentRunIdentity,
+  AgentRunResult,
+  AgentRunSpec,
+  AgentRuntime,
+  AgentRuntimeEvent,
+  AgentRuntimeWarning,
+  ToolPolicy,
+} from './agent-runtime.ts';
