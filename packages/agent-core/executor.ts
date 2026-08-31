@@ -30,6 +30,7 @@ import { presentTool } from '../conversation-view/tool-presentation.ts';
 import type { ContextEngine, ContextSection, PreparedContext } from '../context-engine/index.ts';
 import type { ContextPolicy, ContextUsageSnapshot } from '../shared/types.ts';
 import { CONTEXT_TOOL_DEFINITIONS, LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitions.ts';
+import type { RunCommandSource } from './run-commands.ts';
 
 export type CodingToolHost = {
   readFile: (path: string) => Promise<unknown> | unknown;
@@ -93,16 +94,20 @@ export type LoopResult = {
   latestInputTokens?: number;
   latestContextUsage?: ContextUsageSnapshot;
   contextSummaryUsage: { inputTokens: number; outputTokens: number; totalTokens: number };
+  contextRefreshWarnings: Array<{ itemId: string; message: string }>;
   error?: { code: string; message: string };
 };
 
 export type ReActLoopOptions = {
   runId?: string;
+  sessionId?: string;
   signal?: AbortSignal;
   maxIterations?: number;
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
   semantic?: ExecutorSemanticHooks;
+  commandSource?: RunCommandSource;
+  refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[] }>;
   context?: {
     engine: ContextEngine;
     sessionId: string;
@@ -301,12 +306,37 @@ export function createExecutor(
       let latestInputTokens: number | undefined;
       let latestContextUsage: ContextUsageSnapshot | undefined;
       const contextSummaryUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+      const contextRefreshWarnings: Array<{ itemId: string; message: string }> = [];
       let forceSummaryNext = false;
       let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
-      const base = () => ({ messages: loopMessages, finalContent, toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage });
+      const base = () => ({ messages: loopMessages, finalContent, toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage, contextRefreshWarnings });
       const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
       const maxAttempts = options.maxModelAttempts ?? maxTurns * 2;
       const maxRetries = options.maxRetriesPerTurn ?? 1;
+      const sessionId = options.sessionId ?? options.context?.sessionId ?? '';
+
+      const applySteer = async (decision: Extract<Awaited<ReturnType<RunCommandSource['atSafeBoundary']>>, { action: 'continue' }>) => {
+        workingMessages.push(decision.steer);
+        loopMessages.push(decision.steer);
+        if (options.context) options.context.activeRequest = decision.directive;
+        if (!options.refreshDirective) return;
+        onEvent({ type: 'context_refresh_started', sessionId, runId, itemId: decision.itemId });
+        try {
+          const refreshed = await options.refreshDirective(decision.directive);
+          if (options.context) options.context.systemSections = refreshed.systemSections;
+          else {
+            const system = refreshed.systemSections.map((section) => section.content).join('\n\n');
+            const existing = workingMessages.findIndex((message) => message.role === 'system');
+            if (existing >= 0) workingMessages[existing] = { role: 'system', content: system };
+            else workingMessages.unshift({ role: 'system', content: system });
+          }
+          onEvent({ type: 'context_refresh_completed', sessionId, runId, itemId: decision.itemId });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          contextRefreshWarnings.push({ itemId: decision.itemId, message });
+          onEvent({ type: 'context_refresh_failed', sessionId, runId, itemId: decision.itemId, message });
+        }
+      };
 
       while (modelTurnCount < maxTurns) {
         if (signal.aborted) return aborted(base());
@@ -469,6 +499,21 @@ export function createExecutor(
           if (response.finishReason === 'length') {
             return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
           }
+          const decision = await options.commandSource?.atSafeBoundary({
+            sessionId,
+            runId,
+            remainingModelTurns: maxTurns - modelTurnCount,
+            wouldNaturallyComplete: true,
+          }) ?? { action: 'finish' as const };
+          if (decision.action === 'stop') return aborted(base());
+          if (decision.action === 'continue') {
+            if (modelTurnCount >= maxTurns) return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
+            await applySteer(decision);
+            continue;
+          }
+          if (decision.action === 'proceed' && modelTurnCount >= maxTurns) {
+            return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
+          }
           return { ...base(), status: 'completed', terminationReason: 'natural_completion' };
         }
         if (response.finishReason !== 'tool_calls') {
@@ -621,6 +666,17 @@ export function createExecutor(
           await options.semantic?.toolOutcome(toolMessage, presentation);
           workingMessages.push(toolMessage);
           loopMessages.push(toolMessage);
+        }
+        const decision = await options.commandSource?.atSafeBoundary({
+          sessionId,
+          runId,
+          remainingModelTurns: maxTurns - modelTurnCount,
+          wouldNaturallyComplete: false,
+        }) ?? { action: 'proceed' as const };
+        if (decision.action === 'stop') return aborted(base());
+        if (decision.action === 'continue') {
+          if (modelTurnCount >= maxTurns) return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
+          await applySteer(decision);
         }
       }
       return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };

@@ -22,6 +22,7 @@ import {
   createSkillRegistry,
   parseExplicitInvocations,
 } from '../skill-system/index.ts';
+import type { RunCommandSource } from './run-commands.ts';
 
 type PromptContext = {
   prompt: string;
@@ -166,8 +167,11 @@ export function createCodingAgent(
     signal?: AbortSignal,
     semantic?: ExecutorSemanticHooks,
     context?: ReActLoopOptions['context'],
+    commandSource?: RunCommandSource,
+    refreshDirective?: ReActLoopOptions['refreshDirective'],
+    sessionId?: string,
   ) {
-    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, signal, semantic, context });
+    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, sessionId, signal, semantic, context, commandSource, refreshDirective });
   }
 
   async function runTask(
@@ -176,7 +180,7 @@ export function createCodingAgent(
     selectedFile: string | null,
     onEvent: (event: AgentEvent) => void,
     hooks: ConfirmHook | ExecutorHooks,
-    options: { runId?: string; signal?: AbortSignal; prestarted?: boolean; clientRequestId?: string } = {},
+    options: { runId?: string; signal?: AbortSignal; prestarted?: boolean; clientRequestId?: string; commandSource?: RunCommandSource } = {},
   ): Promise<TaskSummary> {
     if (!sessionRepository) throw new Error('sessionRepository is required for runTask');
     const session = await sessionRepository.loadSession(sessionId);
@@ -281,6 +285,29 @@ export function createCodingAgent(
           policy: contextPolicy,
           readArtifact: (input) => sessionRepository.readContextArtifact({ sessionId, ...input }),
         } : undefined,
+        options.commandSource,
+        async (directive) => {
+          const refreshedContext = agentEnvironment.scope.kind === 'workspace'
+            ? await contextManager.buildForPrompt(directive, null, { projectMemory })
+            : {
+                prompt: directive,
+                selectedFile: null,
+                selectedFileContent: null,
+                workspaceSummary: '',
+                projectMemorySummary: '',
+                contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
+              };
+          return {
+            systemSections: buildSystemSections(
+              refreshedContext,
+              projectMemory,
+              session.taskSummaries,
+              skillsBlock(effectiveSkillRegistry, directive),
+              agentEnvironment.scope,
+            ),
+          };
+        },
+        sessionId,
       );
     } catch (error) {
       result = {
@@ -296,6 +323,7 @@ export function createCodingAgent(
         modelAttemptCount: 0,
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 },
         contextSummaryUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        contextRefreshWarnings: [],
         error: { code: 'RUN_INFRASTRUCTURE_FAILURE', message: error instanceof Error ? error.message : String(error) },
       };
     }
@@ -329,6 +357,7 @@ export function createCodingAgent(
       toolsUsed: taskSummary.toolsUsed,
       filesModified: taskSummary.filesModified,
       ...(result.error ? { error: result.error } : {}),
+      ...(result.contextRefreshWarnings.length > 0 ? { contextRefreshWarnings: result.contextRefreshWarnings } : {}),
     };
     await sessionRepository.finishRun({ sessionId, report, summary: taskSummary });
     onEvent({

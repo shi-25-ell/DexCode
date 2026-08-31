@@ -112,6 +112,96 @@ test('streams text deltas and completes a no-tool Run', async () => {
   assert.deepEqual(events.find((event) => (event as { type?: string }).type === 'chunk'), { type: 'chunk', chunk: 'done' });
 });
 
+test('consumes one Steer at a natural safe boundary before the next model request', async () => {
+  const { host } = toolHost();
+  const scripted = scriptedModel([
+    { content: 'first answer', reasoning: '', toolCalls: [], finishReason: 'stop' },
+    { content: 'steered answer', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ]);
+  const requests: string[][] = [];
+  const model: ModelClient = {
+    ...scripted,
+    async *streamMessage(messages, options) {
+      requests.push(messages.flatMap((message) => message.role === 'user' ? [message.content] : []));
+      yield* scripted.streamMessage(messages, options);
+    },
+  };
+  let boundaries = 0;
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'initial' }], () => {}, undefined, {
+    runId: 'run-steer',
+    sessionId: 'session-steer',
+    commandSource: {
+      async atSafeBoundary() {
+        boundaries += 1;
+        return boundaries === 1
+          ? { action: 'continue', steer: { role: 'user', content: 'change direction' }, itemId: 'queue-1', directive: 'change direction' }
+          : { action: 'finish' };
+      },
+    },
+    refreshDirective: async () => ({ systemSections: [{ source: 'systemPrompt', content: 'refreshed system' }] }),
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.modelTurnCount, 2);
+  assert.deepEqual(requests[1], ['initial', 'change direction']);
+});
+
+test('waits for an entire tool batch before applying Steer', async () => {
+  const timeline: string[] = [];
+  const { host } = toolHost(timeline);
+  const model = scriptedModel([
+    {
+      content: '',
+      reasoning: '',
+      toolCalls: [
+        { id: 'call-1', name: 'read_file', arguments: { path: 'a.ts' } },
+        { id: 'call-2', name: 'read_file', arguments: { path: 'b.ts' } },
+      ],
+      finishReason: 'tool_calls',
+    },
+    { content: 'done', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ]);
+  let boundaries = 0;
+  await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'initial' }], () => {}, undefined, {
+    commandSource: {
+      async atSafeBoundary() {
+        timeline.push('safe-boundary');
+        boundaries += 1;
+        return boundaries === 1
+          ? { action: 'continue', steer: { role: 'user', content: 'steer' }, itemId: 'queue-1', directive: 'steer' }
+          : { action: 'finish' };
+      },
+    },
+    semantic: {
+      assistantCommitted: async () => { timeline.push('assistant'); },
+      toolStarted: async (call) => { timeline.push(`started-${call.id}`); },
+      toolOutcome: async (message) => { timeline.push(`outcome-${message.tool_call_id}`); },
+    },
+  });
+  assert.deepEqual(timeline.slice(0, 6), ['assistant', 'started-call-1', 'outcome-call-1', 'started-call-2', 'outcome-call-2', 'safe-boundary']);
+});
+
+test('does not consume Steer after the model turn budget is exhausted', async () => {
+  const { host } = toolHost();
+  let consumed = false;
+  const result = await createExecutor(host).runReActLoop(scriptedModel([{
+    content: '',
+    reasoning: '',
+    toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'a.ts' } }],
+    finishReason: 'tool_calls',
+  }]), [], () => {}, undefined, {
+    maxIterations: 1,
+    commandSource: {
+      async atSafeBoundary(input) {
+        assert.equal(input.remainingModelTurns, 0);
+        consumed = false;
+        return { action: 'proceed' };
+      },
+    },
+  });
+  assert.equal(result.status, 'limited');
+  assert.equal(consumed, false);
+});
+
 test('commits assistant and tool start before effect, then commits outcome', async () => {
   const timeline: string[] = [];
   const { host, read } = toolHost(timeline);

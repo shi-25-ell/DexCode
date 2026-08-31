@@ -164,6 +164,7 @@ export type RunReport = {
   toolsUsed: string[];
   filesModified: string[];
   error?: { code: string; message: string };
+  contextRefreshWarnings?: Array<{ itemId: string; message: string }>;
 };
 
 export type ContextManifestV1 = {
