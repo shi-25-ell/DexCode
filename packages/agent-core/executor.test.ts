@@ -200,18 +200,34 @@ test('orchestration tools receive immutable caller context and stay out of ordin
   const { host } = toolHost();
   const events: AgentEvent[] = [];
   const calls: unknown[] = [];
+  const requestedTools: unknown[][] = [];
   const orchestration = {
+    definitions: () => [
+      { name: 'assistant', description: 'General-purpose child agent.' },
+      { name: 'researcher', description: 'Read-only investigation agent.' },
+    ],
     spawn: async (input: unknown, caller: unknown) => { calls.push({ input, caller }); return { agent_id: 'agent-a', status: 'running' }; },
     wait: async () => ({}), followup: async () => ({}), stop: async () => ({}),
   };
-  const result = await createExecutor(host, undefined, undefined, orchestration).runReActLoop(scriptedModel([
+  const scripted = scriptedModel([
     { content: '', reasoning: '', toolCalls: [{ id: 'spawn-1', name: 'spawn_agent', arguments: { task: 'inspect', agent: 'researcher', context_mode: 'fork' } }], finishReason: 'tool_calls' },
     { content: 'delegated', reasoning: '', toolCalls: [], finishReason: 'stop' },
-  ]), [{ role: 'user', content: 'delegate this' }], (event) => events.push(event), undefined, { runId: 'main-1', sessionId: 'session-1' });
+  ]);
+  const model: ModelClient = {
+    ...scripted,
+    streamMessage(messages, options) {
+      requestedTools.push((options?.tools ?? []) as unknown[]);
+      return scripted.streamMessage(messages, options);
+    },
+  };
+  const result = await createExecutor(host, undefined, undefined, orchestration).runReActLoop(model, [{ role: 'user', content: 'delegate this' }], (event) => events.push(event), undefined, { runId: 'main-1', sessionId: 'session-1' });
   assert.equal(result.status, 'completed');
   assert.equal(calls.length, 1);
   assert.equal((calls[0] as { caller: { forkSnapshot: ChatMessage[] } }).caller.forkSnapshot.at(-1)?.role, 'user');
   assert.equal(events.some((event) => event.type === 'tool' || event.type === 'tool_view' || event.type === 'tool_status'), false);
+  const spawn = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'spawn_agent') as { function: { parameters: { properties: { agent: { enum?: string[]; description?: string } } } } };
+  assert.deepEqual(spawn.function.parameters.properties.agent.enum, ['assistant', 'researcher']);
+  assert.match(spawn.function.parameters.properties.agent.description ?? '', /assistant: General-purpose child agent/);
 });
 
 test('consumes one Steer at a natural safe boundary before the next model request', async () => {

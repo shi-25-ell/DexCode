@@ -165,7 +165,10 @@ export function createAgentManager(options: {
     if ((existing?.agents.length ?? 0) >= limits.maxAgentsPerSession) throw new AgentManagerError('capacity_exceeded', 'Session child-agent capacity is exhausted');
     if (handles.size >= limits.maxConcurrentAgents) throw new AgentManagerError('capacity_exceeded', 'Concurrent child-agent capacity is exhausted');
     const resolved = options.definitions.resolve(input.agent);
-    if (!resolved) throw new AgentManagerError('definition_not_found', `Agent definition not found: ${input.agent}`);
+    if (!resolved) {
+      const available = options.definitions.list().map((definition) => definition.name).sort();
+      throw new AgentManagerError('definition_not_found', `Agent definition not found: ${input.agent}. Available agents: ${available.join(', ') || 'none'}`);
+    }
     const contextMode = input.contextMode ?? resolved.definition.defaultContextMode;
     if (!resolved.definition.allowedContextModes.includes(contextMode)) throw new AgentManagerError('context_mode_forbidden', `Context mode ${contextMode} is not allowed`);
     const isolation = input.isolation ?? resolved.definition.isolationPolicy.default;
@@ -259,6 +262,7 @@ export function createAgentManager(options: {
   }
 
   return {
+    definitions: () => options.definitions.list().map(({ name, description }) => ({ name, description })),
     spawn: async (input, caller) => {
       try { return await withAgentLock(`operation:${caller.sessionId}:${caller.callerRunId}:${caller.toolCallId}`, () => spawnRaw(input, caller)); }
       catch (error) { return agentErrorResult(error); }

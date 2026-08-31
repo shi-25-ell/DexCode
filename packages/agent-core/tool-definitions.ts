@@ -338,3 +338,23 @@ export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
     },
   },
 ] as const;
+
+export function agentOrchestrationToolDefinitions(agents: Array<{ name: string; description: string }>) {
+  if (agents.length === 0) return [...AGENT_ORCHESTRATION_TOOL_DEFINITIONS];
+  const names = agents.map((agent) => agent.name);
+  const descriptions = agents.map((agent) => `${agent.name}: ${agent.description}`).join('; ');
+  return AGENT_ORCHESTRATION_TOOL_DEFINITIONS.map((tool) => tool.function.name !== 'spawn_agent' ? tool : ({
+    ...tool,
+    function: {
+      ...tool.function,
+      description: `Start a persistent child agent asynchronously for a bounded task. Available agent definitions: ${descriptions}`,
+      parameters: {
+        ...tool.function.parameters,
+        properties: {
+          ...tool.function.parameters.properties,
+          agent: { type: 'string', enum: names, description: `Available agent definitions: ${descriptions}` },
+        },
+      },
+    },
+  }));
+}

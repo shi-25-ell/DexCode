@@ -73,6 +73,7 @@ test('Definition parser rejects unknown fields and workspace definitions overrid
 });
 
 test('child Agent definitions default to 200 model turns', () => {
+  assert.equal(BUILTIN_AGENT_DEFINITIONS.some((definition) => definition.name === 'assistant'), true);
   assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.maxModelTurns, 200);
   assert.equal(BUILTIN_AGENT_DEFINITIONS[1]?.budget.maxModelTurns, 200);
   const parsed = parseAgentDefinitionMarkdown('---\nname: scout\ndescription: test\n---\nInspect source.');
@@ -115,7 +116,10 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
   const manager = createAgentManager({ enabled: true, store, definitions, runChild });
   const caller = (toolCallId: string) => ({ sessionId, callerRunId: 'main-run', toolCallId, delegationGroupId: 'group-1', forkSnapshot: [] });
   try {
-    const first = await manager.spawn({ task: 'one', agent: 'researcher' }, caller('spawn-1')) as { agent_id: string };
+    const missing = await manager.spawn({ task: 'hello', agent: 'greeter' }, caller('spawn-missing')) as { code: string; message: string };
+    assert.equal(missing.code, 'definition_not_found');
+    assert.match(missing.message, /Available agents: assistant, researcher, reviewer/);
+    const first = await manager.spawn({ task: 'one', agent: 'assistant' }, caller('spawn-1')) as { agent_id: string };
     const second = await manager.spawn({ task: 'two', agent: 'reviewer' }, caller('spawn-2')) as { agent_id: string };
     const waited = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all', timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[]; timed_out: boolean };
     assert.equal(waited.timed_out, false);

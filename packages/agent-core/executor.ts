@@ -39,7 +39,7 @@ import {
   validateOrchestrationToolInput,
   type AgentOrchestrationPort,
 } from '../agent-manager/contracts.ts';
-import { AGENT_ORCHESTRATION_TOOL_DEFINITIONS } from './tool-definitions.ts';
+import { agentOrchestrationToolDefinitions } from './tool-definitions.ts';
 
 export type CodingToolHost = {
   readFile: (path: string) => Promise<unknown> | unknown;
@@ -378,7 +378,7 @@ export function createExecutor(
       ? local.filter((tool) => codingToolHost.isToolEnabled?.(tool.function.name))
       : local;
     const withOrchestration = orchestration && policy?.allowOrchestration !== false
-      ? [...enabled, ...AGENT_ORCHESTRATION_TOOL_DEFINITIONS]
+      ? [...enabled, ...agentOrchestrationToolDefinitions(orchestration.definitions?.() ?? [])]
       : enabled;
     const builtIn = (includeContextTools ? [...withOrchestration, ...CONTEXT_TOOL_DEFINITIONS] : withOrchestration)
       .filter((tool) => policyAllows(tool.function.name, policy));

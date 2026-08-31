@@ -7,6 +7,16 @@ const READONLY_TOOLS = ['read_file', 'search_in_workspace', 'list_workspace', 'r
 
 export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
   {
+    name: 'assistant',
+    description: 'General-purpose child agent for bounded delegated tasks.',
+    systemPrompt: 'Complete the assigned task as a child agent. Use available read-only tools when needed and return a concise result to the parent agent.',
+    toolPolicy: { allow: [...READONLY_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
+    defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
+    budget: { maxModelTurns: 200, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024 },
+    memoryPolicy: { read: true, write: false, automaticExtraction: false },
+    isolationPolicy: { default: 'shared', allowed: ['shared'] },
+  },
+  {
     name: 'researcher',
     description: 'Read-only investigation agent for source-grounded findings.',
     systemPrompt: 'Investigate the assigned task using only read-only tools. Return concise, source-grounded findings and call out uncertainty.',

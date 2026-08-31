@@ -144,6 +144,7 @@ export type AgentCallerContext = {
 };
 
 export interface AgentOrchestrationPort {
+  definitions?(): Array<{ name: string; description: string }>;
   spawn(input: { task: string; agent: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext): Promise<unknown>;
   wait(input: { agentIds: string[]; mode?: 'any' | 'all'; timeoutMs?: number }, caller: AgentCallerContext): Promise<unknown>;
   followup(input: { agentId: string; task: string }, caller: AgentCallerContext): Promise<unknown>;
