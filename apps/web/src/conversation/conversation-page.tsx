@@ -84,6 +84,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     queryFn: () => apiJson<{ model: { displayName: string; contextWindow?: number } }>('/api/meta', { workspaceRef }),
     staleTime: 60_000,
   });
+  const loadingConversation = Boolean(conversationRef && !snapshot.data && snapshot.isPending);
 
   useEffect(() => {
     if (snapshot.data && !streamingRef.current) {
@@ -139,7 +140,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const content = prompt.trim();
-    if (!content || state.activeRun) return;
+    if (!content || state.activeRun || loadingConversation) return;
     const clientRequestId = crypto.randomUUID();
     setPrompt('');
     streamingRef.current = true;
@@ -207,7 +208,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     setAtBottom(true);
   };
   return (
-    <AppShell scope={scope} conversationRef={conversationRef} title={state.title} status={state.status}>
+    <AppShell scope={scope} conversationRef={conversationRef} title={loadingConversation ? '加载会话…' : state.title} status={state.status}>
       <div className="conversation-layout">
         <div
           className="conversation-scroll"
@@ -223,7 +224,9 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           }}
         >
           <div className="timeline" ref={timelineRef}>
-          {timeline.length === 0 ? (
+          {loadingConversation ? (
+            <div className="empty-conversation" role="status"><p>正在加载会话…</p></div>
+          ) : timeline.length === 0 ? (
             <div className="empty-conversation">
               <h2>{scope.kind === 'general' ? '从一个问题开始' : '开始处理当前项目'}</h2>
               <p>{scope.kind === 'general' ? '这里不会启用项目文件与命令工具。加载项目后可以让 Agent 阅读和修改代码。' : '描述你的目标，DexCode 会在对话中展示每一步工具调用。'}</p>
@@ -264,12 +267,13 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             }}
             placeholder="继续输入…"
             aria-label="发送消息"
+            disabled={loadingConversation}
             rows={3}
           />
           <div className="composer-actions">
             {state.activeRun
               ? <button type="button" className="send-button stop" onClick={() => void stop()} aria-label="停止"><Square size={14} fill="currentColor" /></button>
-              : <button type="submit" className="send-button" disabled={!prompt.trim()} aria-label="发送"><ArrowUp size={18} /></button>}
+              : <button type="submit" className="send-button" disabled={loadingConversation || !prompt.trim()} aria-label="发送"><ArrowUp size={18} /></button>}
           </div>
           <div className="composer-footer">
             <span className="model-name"><i />{meta.data?.model.displayName ?? '模型信息加载中'}</span>
