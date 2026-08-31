@@ -158,6 +158,12 @@ function assistantMessage(response: ModelResponse): AssistantMessage {
   };
 }
 
+function isOrphanEmptyAssistant(message: ChatMessage): boolean {
+  return message.role === 'assistant'
+    && message.content === null
+    && (message.tool_calls?.length ?? 0) === 0;
+}
+
 const MAX_REASONING_PRESENTATION_CHARS = 64_000;
 
 function committedAssistantMessage(response: ModelResponse, turn: number, messageId: string): CommittedAssistantMessage {
@@ -344,7 +350,10 @@ export function createExecutor(
       const controller = options.signal ? undefined : new AbortController();
       const signal = options.signal ?? controller!.signal;
       const runId = options.runId ?? crypto.randomUUID();
-      const workingMessages = [...messages];
+      // Keep the append-only ledger intact while projecting legacy invalid turns
+      // out of provider requests. An empty assistant turn without tool calls is
+      // not a valid Chat Completions history item and can make the next Run 400.
+      const workingMessages = messages.filter((message) => !isOrphanEmptyAssistant(message));
       const loopMessages: ChatMessage[] = [];
       const toolsUsed: string[] = [];
       const filesModified: string[] = [];
@@ -563,6 +572,9 @@ export function createExecutor(
           };
           if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: latestContextUsage });
           else onEvent({ type: 'context_usage', ...latestContextUsage });
+        }
+        if (response.finishReason === 'length' && response.toolCalls.length === 0 && response.content.length === 0) {
+          return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
         }
         finalContent = response.content || finalContent;
         const assistant = assistantMessage(response);

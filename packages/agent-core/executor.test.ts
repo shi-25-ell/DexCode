@@ -32,6 +32,41 @@ function scriptedModel(responses: ModelResponse[]): ModelClient {
   };
 }
 
+function modelRejectingInvalidAssistantHistory(content = 'continued'): ModelClient {
+  return {
+    model: 'reject-invalid-history',
+    baseUrl: 'memory://reject-invalid-history',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+    async *streamMessage(messages): AsyncIterable<ModelEvent> {
+      yield { version: 1, type: 'turn_started', attemptId: 'attempt-next-run' };
+      const hasInvalidAssistant = (messages as ChatMessage[]).some((message) => (
+        message.role === 'assistant'
+        && message.content === null
+        && (message.tool_calls?.length ?? 0) === 0
+      ));
+      if (hasInvalidAssistant) {
+        yield {
+          version: 1,
+          type: 'turn_failed',
+          failure: {
+            category: 'invalid_request',
+            retryable: false,
+            httpStatus: 400,
+            message: 'LLM request failed: 400 Bad Request',
+          },
+        };
+        return;
+      }
+      yield { version: 1, type: 'text_delta', delta: content };
+      yield {
+        version: 1,
+        type: 'turn_completed',
+        response: { content, reasoning: '', toolCalls: [], finishReason: 'stop' },
+      };
+    },
+  };
+}
+
 function toolHost(timeline: string[] = []) {
   let content = 'before';
   return {
@@ -358,6 +393,78 @@ test('returns limited rather than completed when the model turn budget is exhaus
   const result = await createExecutor(host).runReActLoop(model, [], () => {}, undefined, { maxIterations: 1 });
   assert.equal(result.status, 'limited');
   assert.equal(result.terminationReason, 'model_turn_limit');
+});
+
+test('continues a later Run after an empty length-limited response without persisting an invalid assistant message', async () => {
+  const { host } = toolHost();
+  const canonicalMessages: ChatMessage[] = [{ role: 'user', content: 'count the files' }];
+  const semantic = {
+    assistantCommitted: async (message: ChatMessage) => { canonicalMessages.push(message); },
+    toolStarted: async () => {},
+    toolOutcome: async () => {},
+  };
+
+  const limited = await createExecutor(host).runReActLoop(scriptedModel([{
+    content: '',
+    reasoning: '',
+    toolCalls: [],
+    finishReason: 'length',
+  }]), canonicalMessages, () => {}, undefined, { semantic });
+
+  assert.equal(limited.status, 'limited');
+  assert.equal(limited.terminationReason, 'model_turn_limit');
+
+  canonicalMessages.push({ role: 'user', content: 'why did you stop?' });
+  const continued = await createExecutor(host).runReActLoop(modelRejectingInvalidAssistantHistory(), canonicalMessages, () => {}, undefined, { semantic });
+  assert.equal(continued.status, 'completed');
+  assert.equal(continued.finalContent, 'continued');
+  assert.equal(limited.finalMessageId, undefined);
+  assert.equal(canonicalMessages.some((message) => (
+    message.role === 'assistant'
+    && message.content === null
+    && (message.tool_calls?.length ?? 0) === 0
+  )), false);
+});
+
+test('projects a valid request from a session that already contains an orphan empty assistant message', async () => {
+  const { host } = toolHost();
+  const legacyMessages: ChatMessage[] = [
+    { role: 'user', content: 'count the files' },
+    { role: 'assistant', content: null },
+    { role: 'user', content: 'why did you stop?' },
+  ];
+
+  const result = await createExecutor(host).runReActLoop(
+    modelRejectingInvalidAssistantHistory('recovered'),
+    legacyMessages,
+    () => {},
+  );
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.finalContent, 'recovered');
+  assert.deepEqual(legacyMessages[1], { role: 'assistant', content: null });
+});
+
+test('keeps readable partial content when a response reaches the model length limit', async () => {
+  const { host } = toolHost();
+  const committed: ChatMessage[] = [];
+  const result = await createExecutor(host).runReActLoop(scriptedModel([{
+    content: 'partial answer',
+    reasoning: '',
+    toolCalls: [],
+    finishReason: 'length',
+  }]), [{ role: 'user', content: 'answer at length' }], () => {}, undefined, {
+    semantic: {
+      assistantCommitted: async (message) => { committed.push(message); },
+      toolStarted: async () => {},
+      toolOutcome: async () => {},
+    },
+  });
+
+  assert.equal(result.status, 'limited');
+  assert.equal(result.finalContent, 'partial answer');
+  assert.equal(typeof result.finalMessageId, 'string');
+  assert.deepEqual(committed, [{ role: 'assistant', content: 'partial answer' }]);
 });
 
 test('prepares and durably commits every model request in a multi-turn Run', async () => {
