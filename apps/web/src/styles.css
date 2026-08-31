@@ -301,6 +301,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .toggle.on span { transform: translateX(16px); }
 .secondary-button { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 7px; background: #fff; color: #374151; font-size: 12px; cursor: pointer; }
 .secondary-button.warning { color: var(--amber); }
+.secondary-button.danger { border-color: #fecaca; color: var(--red); }
 .danger-icon { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border: 1px solid #fecaca; border-radius: 7px; background: #fff; color: var(--red); cursor: pointer; }
 .inline-settings-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 0.6fr) auto; gap: 9px; margin-bottom: 18px; }
 .inline-settings-form input, .inline-settings-form select { min-width: 0; height: 40px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: 7px; background: #fff; color: var(--text); font-size: 12px; }

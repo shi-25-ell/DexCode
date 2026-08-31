@@ -69,3 +69,26 @@ export type McpServerStatus = {
   serverName?: string;
   error?: string;
 };
+
+export type ManagedMemorySettings = {
+  version: 1;
+  enabled: boolean;
+  extractionEnabled: boolean;
+  recallEnabled: boolean;
+  consolidationEnabled: boolean;
+  extractionEveryCompletedRuns: number;
+  consolidationMinHours: number;
+  consolidationMinSessions: number;
+  generation: number;
+};
+
+export type ManagedMemorySnapshot = {
+  workspaceId: string;
+  mode: 'off' | 'observe' | 'on';
+  settings: ManagedMemorySettings;
+  topicCount: number;
+  indexExists: boolean;
+  totalBytes: number;
+  degraded: boolean;
+  diagnostics: string[];
+};

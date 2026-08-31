@@ -1,6 +1,6 @@
 export type ConversationScope = { kind: 'general' } | { kind: 'workspace'; workspaceRef: string };
 
-export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge';
+export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge' | 'memory';
 export type ApprovalMode = 'read_only' | 'allowlist' | 'full_access';
 export type ApprovalEffect = 'read' | 'write' | 'execute' | 'external' | 'interactive';
 export type ApprovalOption = 'allow_once' | 'allow_whitelist' | 'deny';
@@ -9,7 +9,7 @@ export type Capability = {
   id: CapabilityId;
   label: string;
   route: string;
-  icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'book';
+  icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'book' | 'brain';
   workspaceRequired: boolean;
 };
 
@@ -24,7 +24,7 @@ export type ConversationListItem = {
 
 export type ToolPresentation = {
   callRef: string;
-  category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'other';
+  category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'memory' | 'other';
   name: string;
   target?: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
@@ -62,6 +62,7 @@ export type ContextBreakdown = {
   recentConversation: number;
   toolResults: number;
   projectMemory: number;
+  managedMemory: number;
   toolDefinitions: number;
   other: number;
 };

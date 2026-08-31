@@ -9,6 +9,7 @@ const labels = {
   recentConversation: '近期对话',
   toolResults: '工具结果',
   projectMemory: '项目记忆',
+  managedMemory: '自动记忆',
   toolDefinitions: '工具定义',
   other: '其他开销',
 } as const;

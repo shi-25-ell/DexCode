@@ -10,6 +10,7 @@ import { ProjectKnowledgePanel } from './project-knowledge-panel';
 import { SkillsPanel } from './skills-panel';
 import { ToolsPanel } from './tools-panel';
 import { ApprovalModePanel } from './approval-mode-panel';
+import { MemoryPanel } from './memory-panel';
 
 type CapabilityPanelProps = { workspaceRef?: string };
 
@@ -19,6 +20,7 @@ const CAPABILITY_PANELS: Record<CapabilityId, ComponentType<CapabilityPanelProps
   skills: ({ workspaceRef }) => <SkillsPanel workspaceRef={workspaceRef!} />,
   approval: ({ workspaceRef }) => <ApprovalModePanel workspaceRef={workspaceRef} />,
   'project-knowledge': ({ workspaceRef }) => <ProjectKnowledgePanel workspaceRef={workspaceRef!} />,
+  memory: ({ workspaceRef }) => <MemoryPanel workspaceRef={workspaceRef!} />,
 };
 
 function WorkspaceRequired() {

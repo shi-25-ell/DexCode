@@ -1,10 +1,10 @@
-export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge';
+export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge' | 'memory';
 
 export type CapabilityDefinition = {
   id: CapabilityId;
   label: string;
   route: string;
-  icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'book';
+  icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'book' | 'brain';
   workspaceRequired: boolean;
 };
 
@@ -14,6 +14,7 @@ const DEFAULT_CAPABILITIES: readonly CapabilityDefinition[] = [
   { id: 'skills', label: 'Skill', route: '/settings/skills', icon: 'sparkles', workspaceRequired: true },
   { id: 'approval', label: '批准模式', route: '/settings/approval', icon: 'shield', workspaceRequired: false },
   { id: 'project-knowledge', label: '项目知识', route: '/settings/project-knowledge', icon: 'book', workspaceRequired: true },
+  { id: 'memory', label: '记忆', route: '/settings/memory', icon: 'brain', workspaceRequired: true },
 ];
 
 export function createCapabilityRegistry(options: { disabled?: Iterable<string> } = {}) {

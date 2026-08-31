@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react';
 import {
   BookOpen,
+  Brain,
   Camera,
   CircleAlert,
   CircleCheck,
@@ -22,6 +23,7 @@ export const capabilityIcons: Record<Capability['icon'], ComponentType<{ size?: 
   sparkles: Sparkles,
   shield: ShieldCheck,
   book: BookOpen,
+  brain: Brain,
 };
 
 export const toolIcons: Record<ToolPresentation['category'], ComponentType<{ size?: number; strokeWidth?: number }>> = {
@@ -32,6 +34,7 @@ export const toolIcons: Record<ToolPresentation['category'], ComponentType<{ siz
   skill: Sparkles,
   mcp: Network,
   snapshot: Camera,
+  memory: Brain,
   other: Wrench,
 };
 

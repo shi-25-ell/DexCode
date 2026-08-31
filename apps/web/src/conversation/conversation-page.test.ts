@@ -76,7 +76,7 @@ describe('conversation presentation', () => {
       archivedMessages: 18,
       archivedConversationSegments: 4,
       summarizedMessages: 0,
-      breakdown: { systemPrompt: 500, workspaceCode: 1_000, recentConversation: 2_000, toolResults: 500, projectMemory: 300, toolDefinitions: 500, other: 200 },
+      breakdown: { systemPrompt: 500, workspaceCode: 1_000, recentConversation: 2_000, toolResults: 500, projectMemory: 300, managedMemory: 0, toolDefinitions: 500, other: 200 },
     };
 
     render(createElement(ContextCard, { context }));
