@@ -5,6 +5,7 @@ import test from 'node:test';
 import type { ChatOptions, ModelClient, ModelEvent } from '../llm-client/index.ts';
 import { createSessionRepository } from '../session-store/index.ts';
 import type { AgentEvent, ChatMessage } from '../shared/types.ts';
+import type { RunEventEnvelope } from '../run-protocol/index.ts';
 import { createCodingAgent } from './index.ts';
 
 function toolHost() {
@@ -25,6 +26,7 @@ function completingModel(observed: Array<{ messages: ChatMessage[]; options?: Ch
   return {
     model: 'strategy-test',
     baseUrl: 'memory://strategy-test',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
     contextWindow: 128_000,
     maxOutputTokens: 4_096,
     async *streamMessage(messages, options): AsyncIterable<ModelEvent> {
@@ -73,7 +75,15 @@ test('backend strategy selects the legacy or four-layer request path and records
       );
 
       const events: AgentEvent[] = [];
-      await agent.runTask(session.sessionId, 'current request', null, (event) => events.push(event), async () => 'confirm');
+      const runEvents: RunEventEnvelope[] = [];
+      await agent.runTask(
+        session.sessionId,
+        'current request',
+        null,
+        (event) => events.push(event),
+        async () => 'confirm',
+        { onRunEvent: (event) => runEvents.push(event) },
+      );
 
       const loaded = await repository.loadSession(session.sessionId);
       assert.equal(loaded?.runReports?.at(-1)?.contextStrategy, strategy);
@@ -86,6 +96,20 @@ test('backend strategy selects the legacy or four-layer request path and records
       assert.equal(tools?.some((tool) => tool.function?.name === 'compact_context') ?? false, strategy === 'four_layer');
       assert.equal(tools?.some((tool) => tool.function?.name === 'read_artifact') ?? false, strategy === 'four_layer');
       assert.equal(events.some((event) => event.type === 'context_usage' && event.source === 'provider' && event.usedTokens === 120), true);
+      assert.equal(runEvents[0]?.event.type, 'run_started');
+      assert.equal(runEvents[1]?.event.type, 'run_phase_changed');
+      assert.deepEqual(runEvents.map((event) => event.seq), runEvents.map((_, index) => index + 1));
+      const committed = runEvents.find((event) => event.event.type === 'assistant_message_committed');
+      const terminal = runEvents.at(-1);
+      assert.equal(committed?.event.type, 'assistant_message_committed');
+      assert.equal(terminal?.event.type, 'run_finished');
+      if (committed?.event.type === 'assistant_message_committed' && terminal?.event.type === 'run_finished') {
+        const committedMessageId = committed.event.message.messageId;
+        assert.equal(terminal.event.finalMessageId, committedMessageId);
+        assert.equal(terminal.event.conversationRevision, loaded?.revision);
+        assert.equal(terminal.event.conversation.revision, loaded?.revision);
+        assert.equal(terminal.event.conversation.items.some((item) => item.kind === 'assistant' && item.messageId === committedMessageId && item.final), true);
+      }
       if (strategy === 'legacy') assert.equal(events.some((event) => event.type === 'context_activity'), false);
     }
   } finally {

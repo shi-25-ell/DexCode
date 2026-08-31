@@ -27,7 +27,7 @@ export type ContextUsageView = {
 
 export type ConversationItem =
   | { id: string; kind: 'user'; content: string }
-  | { id: string; kind: 'assistant'; content: string }
+  | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'tool'; toolName: string; effect: ApprovalEffect; title: string; target?: string; reason: string; fingerprint: string; options: ApprovalOption[]; resolved?: ApprovalOption }
@@ -38,6 +38,7 @@ export type ConversationViewSnapshot = {
   title: string;
   state: ConversationState;
   updatedAt: string;
+  revision: number;
   items: ConversationItem[];
   contextUsage: ContextUsageView;
 };

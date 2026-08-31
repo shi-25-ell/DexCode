@@ -308,7 +308,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         activeTaskId: input.runId,
         revision: 1,
         ledger: [
-          { seq: 1, at, runId: input.runId, type: 'run_started', context: input.context },
+          { seq: 1, at, runId: input.runId, type: 'run_started', context: input.context, clientRequestId: input.clientRequestId },
           { seq: 2, at, runId: input.runId, type: 'message', message: input.userMessage },
         ],
         runReports: [],
@@ -413,7 +413,14 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         messages: [...session.messages, input.userMessage],
         ledger: [
           ...(session.ledger ?? []),
-          { seq, at, runId: input.runId, type: 'run_started', context: input.context },
+          {
+            seq,
+            at,
+            runId: input.runId,
+            type: 'run_started',
+            context: input.context,
+            ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
+          },
           { seq: seq + 1, at, runId: input.runId, type: 'message', message: input.userMessage },
         ],
       });
@@ -422,7 +429,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function appendRunMessage(input: { sessionId: string; runId: string; message: ChatMessage }): Promise<Session> {
+  async function appendRunMessage(input: { sessionId: string; runId: string; message: ChatMessage; messageId?: string; turn?: number }): Promise<Session> {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
@@ -432,7 +439,15 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         ...session,
         revision: (session.revision ?? 0) + 1,
         messages: [...session.messages, input.message],
-        ledger: [...(session.ledger ?? []), { seq, at: new Date().toISOString(), runId: input.runId, type: 'message', message: input.message }],
+        ledger: [...(session.ledger ?? []), {
+          seq,
+          at: new Date().toISOString(),
+          runId: input.runId,
+          type: 'message',
+          message: input.message,
+          ...(input.messageId ? { messageId: input.messageId } : {}),
+          ...(input.turn !== undefined ? { turn: input.turn } : {}),
+        }],
       });
     });
   }

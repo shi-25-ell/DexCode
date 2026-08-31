@@ -24,7 +24,7 @@ export function runEventToLegacy(envelope: RunEventEnvelope): AgentEvent[] {
   }
   if (event.type === 'tool_started') return [
     { type: 'tool_status', callId: event.callId, tool: event.presentation.name, status: 'running' },
-    { type: 'tool_view', presentation: event.presentation },
+    { type: 'tool_view', presentation: { ...event.presentation, status: 'running' } },
   ];
   if (event.type === 'tool_progress') return [{ type: 'tool_view', presentation: event.presentation }];
   if (event.type === 'tool_finished') return [
@@ -68,7 +68,7 @@ export function runEventToLegacy(envelope: RunEventEnvelope): AgentEvent[] {
       status: event.terminal.status === 'completed' ? 'done' : event.terminal.status === 'aborted' ? 'aborted' : 'error',
       note: event.terminal.reason,
     },
-    { type: 'result', result: { conversation: event.conversation, report: event.terminal } },
+    { type: 'result', result: event.legacyResult ?? { conversation: event.conversation, report: event.terminal } },
   ];
   if (event.type === 'stream_error') return [{ type: 'error', message: event.message }];
   return [];

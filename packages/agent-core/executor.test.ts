@@ -4,12 +4,14 @@ import { createExecutor } from './executor.ts';
 import type { ModelClient, ModelEvent, ModelResponse } from '../llm-client/index.ts';
 import type { ContextEngine, PrepareContextInput, PreparedContext } from '../context-engine/index.ts';
 import type { AgentEvent } from '../shared/types.ts';
+import type { RunEventPayload } from '../run-protocol/index.ts';
 
 function scriptedModel(responses: ModelResponse[]): ModelClient {
   let index = 0;
   return {
     model: 'scripted',
     baseUrl: 'scripted://local',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
     async *streamMessage(): AsyncIterable<ModelEvent> {
       const response = responses[index++];
       if (!response) throw new Error('unexpected model call');
@@ -119,6 +121,7 @@ test('keeps legacy reasoning and text streams separate while committing the comp
   const model: ModelClient = {
     model: 'reasoning-script',
     baseUrl: 'memory://reasoning-script',
+    reasoning: { supported: true, requestMode: 'enabled' },
     async *streamMessage(): AsyncIterable<ModelEvent> {
       yield { version: 1, type: 'turn_started', attemptId: 'attempt-reasoning' };
       yield { version: 1, type: 'reasoning_delta', delta: 'private reasoning' };
@@ -150,6 +153,54 @@ test('keeps legacy reasoning and text streams separate while committing the comp
     { type: 'chunk', chunk: 'public answer' },
   ]);
   assert.deepEqual(committed, ['public answer']);
+});
+
+test('emits stable V2 message blocks and phase transitions without mixing reasoning into text', async () => {
+  const { host } = toolHost();
+  const events: RunEventPayload[] = [];
+  const model: ModelClient = {
+    model: 'presentation-script',
+    baseUrl: 'memory://presentation-script',
+    reasoning: { supported: true, requestMode: 'enabled' },
+    async *streamMessage(): AsyncIterable<ModelEvent> {
+      yield { version: 1, type: 'turn_started', attemptId: 'attempt-presentation' };
+      yield { version: 1, type: 'reasoning_delta', delta: 'reasoning' };
+      yield { version: 1, type: 'text_delta', delta: 'answer' };
+      yield {
+        version: 1,
+        type: 'turn_completed',
+        response: { content: 'answer', reasoning: 'reasoning', toolCalls: [], finishReason: 'stop' },
+      };
+    },
+  };
+  const result = await createExecutor(host).runReActLoop(model, [], () => {}, undefined, {
+    runId: 'run-presentation',
+    presentation: { emit: (event) => events.push(event) },
+    semantic: {
+      assistantCommitted: async () => {},
+      toolStarted: async () => {},
+      toolOutcome: async () => {},
+    },
+  });
+
+  assert.equal(result.finalMessageId, 'run-presentation:message:1');
+  assert.deepEqual(events.filter((event) => event.type === 'run_phase_changed').map((event) => event.phase), [
+    'requesting_model',
+    'thinking',
+    'answering',
+  ]);
+  const deltas = events.filter((event) => event.type === 'assistant_content_delta');
+  assert.deepEqual(deltas.map((event) => [event.contentIndex, event.kind, event.delta]), [
+    [0, 'reasoning', 'reasoning'],
+    [1, 'text', 'answer'],
+  ]);
+  const committedEvent = events.find((event) => event.type === 'assistant_message_committed');
+  assert.equal(committedEvent?.type, 'assistant_message_committed');
+  if (committedEvent?.type === 'assistant_message_committed') {
+    assert.equal(committedEvent.message.messageId, 'run-presentation:message:1');
+    assert.equal(committedEvent.message.content, 'answer');
+    assert.equal(committedEvent.message.contentBlocks[0]?.kind, 'reasoning');
+  }
 });
 
 test('commits assistant and tool start before effect, then commits outcome', async () => {
@@ -247,6 +298,7 @@ test('context overflow performs one recovery retry without repeating completed t
   const model: ModelClient = {
     model: 'overflow-test',
     baseUrl: 'memory://overflow',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
     async *streamMessage(): AsyncIterable<ModelEvent> {
       const item = script[index++];
       yield { version: 1, type: 'turn_started', attemptId: `attempt-${index}` };

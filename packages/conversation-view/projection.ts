@@ -64,12 +64,23 @@ function readableStoredPresentation(presentation: Extract<SessionLedgerRecord, {
 
 function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
   const items: ConversationItem[] = [];
+  const finalMessageIds = new Set(records.flatMap((record) => (
+    record.type === 'run_terminal' && record.report.finalMessageId ? [record.report.finalMessageId] : []
+  )));
   const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && record.tool === 'compact_context' ? [record.callId] : []));
   for (const record of records) {
     if (record.type === 'message') {
       const message = record.message;
       if (message.role === 'user') items.push({ id: `message-${record.seq}`, kind: 'user', content: message.content });
-      if (message.role === 'assistant' && message.content?.trim()) items.push({ id: `message-${record.seq}`, kind: 'assistant', content: message.content });
+      if (message.role === 'assistant' && message.content?.trim()) items.push({
+        id: record.messageId ?? `message-${record.seq}`,
+        kind: 'assistant',
+        content: message.content,
+        ...(record.messageId ? { messageId: record.messageId } : {}),
+        runId: record.runId,
+        ...(record.turn !== undefined ? { turn: record.turn } : {}),
+        ...(record.messageId && finalMessageIds.has(record.messageId) ? { final: true } : {}),
+      });
     } else if (record.type === 'tool_completed') {
       if (internalContextCalls.has(record.callId)) continue;
       items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: readableStoredPresentation(record.presentation) });
@@ -124,6 +135,7 @@ export function projectConversation(session: Session, options: { contextWindow?:
     title: item.title,
     state: item.state,
     updatedAt: item.updatedAt,
+    revision: session.revision ?? 0,
     items,
     contextUsage: contextUsage(session, options.contextWindow),
   };

@@ -93,7 +93,7 @@ export function presentTool(input: {
     callRef: input.callRef,
     ...details,
     status,
-    summary: status === 'running' ? '正在执行…' : successSummary(input.tool, input.result, status),
+    summary: status === 'queued' ? '准备执行…' : status === 'running' ? '正在执行…' : successSummary(input.tool, input.result, status),
     ...(raw.text ? { rawOutput: raw.text } : {}),
     ...(raw.truncated ? { truncated: true } : {}),
     ...(input.fileDiff ? {

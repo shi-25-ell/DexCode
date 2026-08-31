@@ -31,6 +31,7 @@ function summaryModel(counter: { calls: number }): ModelClient {
   return {
     model: 'summary-test',
     baseUrl: 'memory://summary',
+    reasoning: { supported: false, requestMode: 'disabled' },
     contextWindow: 20_000,
     maxOutputTokens: 1_000,
     async *streamMessage(): AsyncIterable<ModelEvent> {

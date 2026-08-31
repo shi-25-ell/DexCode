@@ -6,6 +6,7 @@ import type {
   ModelFinishReason,
   ModelResponse,
   ModelUsage,
+  ReasoningCapability,
 } from './types.ts';
 
 type OpenAiCompatibleModelOptions = {
@@ -16,6 +17,7 @@ type OpenAiCompatibleModelOptions = {
   contextWindow?: number;
   providerDisplayName?: string;
   doubaoCompat?: boolean;
+  reasoning?: ReasoningCapability;
   defaults?: {
     temperature?: number;
     top_p?: number;
@@ -135,6 +137,10 @@ function thrownFailure(error: unknown, callerSignal: AbortSignal | undefined, ti
 
 export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModelOptions): ModelClient {
   const { baseUrl, apiKey, model, displayName, contextWindow, providerDisplayName, doubaoCompat = false, defaults = {} } = options;
+  const reasoning = options.reasoning ?? { supported: 'unknown' as const, requestMode: 'provider_default' as const };
+  if (reasoning.supported === false && reasoning.requestMode === 'enabled') {
+    throw new Error('Reasoning cannot be enabled for a model declared unsupported');
+  }
 
   async function chatCompletions(payload: Record<string, unknown>, signal: AbortSignal) {
     const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -159,10 +165,10 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
       stream_options: options.stream_options ?? { include_usage: true },
     };
     if (payload.top_p === undefined) delete payload.top_p;
-    if (doubaoCompat || options.thinking) {
+    if ((doubaoCompat && reasoning.requestMode !== 'disabled') || options.thinking) {
       payload.thinking = options.thinking ?? { type: 'enabled' };
     }
-    if (doubaoCompat || options.reasoning_effort) {
+    if ((doubaoCompat && reasoning.requestMode !== 'disabled') || reasoning.requestMode === 'enabled' || options.reasoning_effort) {
       payload.reasoning_effort = options.reasoning_effort ?? 'medium';
     }
 
@@ -275,6 +281,7 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
     contextWindow,
     maxOutputTokens: defaults.max_tokens ?? 4096,
     providerDisplayName,
+    reasoning,
     streamMessage,
   };
 }

@@ -14,6 +14,14 @@ import type { ModelClient } from '../llm-client/index.ts';
 import { createExecutor } from './executor.ts';
 import type { ConfirmHook, ExecutorHooks, ExecutorSemanticHooks, LoopResult, ReActLoopOptions } from './executor.ts';
 import type { SessionRepository } from './session-contracts.ts';
+import { projectConversation } from '../conversation-view/index.ts';
+import {
+  RunEventSequenceValidator,
+  runEventToLegacy,
+  safeRunNote,
+  type RunEventEnvelope,
+  type RunEventPayload,
+} from '../run-protocol/index.ts';
 import { createContextEngine, defaultContextPolicy, type ContextSection } from '../context-engine/index.ts';
 import { contextCompactionStrategy, projectLegacyHistory } from './context-strategy.ts';
 import { createExternalMcpRegistry } from '../mcp-client/index.ts';
@@ -166,8 +174,9 @@ export function createCodingAgent(
     signal?: AbortSignal,
     semantic?: ExecutorSemanticHooks,
     context?: ReActLoopOptions['context'],
+    presentation?: ReActLoopOptions['presentation'],
   ) {
-    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, signal, semantic, context });
+    return executor.runReActLoop(modelClient, messages, onEvent, hooks, { runId, signal, semantic, context, presentation });
   }
 
   async function runTask(
@@ -176,7 +185,15 @@ export function createCodingAgent(
     selectedFile: string | null,
     onEvent: (event: AgentEvent) => void,
     hooks: ConfirmHook | ExecutorHooks,
-    options: { runId?: string; signal?: AbortSignal; prestarted?: boolean; clientRequestId?: string } = {},
+    options: {
+      runId?: string;
+      signal?: AbortSignal;
+      prestarted?: boolean;
+      clientRequestId?: string;
+      onRunEvent?: (event: RunEventEnvelope) => void;
+      legacyEvents?: boolean;
+      presentationHooks?: (emit: (event: RunEventPayload) => void) => ExecutorHooks;
+    } = {},
   ): Promise<TaskSummary> {
     if (!sessionRepository) throw new Error('sessionRepository is required for runTask');
     const session = await sessionRepository.loadSession(sessionId);
@@ -198,6 +215,25 @@ export function createCodingAgent(
       throw new Error('Workspace Agent environment requires a resolved root path');
     }
     const runId = options.runId ?? crypto.randomUUID();
+    const sequence = new RunEventSequenceValidator(runId);
+    let terminalPublished = false;
+    const publish = (event: RunEventPayload) => {
+      if (terminalPublished) throw new Error(`Run event emitted after terminal: ${event.type}`);
+      const envelope: RunEventEnvelope = {
+        version: 2,
+        runId,
+        seq: sequence.lastSeq + 1,
+        at: new Date().toISOString(),
+        event,
+      };
+      sequence.accept(envelope);
+      options.onRunEvent?.(envelope);
+      if (options.legacyEvents !== false) {
+        for (const legacy of runEventToLegacy(envelope)) onEvent(legacy);
+      }
+      if (event.type === 'run_finished') terminalPublished = true;
+    };
+    const resolvedHooks = options.presentationHooks?.(publish) ?? hooks;
     const startedAt = new Date().toISOString();
     const user: UserMessage = { role: 'user', content: userPrompt };
     if (!options.prestarted) {
@@ -209,7 +245,8 @@ export function createCodingAgent(
         ...(options.clientRequestId ? { clientRequestId: options.clientRequestId } : {}),
       });
     }
-    onEvent({ type: 'task_status', taskId: runId, status: 'planning' });
+    publish({ type: 'run_started', sessionId, isNew: options.prestarted ?? false });
+    publish({ type: 'run_phase_changed', phase: 'preparing_context' });
     let result: LoopResult;
     try {
       const projectMemory = await sessionRepository.readProjectMemory(
@@ -255,10 +292,10 @@ export function createCodingAgent(
         runId,
         executionMessages,
         onEvent,
-        hooks,
+        resolvedHooks,
         options.signal,
         {
-          assistantCommitted: (message) => sessionRepository.appendRunMessage({ sessionId, runId, message }).then(() => undefined),
+          assistantCommitted: (message, identity) => sessionRepository.appendRunMessage({ sessionId, runId, message, ...identity }).then(() => undefined),
           toolStarted: (call) => {
             let input: Record<string, unknown> | undefined;
             try { input = JSON.parse(call.function.arguments) as Record<string, unknown>; } catch { input = undefined; }
@@ -281,6 +318,7 @@ export function createCodingAgent(
           policy: contextPolicy,
           readArtifact: (input) => sessionRepository.readContextArtifact({ sessionId, ...input }),
         } : undefined,
+        { emit: publish },
       );
     } catch (error) {
       result = {
@@ -317,6 +355,7 @@ export function createCodingAgent(
       status: result.status,
       terminationReason: result.terminationReason,
       ...(result.finalContent ? { finalAnswer: result.finalContent } : {}),
+      ...(result.finalMessageId ? { finalMessageId: result.finalMessageId } : {}),
       startedAt,
       completedAt: taskSummary.completedAt,
       modelTurnCount: result.modelTurnCount,
@@ -330,14 +369,26 @@ export function createCodingAgent(
       filesModified: taskSummary.filesModified,
       ...(result.error ? { error: result.error } : {}),
     };
-    await sessionRepository.finishRun({ sessionId, report, summary: taskSummary });
-    onEvent({
-      type: 'task_status',
-      taskId: runId,
-      status: result.status === 'completed' ? 'done' : result.status === 'aborted' ? 'aborted' : 'error',
-      note: result.terminationReason,
+    publish({ type: 'run_phase_changed', phase: 'finalizing' });
+    const finished = await sessionRepository.finishRun({ sessionId, report, summary: taskSummary });
+    const conversation = projectConversation(finished.session, { contextWindow: modelClient.contextWindow });
+    publish({
+      type: 'run_finished',
+      terminal: {
+        status: finished.report.status,
+        reason: finished.report.terminationReason,
+        ...(finished.report.error ? {
+          error: {
+            code: finished.report.error.code,
+            message: safeRunNote(finished.report.error.message) ?? '运行失败',
+          },
+        } : {}),
+      },
+      conversationRevision: finished.session.revision ?? 0,
+      ...(finished.report.finalMessageId ? { finalMessageId: finished.report.finalMessageId } : {}),
+      conversation,
+      legacyResult: { ...taskSummary, output: result.finalContent, run: result, report: finished.report, conversation },
     });
-    onEvent({ type: 'result', result: { ...taskSummary, output: result.finalContent, run: result, report } });
     return taskSummary;
   }
 

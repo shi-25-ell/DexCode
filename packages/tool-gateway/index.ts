@@ -64,6 +64,7 @@ type RunCommandContext = {
 export type AgentToolExecutionContext = {
   origin: ApprovalOrigin;
   onApproval?: ToolApprovalHook;
+  onEffectStart?: () => void;
   signal?: AbortSignal;
   executeExternal?: (name: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
 };
@@ -652,6 +653,7 @@ export function createCodingToolHost(
     }
 
     const args = subject.normalizedInput as Record<string, unknown>;
+    context.onEffectStart?.();
     switch (toolName) {
       case 'read_file': return host.readFile(String(args.path ?? ''));
       case 'write_file': return host.writeFile(String(args.path ?? ''), String(args.content ?? ''));

@@ -6,11 +6,13 @@ test('known DeepSeek API models receive their official context window and produc
   assert.deepEqual(describeModel('deepseek-v4-flash', 'https://api.deepseek.com'), {
     displayName: 'DeepSeek V4 Flash',
     contextWindow: 1_000_000,
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
   });
 });
 
 test('unknown compatible models are not assigned an invented context window', () => {
   assert.deepEqual(describeModel('private-deployment', 'https://gateway.example.com/v1'), {
     displayName: 'private-deployment',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
   });
 });

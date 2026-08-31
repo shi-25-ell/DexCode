@@ -29,6 +29,7 @@ import { captureFileDiff } from './file-diff.ts';
 import { presentTool } from '../conversation-view/tool-presentation.ts';
 import type { ContextEngine, ContextSection, PreparedContext } from '../context-engine/index.ts';
 import type { ContextPolicy, ContextUsageSnapshot } from '../shared/types.ts';
+import type { CommittedAssistantMessage, RunEventPayload, RunPhase } from '../run-protocol/index.ts';
 import { CONTEXT_TOOL_DEFINITIONS, LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitions.ts';
 
 export type CodingToolHost = {
@@ -64,7 +65,7 @@ type SkillRegistry = {
 export type ConfirmHook = (question: string, options?: string[]) => Promise<string>;
 export type ExecutorHooks = { onConfirm?: ConfirmHook; onCommandConfirm?: CommandConfirmHook; onApproval?: ToolApprovalHook };
 export type ExecutorSemanticHooks = {
-  assistantCommitted(message: AssistantMessage): Promise<void>;
+  assistantCommitted(message: AssistantMessage, identity: { messageId: string; turn: number }): Promise<void>;
   toolStarted(call: ToolCall): Promise<void>;
   toolOutcome(message: ToolResultMessage, presentation: import('../shared/types.ts').ToolPresentation): Promise<void>;
   contextPrepared?(prepared: PreparedContext): Promise<void>;
@@ -81,6 +82,7 @@ export type TerminationReason =
 export type LoopResult = {
   messages: ChatMessage[];
   finalContent: string;
+  finalMessageId?: string;
   toolsUsed: string[];
   filesModified: string[];
   fileChanges: FileDiff[];
@@ -103,6 +105,7 @@ export type ReActLoopOptions = {
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
   semantic?: ExecutorSemanticHooks;
+  presentation?: { emit(event: RunEventPayload): void };
   context?: {
     engine: ContextEngine;
     sessionId: string;
@@ -147,6 +150,32 @@ function assistantMessage(response: ModelResponse): AssistantMessage {
     role: 'assistant',
     content: response.content || null,
     ...(calls.length > 0 ? { tool_calls: calls } : {}),
+  };
+}
+
+const MAX_REASONING_PRESENTATION_CHARS = 64_000;
+
+function committedAssistantMessage(response: ModelResponse, turn: number, messageId: string): CommittedAssistantMessage {
+  const reasoning = response.reasoning.slice(0, MAX_REASONING_PRESENTATION_CHARS);
+  const reasoningTruncated = reasoning.length < response.reasoning.length;
+  const contentBlocks: CommittedAssistantMessage['contentBlocks'] = [
+    ...(reasoning ? [{ contentIndex: 0, kind: 'reasoning' as const, content: reasoning, ...(reasoningTruncated ? { truncated: true } : {}) }] : []),
+    ...(response.content ? [{ contentIndex: 1, kind: 'text' as const, content: response.content }] : []),
+  ];
+  return {
+    messageId,
+    turn,
+    content: response.content,
+    contentBlocks,
+    toolCalls: response.toolCalls.map((call, index) => ({
+      contentIndex: index + 2,
+      callId: call.id,
+      name: call.name,
+      arguments: call.arguments,
+    })),
+    finishReason: response.finishReason,
+    ...(response.usage ? { usage: response.usage } : {}),
+    ...(reasoningTruncated ? { truncated: true } : {}),
   };
 }
 
@@ -224,12 +253,34 @@ async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<boole
 async function* observeModelEvents(
   events: AsyncIterable<ModelEvent>,
   onEvent: (event: AgentEvent) => void,
+  presentation?: {
+    messageId: string;
+    emit(event: RunEventPayload): void;
+    phase(phase: RunPhase): void;
+  },
 ): AsyncIterable<ModelEvent> {
   for await (const event of events) {
     if (event.type === 'text_delta' && event.delta) {
-      onEvent({ type: 'chunk', chunk: event.delta });
+      if (presentation) {
+        presentation.phase('answering');
+        presentation.emit({ type: 'assistant_content_delta', messageId: presentation.messageId, contentIndex: 1, kind: 'text', delta: event.delta });
+      } else onEvent({ type: 'chunk', chunk: event.delta });
     } else if (event.type === 'reasoning_delta' && event.delta) {
-      onEvent({ type: 'reasoning_chunk', chunk: event.delta });
+      if (presentation) {
+        presentation.phase('thinking');
+        presentation.emit({ type: 'assistant_content_delta', messageId: presentation.messageId, contentIndex: 0, kind: 'reasoning', delta: event.delta });
+      } else onEvent({ type: 'reasoning_chunk', chunk: event.delta });
+    } else if (event.type === 'tool_call_delta' && event.argumentsDelta) {
+      if (presentation) {
+        presentation.phase('preparing_tool');
+        presentation.emit({
+          type: 'assistant_content_delta',
+          messageId: presentation.messageId,
+          contentIndex: event.index + 2,
+          kind: 'tool_input',
+          delta: event.argumentsDelta,
+        });
+      }
     }
     yield event;
   }
@@ -295,6 +346,7 @@ export function createExecutor(
       const fileChanges: FileDiff[] = [];
       const skillsUsed: string[] = [];
       let finalContent = '';
+      let finalMessageId: string | undefined;
       let modelTurnCount = 0;
       let modelAttemptCount = 0;
       let usage: LoopResult['usage'] = { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 };
@@ -303,10 +355,17 @@ export function createExecutor(
       const contextSummaryUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
       let forceSummaryNext = false;
       let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
-      const base = () => ({ messages: loopMessages, finalContent, toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage });
+      const base = () => ({ messages: loopMessages, finalContent, ...(finalMessageId ? { finalMessageId } : {}), toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage });
       const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
       const maxAttempts = options.maxModelAttempts ?? maxTurns * 2;
       const maxRetries = options.maxRetriesPerTurn ?? 1;
+      let activePhase: RunPhase | undefined;
+      const emitPresentation = (event: RunEventPayload) => options.presentation?.emit(event);
+      const emitPhase = (phase: RunPhase) => {
+        if (!options.presentation || activePhase === phase) return;
+        activePhase = phase;
+        emitPresentation({ type: 'run_phase_changed', phase });
+      };
 
       while (modelTurnCount < maxTurns) {
         if (signal.aborted) return aborted(base());
@@ -315,12 +374,14 @@ export function createExecutor(
         let overflowRecovered = false;
         let recoverNext = false;
         let response: ModelResponse | undefined;
+        const messageId = `${runId}:message:${modelTurnCount}`;
+        let messageStarted = false;
         while (!response) {
           if (modelAttemptCount >= maxAttempts) {
             return { ...base(), status: 'limited', terminationReason: 'model_attempt_limit' };
           }
           modelAttemptCount += 1;
-          onEvent({ type: 'task_status', taskId: runId, status: 'executing', note: `model attempt ${modelAttemptCount}` });
+          if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'executing', note: `model attempt ${modelAttemptCount}` });
           const definitions = await buildToolDefinitions(Boolean(options.context));
           currentDefinitions = definitions;
           let prepared: PreparedContext | undefined;
@@ -338,7 +399,10 @@ export function createExecutor(
               policy: options.context.policy,
               forceSummary: forceSummaryNext,
               signal,
-              onActivity: (presentation: import('../shared/types.ts').ContextPresentation) => onEvent({ type: 'context_activity', presentation }),
+              onActivity: (presentation: import('../shared/types.ts').ContextPresentation) => {
+                if (options.presentation) emitPresentation({ type: 'context_activity_changed', presentation });
+                else onEvent({ type: 'context_activity', presentation });
+              },
             };
             prepared = recoverNext
               ? await options.context.engine.recoverFromOverflow(prepareInput)
@@ -348,11 +412,10 @@ export function createExecutor(
             await options.semantic?.contextPrepared?.(prepared);
             requestMessages = prepared.messages;
             latestContextUsage = prepared.usage;
-            onEvent({ type: 'context_usage', ...prepared.usage });
+            if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: prepared.usage });
+            else onEvent({ type: 'context_usage', ...prepared.usage });
             if (prepared.activity) {
-              onEvent({
-                type: 'context_activity',
-                presentation: {
+              const contextPresentation = {
                   operationRef: prepared.activity.operationRef,
                   status: 'completed',
                   beforeTokens: prepared.activity.beforeTokens,
@@ -365,8 +428,9 @@ export function createExecutor(
                   summarizedMessages: prepared.activity.summarizedMessages,
                   retainedConversationSegments: prepared.activity.retainedConversationSegments,
                   retainedMessageCount: prepared.activity.retainedMessageCount,
-                },
-              });
+                } as const;
+              if (options.presentation) emitPresentation({ type: 'context_activity_changed', presentation: contextPresentation });
+              else onEvent({ type: 'context_activity', presentation: contextPresentation });
             }
             const summary = prepared.summaryRecord?.summaryUsage;
             if (summary) {
@@ -375,12 +439,17 @@ export function createExecutor(
               contextSummaryUsage.totalTokens += summary.totalTokens ?? 0;
             }
           }
+          emitPhase('requesting_model');
+          if (options.presentation && !messageStarted) {
+            messageStarted = true;
+            emitPresentation({ type: 'assistant_message_started', turn: modelTurnCount, messageId });
+          }
           const turn = await collectModelTurn(observeModelEvents(modelClient.streamMessage(requestMessages, {
             tools: definitions,
             tool_choice: 'auto',
             parallel_tool_calls: false,
             signal,
-          }), onEvent));
+          }), onEvent, options.presentation ? { messageId, emit: emitPresentation, phase: emitPhase } : undefined));
           if (signal.aborted || (turn.status === 'failed' && turn.failure.category === 'cancelled')) {
             return aborted(base());
           }
@@ -388,10 +457,12 @@ export function createExecutor(
             if (turn.failure.category === 'context_overflow' && options.context && !overflowRecovered && !turn.producedSemanticOutput) {
               overflowRecovered = true;
               recoverNext = true;
+              emitPhase('retrying');
               continue;
             }
             if (turn.failure.retryable && !turn.producedSemanticOutput && retries < maxRetries) {
               retries += 1;
+              emitPhase('retrying');
               const waited = await waitForRetry(turn.failure.retryAfterMs ?? 250, signal);
               if (!waited) return aborted(base());
               continue;
@@ -439,10 +510,12 @@ export function createExecutor(
               breakdown,
               breakdownEstimated: true,
             };
-            onEvent({ type: 'context_usage', ...latestContextUsage });
+            if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: latestContextUsage });
+            else onEvent({ type: 'context_usage', ...latestContextUsage });
           } else if (prepared && options.context) {
             latestContextUsage = { ...prepared.usage, timing: 'last_request' };
-            onEvent({ type: 'context_usage', ...latestContextUsage });
+            if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: latestContextUsage });
+            else onEvent({ type: 'context_usage', ...latestContextUsage });
           }
           response = turn.response;
         }
@@ -458,14 +531,17 @@ export function createExecutor(
             asOfTurn: modelTurnCount,
             asOfAttempt: modelAttemptCount,
           };
-          onEvent({ type: 'context_usage', ...latestContextUsage });
+          if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: latestContextUsage });
+          else onEvent({ type: 'context_usage', ...latestContextUsage });
         }
         finalContent = response.content || finalContent;
         const assistant = assistantMessage(response);
-        await options.semantic?.assistantCommitted(assistant);
+        await options.semantic?.assistantCommitted(assistant, { messageId, turn: modelTurnCount });
+        emitPresentation({ type: 'assistant_message_committed', turn: modelTurnCount, message: committedAssistantMessage(response, modelTurnCount, messageId) });
         workingMessages.push(assistant);
         loopMessages.push(assistant);
         if (response.toolCalls.length === 0) {
+          finalMessageId = messageId;
           if (response.finishReason === 'length') {
             return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
           }
@@ -503,25 +579,44 @@ export function createExecutor(
           let fileDiff: FileDiff | undefined;
           const semanticContextTool = toolName === 'compact_context';
           const invalid = validationError(currentDefinitions, toolName, args);
-          try {
-            if (invalid) {
-              toolResult = { status: 'rejected', error: invalid };
+          let toolRunning = false;
+          const markToolRunning = () => {
+            if (semanticContextTool || toolRunning) return;
+            toolRunning = true;
+            emitPhase('running_tool');
+            if (options.presentation) {
+              emitPresentation({
+                type: 'tool_progress',
+                callId: call.id,
+                presentation: presentTool({ callRef: call.id, tool: toolName, args, status: 'running' }),
+              });
             } else {
-              await options.semantic?.toolStarted(legacyCall);
-              if (!semanticContextTool) {
-                onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'running' });
-                onEvent({ type: 'tool_view', presentation: presentTool({ callRef: call.id, tool: toolName, args, status: 'running' }) });
+              onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'running' });
+              onEvent({ type: 'tool_view', presentation: presentTool({ callRef: call.id, tool: toolName, args, status: 'running' }) });
+            }
+          };
+          try {
+            await options.semantic?.toolStarted(legacyCall);
+            if (!semanticContextTool) {
+              if (options.presentation) {
+                emitPresentation({
+                  type: 'tool_started',
+                  callId: call.id,
+                  presentation: presentTool({ callRef: call.id, tool: toolName, args, status: 'queued' }),
+                });
               }
             }
+            if (invalid) toolResult = { status: 'rejected', error: invalid };
             if (invalid) {
               // Rejected calls still receive a paired tool result but never reach an execution adapter.
             } else if (toolName === 'ask_user') {
               if (!onConfirm) toolResult = { error: 'confirmation unavailable' };
               else {
-                onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
+                if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
                 toolResult = { answer: await onConfirm(String(args.question ?? 'Please confirm'), Array.isArray(args.options) ? args.options.map(String) : undefined) };
               }
             } else if (toolName === 'read_artifact' && options.context) {
+              markToolRunning();
               toolResult = await options.context.readArtifact({
                 ref: String(args.ref ?? ''),
                 ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
@@ -531,24 +626,34 @@ export function createExecutor(
               toolResult = { status: 'scheduled', message: '上下文将在当前工具批次完成后整理' };
               forceSummaryNext = true;
             } else if (toolName === 'list_skills' && skillRegistry) {
+              markToolRunning();
               toolResult = { skills: skillRegistry.listSkills() };
-              onEvent({ type: 'skill', skill: '*', action: 'listed', summary: 'Listed available skills' });
+              if (options.presentation) emitPresentation({ type: 'skill_activity', skill: '*', action: 'listed' });
+              else onEvent({ type: 'skill', skill: '*', action: 'listed', summary: 'Listed available skills' });
             } else if (toolName === 'read_skill' && skillRegistry) {
+              markToolRunning();
               const name = String(args.name ?? '');
               toolResult = skillRegistry.readSkill(name);
-              if ((toolResult as SkillReadResult).ok) onEvent({ type: 'skill', skill: name, action: 'read', summary: `Loaded skill: ${name}` });
+              if ((toolResult as SkillReadResult).ok) {
+                if (options.presentation) emitPresentation({ type: 'skill_activity', skill: name, action: 'read' });
+                else onEvent({ type: 'skill', skill: name, action: 'read', summary: `Loaded skill: ${name}` });
+              }
             } else if (toolName === 'activate_skill' && skillRegistry) {
+              markToolRunning();
               const name = String(args.name ?? '');
               const trigger = args.trigger === 'explicit' ? 'explicit' : 'implicit';
               toolResult = skillRegistry.activateSkill(name, trigger, typeof args.reason === 'string' ? args.reason : undefined);
               if ((toolResult as SkillActivationResult).ok) {
                 if (!skillsUsed.includes(name)) skillsUsed.push(name);
-                onEvent({ type: 'skill', skill: name, action: 'activated', trigger, summary: `Activated skill: ${name}` });
+                if (options.presentation) emitPresentation({ type: 'skill_activity', skill: name, action: 'activated' });
+                else onEvent({ type: 'skill', skill: name, action: 'activated', trigger, summary: `Activated skill: ${name}` });
               }
             } else if (toolName === 'deactivate_skill' && skillRegistry) {
+              markToolRunning();
               const name = String(args.name ?? '');
               toolResult = skillRegistry.deactivateSkill(name, typeof args.reason === 'string' ? args.reason : undefined);
-              onEvent({ type: 'skill', skill: name, action: 'deactivated', summary: `Deactivated skill: ${name}` });
+              if (options.presentation) emitPresentation({ type: 'skill_activity', skill: name, action: 'deactivated' });
+              else onEvent({ type: 'skill', skill: name, action: 'deactivated', summary: `Deactivated skill: ${name}` });
             } else {
               const fn = toolFns[toolName];
               if (fn) {
@@ -557,6 +662,7 @@ export function createExecutor(
                     origin: 'agent',
                     onApproval,
                     signal,
+                    onEffectStart: markToolRunning,
                   });
                   if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
                     const captured = await captureFileDiff(codingToolHost.readFile, args.path, execute);
@@ -570,14 +676,17 @@ export function createExecutor(
                     toolResult = await execute();
                   }
                 } else if (toolName === 'run_command' && onCommandConfirm) {
+                  markToolRunning();
                   toolResult = await codingToolHost.runCommand(String(args.command ?? ''), { onCommandConfirm, signal });
                 } else if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
+                  markToolRunning();
                   const captured = await captureFileDiff(codingToolHost.readFile, args.path, () => fn(args));
                   toolResult = captured.result;
                   fileDiff = captured.diff;
                   fileChanges.push(captured.diff);
                   filesModified.push(args.path);
                 } else {
+                  markToolRunning();
                   toolResult = await fn(args);
                 }
               } else if (toolName.startsWith('mcp__') && externalMcpRegistry) {
@@ -586,15 +695,16 @@ export function createExecutor(
                     origin: 'agent',
                     onApproval,
                     signal,
+                    onEffectStart: markToolRunning,
                     executeExternal: (name, input, executionSignal) => externalMcpRegistry.callTool(name, input, executionSignal),
                   });
                 } else if (!onConfirm) {
                   toolResult = { status: 'denied', error: 'external MCP tool requires an approval channel' };
                 } else {
-                  onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
+                  if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
                   const decision = await onConfirm(`Allow external MCP tool ${toolName}?`, ['allow', 'deny']);
                   toolResult = decision === 'allow'
-                    ? await externalMcpRegistry.callTool(toolName, args, signal)
+                    ? await (async () => { markToolRunning(); return externalMcpRegistry.callTool(toolName, args, signal); })()
                     : { status: 'denied', error: 'external MCP tool denied' };
                 }
               } else {
@@ -608,7 +718,7 @@ export function createExecutor(
           }
           if (!semanticContextTool) {
             onEvent({ type: 'tool', tool: toolName, summary: `Tool call: ${toolName}`, detail: toolSummary(toolResult) });
-            onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'settled' });
+            if (!options.presentation) onEvent({ type: 'tool_status', callId: call.id, tool: toolName, status: 'settled' });
           }
           const toolMessage: ToolResultMessage = {
             role: 'tool',
@@ -617,8 +727,9 @@ export function createExecutor(
             content: stringifyToolResult(toolResult),
           };
           const presentation = presentTool({ callRef: call.id, tool: toolName, args, result: toolResult, fileDiff });
-          if (!semanticContextTool) onEvent({ type: 'tool_view', presentation });
+          if (!semanticContextTool && !options.presentation) onEvent({ type: 'tool_view', presentation });
           await options.semantic?.toolOutcome(toolMessage, presentation);
+          if (!semanticContextTool && options.presentation) emitPresentation({ type: 'tool_finished', callId: call.id, presentation });
           workingMessages.push(toolMessage);
           loopMessages.push(toolMessage);
         }

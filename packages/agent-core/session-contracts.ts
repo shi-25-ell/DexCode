@@ -27,6 +27,8 @@ export type AppendRunMessageInput = {
   sessionId: string;
   runId: string;
   message: ChatMessage;
+  messageId?: string;
+  turn?: number;
 };
 
 export type MarkToolStartedInput = {

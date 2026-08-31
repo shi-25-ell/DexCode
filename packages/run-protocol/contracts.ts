@@ -114,6 +114,7 @@ export type RunEventPayload =
       conversationRevision: number;
       finalMessageId?: string;
       conversation: ConversationViewSnapshot;
+      legacyResult?: unknown;
     }
   | { type: 'resync_required'; reason: 'replay_window_exceeded'; conversation?: ConversationViewSnapshot }
   | { type: 'stream_error'; message: string };
@@ -127,4 +128,3 @@ export type RunEventEnvelope<T extends RunEventPayload = RunEventPayload> = {
 };
 
 export type RunEventSink = (envelope: RunEventEnvelope) => void;
-
