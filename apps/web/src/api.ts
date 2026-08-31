@@ -1,7 +1,7 @@
 import { createParser } from 'eventsource-parser';
 import type { RunEventEnvelope } from '../../../packages/run-protocol/contracts';
 import { isDroppableRunEvent, parseRunEventEnvelope } from '../../../packages/run-protocol/validation';
-import type { Capability, ConversationListItem, ConversationScope, ConversationSnapshot, QueueDelivery, QueueMutationOutcome } from './types';
+import type { AgentActivityEnvelope, AgentDetail, AgentTreeSnapshot, Capability, ConversationListItem, ConversationScope, ConversationSnapshot, QueueDelivery, QueueMutationOutcome } from './types';
 
 function workspaceHeaders(workspaceRef?: string): HeadersInit {
   return workspaceRef ? { 'X-Workspace-Ref': workspaceRef } : {};
@@ -255,6 +255,49 @@ export async function streamQueueResume(input: { scope: ConversationScope; sessi
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : '服务端返回了无法解析的流式事件');
       }
+    },
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { value, done } = await reader.read();
+    parser.feed(decoder.decode(value, { stream: !done }));
+    if (done) break;
+  }
+  parser.reset({ consume: true });
+}
+
+export async function getAgentTree(scope: ConversationScope, sessionId: string): Promise<AgentTreeSnapshot | null> {
+  return (await apiJson<{ agents: AgentTreeSnapshot | null }>(`/api/session/${encodeURIComponent(sessionId)}/agents`, {
+    workspaceRef: scopeWorkspaceRef(scope),
+  })).agents;
+}
+
+export async function getAgentDetail(scope: ConversationScope, sessionId: string, agentId: string): Promise<AgentDetail> {
+  return apiJson<AgentDetail>(`/api/session/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`, {
+    workspaceRef: scopeWorkspaceRef(scope),
+  });
+}
+
+export async function stopChildAgent(scope: ConversationScope, sessionId: string, agentId: string): Promise<void> {
+  await apiJson(`/api/session/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}/stop`, {
+    method: 'POST', workspaceRef: scopeWorkspaceRef(scope), body: JSON.stringify({ reason: 'Stopped from Agent activity view' }),
+  });
+}
+
+export async function streamAgentActivity(input: {
+  scope: ConversationScope; sessionId: string; afterSeq?: number; signal: AbortSignal; onEvent(event: AgentActivityEnvelope): void;
+}): Promise<void> {
+  const response = await fetch(`/api/session/${encodeURIComponent(input.sessionId)}/agents/events?afterSeq=${input.afterSeq ?? 0}`, {
+    headers: { Accept: 'text/event-stream', ...workspaceHeaders(scopeWorkspaceRef(input.scope)) }, signal: input.signal,
+  });
+  if (!response.ok || !response.body) throw new Error(`Agent activity stream failed (${response.status})`);
+  const parser = createParser({
+    maxBufferSize: 512 * 1024,
+    onEvent(message) {
+      const envelope = JSON.parse(message.data) as AgentActivityEnvelope;
+      if (envelope.version !== 1 || envelope.sessionId !== input.sessionId || !Number.isSafeInteger(envelope.seq) || !envelope.event?.type) return;
+      input.onEvent(envelope);
     },
   });
   const reader = response.body.getReader();

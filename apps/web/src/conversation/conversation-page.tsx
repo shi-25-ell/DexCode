@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Square } from 'lucide-react';
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopConversationRun, streamConversation, streamQueueResume } from '../api';
+import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getAgentTree, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopChildAgent, stopConversationRun, streamAgentActivity, streamConversation, streamQueueResume } from '../api';
 import type { RunEventEnvelope } from '../../../../packages/run-protocol/contracts';
 import { AppShell } from '../shell/app-shell';
 import type { ContextUsage, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueMutationOutcome } from '../types';
@@ -24,6 +24,8 @@ import { UserMessage } from './user-message';
 import { initialQueueState, queueReducer } from './queue-reducer';
 import { QueuedMessageCard } from './queued-message-card';
 import { deliveryForFollowUp, readFollowUpBehavior, writeFollowUpBehavior } from '../settings/follow-up-behavior';
+import { agentActivityReducer, initialAgentActivityState } from './agent-reducer';
+import { AgentActivityCard, AgentDrawer } from './agent-activity';
 
 type PageAction =
   | { type: 'hydrate'; snapshot: ConversationSnapshot }
@@ -88,6 +90,9 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const navigate = useNavigate();
   const [state, dispatch] = useReducer(pageReducer, emptySnapshot, hydrateRunPresentation);
   const [queueState, queueDispatch] = useReducer(queueReducer, initialQueueState);
+  const [agentState, agentDispatch] = useReducer(agentActivityReducer, initialAgentActivityState);
+  const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>();
   const [prompt, setPrompt] = useState('');
   const [followUpBehavior, setFollowUpBehavior] = useState<FollowUpBehavior>(() => readFollowUpBehavior());
   const [queueBusy, setQueueBusy] = useState<Set<string>>(() => new Set());
@@ -114,8 +119,13 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   });
   const meta = useQuery({
     queryKey: ['meta', workspaceRef],
-    queryFn: () => apiJson<{ model: { displayName: string; contextWindow?: number } }>('/api/meta', { workspaceRef }),
+    queryFn: () => apiJson<{ model: { displayName: string; contextWindow?: number }; multiAgentEnabled?: boolean }>('/api/meta', { workspaceRef }),
     staleTime: 60_000,
+  });
+  const agents = useQuery({
+    queryKey: ['agents', scope, conversationRef],
+    queryFn: () => getAgentTree(scope, conversationRef!),
+    enabled: scope.kind === 'workspace' && Boolean(conversationRef) && meta.data?.multiAgentEnabled === true,
   });
   const loadingConversation = shouldShowConversationLoading({
     hasConversationRef: Boolean(conversationRef),
@@ -136,11 +146,36 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     if (!materializedCurrentDraft && (previousIdentity !== conversationIdentity || !conversationRef)) {
       queueDispatch({ type: 'session_reset' });
       queuedContentRef.current.clear();
+      agentDispatch({ type: 'reset' });
+      setAgentDrawerOpen(false);
+      setSelectedAgentId(undefined);
     }
     if (!conversationRef) {
       dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], queuedItems: [], queuePaused: false, revision: 0, contextUsage: { source: 'unknown', timing: 'next_request' } } });
     }
   }, [conversationIdentity, conversationRef, scopeIdentity]);
+
+  useEffect(() => {
+    if (agents.data !== undefined) agentDispatch({ type: 'hydrate', tree: agents.data });
+  }, [agents.data]);
+
+  useEffect(() => {
+    if (scope.kind !== 'workspace' || !conversationRef || meta.data?.multiAgentEnabled !== true) return;
+    const controller = new AbortController();
+    void streamAgentActivity({
+      scope, sessionId: conversationRef, signal: controller.signal,
+      onEvent(envelope) {
+        agentDispatch({ type: 'event', envelope });
+        if (envelope.event.type === 'agent_resync_required') void queryClient.invalidateQueries({ queryKey: ['agents', scope, conversationRef] });
+        if (envelope.event.type === 'agent_run_finished' || envelope.event.type === 'agent_recovered') void queryClient.invalidateQueries({ queryKey: ['agent-detail', scope, conversationRef] });
+      },
+    }).catch((error) => { if (!controller.signal.aborted) console.warn('Agent activity stream ended', error); });
+    return () => controller.abort();
+  }, [conversationRef, meta.data?.multiAgentEnabled, queryClient, scopeIdentity]);
+
+  useEffect(() => {
+    if (agentState.needsResync && conversationRef) void queryClient.invalidateQueries({ queryKey: ['agents', scope, conversationRef] });
+  }, [agentState.needsResync, conversationRef, queryClient, scopeIdentity]);
 
   useEffect(() => {
     if (snapshot.data && snapshot.data.ref === conversationRef && !streamingRef.current) {
@@ -396,6 +431,24 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     }
   };
   const timeline = useMemo(() => state.committedItems, [state.committedItems]);
+  const agentTree = agentState.tree ?? snapshot.data?.agents ?? null;
+  const trailingGroups = useMemo(() => {
+    if (!agentTree) return [];
+    const inlineAgentIds = new Set(timeline.flatMap((item) => item.kind === 'agent_activity' ? item.agentIds : []));
+    const groups = new Map<string, string[]>();
+    for (const agent of agentTree.agents) {
+      if (inlineAgentIds.has(agent.agentId)) continue;
+      const key = agent.delegationGroupId ?? agent.agentId;
+      groups.set(key, [...(groups.get(key) ?? []), agent.agentId]);
+    }
+    return [...groups.values()];
+  }, [agentTree, timeline]);
+  const openAgent = (agentId?: string) => { setSelectedAgentId(agentId); setAgentDrawerOpen(true); };
+  const stopAgent = async (agentId: string) => {
+    if (!conversationRef) return;
+    try { await stopChildAgent(scope, conversationRef, agentId); }
+    catch (error) { setQueueNotice(error instanceof Error ? error.message : '停止 Agent 失败'); }
+  };
   const effectiveUsage = useMemo<ContextUsage>(() => {
     const contextWindowTokens = state.contextUsage.contextWindowTokens ?? meta.data?.model.contextWindow;
     const usedTokens = state.contextUsage.usedTokens ?? (state.committedItems.length === 0 ? 0 : undefined);
@@ -421,7 +474,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     setAtBottom(true);
   };
   return (
-    <AppShell scope={scope} conversationRef={conversationRef} title={loadingConversation ? '加载会话…' : state.title} status={state.status}>
+    <AppShell scope={scope} conversationRef={conversationRef} title={loadingConversation ? '加载会话…' : state.title} status={state.status} agents={agentTree && agentTree.agents.length > 0 ? { running: agentTree.agents.filter((agent) => agent.status === 'running' || agent.status === 'stopping').length, total: agentTree.agents.length, onOpen: () => openAgent() } : undefined}>
       <div className="conversation-layout">
         <div
           className="conversation-scroll"
@@ -453,9 +506,11 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             }
             if (item.kind === 'tool') return <ToolCard key={item.id} tool={item.tool} />;
             if (item.kind === 'context') return <ContextCard key={item.id} context={item.context} />;
+            if (item.kind === 'agent_activity') return agentTree ? <AgentActivityCard key={item.id} tree={agentTree} agentIds={item.agentIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} /> : null;
             if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} />;
             return <div key={item.id} className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;
           })}
+          {agentTree ? trailingGroups.map((agentIds) => <AgentActivityCard key={`agents-${agentIds.join('-')}`} tree={agentTree} agentIds={agentIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} />) : null}
           {state.activeRun ? <RunActivity run={state.activeRun} workspaceRef={workspaceRef} needsResync={state.needsResync} /> : null}
           {state.streamError ? <div className="error-card"><strong>连接未完成</strong><span>{state.streamError}</span></div> : null}
           {state.terminal && state.terminal.status !== 'completed' ? (
@@ -541,6 +596,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           </div>
         </form>
       </div>
+      {agentTree && conversationRef ? <AgentDrawer open={agentDrawerOpen} onOpenChange={setAgentDrawerOpen} tree={agentTree} scope={scope} sessionId={conversationRef} selectedAgentId={selectedAgentId} onSelect={setSelectedAgentId} onStop={(agentId) => void stopAgent(agentId)} /> : null}
     </AppShell>
   );
 }

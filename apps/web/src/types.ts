@@ -39,6 +39,7 @@ export type ConversationItem =
   | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
+  | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentIds: string[] }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command' | 'tool'; title: string; target?: string; reason?: string; toolName?: string; effect?: ApprovalEffect; fingerprint?: string; options: string[]; resolved?: string }
   | { id: string; kind: 'error'; title: string; message: string };
 
@@ -94,7 +95,24 @@ export type ConversationSnapshot = {
   revision: number;
   items: ConversationItem[];
   contextUsage: ContextUsage;
+  agents?: AgentTreeSnapshot | null;
 };
+
+export type AgentDefinitionView = { name: string; description: string };
+export type AgentRecordView = {
+  agentId: string; sessionId: string; rootAgentId: string; parentAgentId: string | null; createdByRunId: string;
+  name: string; task: string; contextMode: 'fresh' | 'fork'; isolation: 'shared' | 'worktree'; definitionName: string;
+  delegationGroupId?: string; status: 'creating' | 'running' | 'stopping' | 'idle'; currentRunId?: string; lastRunId?: string;
+  createdAt: string; updatedAt: string;
+};
+export type AgentRunView = {
+  agentRunId: string; agentId: string; invokedByRunId: string; trigger: 'spawn' | 'followup';
+  status: 'running' | 'completed' | 'failed' | 'interrupted' | 'limited'; input: string; startedAt: string; completedAt?: string;
+  result?: { finalContent: string; terminationReason: string; toolsUsed: string[]; filesModified: string[]; usage?: { totalTokens: number }; error?: { code: string; message: string } };
+};
+export type AgentTreeSnapshot = { version: 1; sessionId: string; rootAgentId: string; revision: number; agents: AgentRecordView[]; runs: AgentRunView[] };
+export type AgentDetail = { agent: AgentRecordView; runs: AgentRunView[]; messages: Array<{ role: string; content?: string; name?: string }> };
+export type AgentActivityEnvelope = { version: 1; sessionId: string; seq: number; at: string; event: { type: string; agent?: AgentRecordView; agentId?: string; run?: AgentRunView; status?: AgentRecordView['status']; revision?: number } };
 
 export type QueueDelivery = 'next_run' | 'steer';
 export type FollowUpBehavior = 'queue' | 'steer';
