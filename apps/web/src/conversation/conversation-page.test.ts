@@ -6,11 +6,17 @@ import { ApprovalCard } from './approval-card';
 import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
-import { shouldShowConversationLoading } from './conversation-page';
+import { shouldShowConversationLoading, terminalTitle } from './conversation-page';
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-id' });
 
 describe('conversation presentation', () => {
+  it('labels independent run limits without collapsing them into one message', () => {
+    expect(terminalTitle('limited', 'model_turn_limit')).toBe('模型回合数达到限制');
+    expect(terminalTitle('limited', 'model_attempt_limit')).toBe('模型尝试次数达到限制');
+    expect(terminalTitle('limited', 'output_token_limit')).toBe('单次模型输出达到长度限制');
+  });
+
   it('keeps the optimistic timeline visible while a new draft Session is materializing', () => {
     expect(shouldShowConversationLoading({
       hasConversationRef: true,

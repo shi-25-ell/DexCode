@@ -14,7 +14,7 @@ import type {
 import { createApprovalFingerprint, createApprovalPolicy, type ToolApprovalHook } from './approval-policy.ts';
 import type { ApprovalModeStore } from './approval-mode-store.ts';
 import {
-  executeCommand,
+  createCommandRunner,
   type CommandConfirmHook,
   type RunCommandResult,
 } from './run-command.ts';
@@ -59,6 +59,8 @@ type RunCommandContext = {
   onCommandConfirm?: CommandConfirmHook;
   signal?: AbortSignal;
   approvalGranted?: boolean;
+  timeoutMs?: number;
+  runInBackground?: boolean;
 };
 
 export type AgentToolExecutionContext = {
@@ -89,6 +91,8 @@ async function safeExistingPath(root: string, requested: string): Promise<string
 function buildToolDefinitions(
   workspaceService: WorkspaceService,
   runCommandSafe: (command: string, ctx?: RunCommandContext) => Promise<RunCommandResult>,
+  readCommandOutput: (taskId: string, waitMs?: number) => Promise<RunCommandResult>,
+  stopCommand: (taskId: string) => Promise<RunCommandResult>,
   readLintsFn: (path?: string) => Promise<unknown>,
   diffFileFn: (path: string, snapshotId?: string) => Promise<unknown>,
 ) {
@@ -158,11 +162,32 @@ function buildToolDefinitions(
       inputSchema: buildInputSchema(
         {
           command: { type: 'string', minLength: 1 },
+          timeout_ms: { type: 'number', minimum: 1000, maximum: 600000 },
+          run_in_background: { type: 'boolean' },
         },
         ['command'],
       ),
-      handler: ({ command }: Record<string, unknown>) =>
-        runCommandSafe(String(command ?? '')),
+      handler: ({ command, timeout_ms, run_in_background }: Record<string, unknown>) =>
+        runCommandSafe(String(command ?? ''), {
+          ...(typeof timeout_ms === 'number' ? { timeoutMs: timeout_ms } : {}),
+          ...(typeof run_in_background === 'boolean' ? { runInBackground: run_in_background } : {}),
+        }),
+    },
+    {
+      name: 'read_command_output',
+      description: '读取后台命令的输出和当前状态，可等待最多 60 秒',
+      inputSchema: buildInputSchema(
+        { task_id: { type: 'string', minLength: 1 }, wait_ms: { type: 'number', minimum: 0, maximum: 60000 } },
+        ['task_id'],
+      ),
+      handler: ({ task_id, wait_ms }: Record<string, unknown>) =>
+        readCommandOutput(String(task_id ?? ''), typeof wait_ms === 'number' ? wait_ms : undefined),
+    },
+    {
+      name: 'stop_command',
+      description: '停止仍在运行的后台命令',
+      inputSchema: buildInputSchema({ task_id: { type: 'string', minLength: 1 } }, ['task_id']),
+      handler: ({ task_id }: Record<string, unknown>) => stopCommand(String(task_id ?? '')),
     },
     {
       name: 'read_lints',
@@ -306,6 +331,7 @@ export function createCodingToolHost(
   options: { approvalModeStore?: Pick<ApprovalModeStore, 'getMode'> } = {},
 ) {
   const whitelistStore = createCommandWhitelistStore(workspaceService.projectDir);
+  const commandRunner = createCommandRunner();
   const cwd = () => workspaceService.getRootDir();
   const approvalMode = options.approvalModeStore ?? { getMode: () => 'allowlist' as const };
   const approvalPolicy = createApprovalPolicy();
@@ -327,7 +353,11 @@ export function createCodingToolHost(
     }
 
     if (!validation.needsConfirmation || ctx.approvalGranted) {
-      const result = await executeCommand(validation.normalizedCommand, cwd(), validation.timeoutMs, ctx.signal);
+      const result = await commandRunner.run(validation.normalizedCommand, cwd(), {
+        foregroundTimeoutMs: Math.max(1_000, Math.min(600_000, ctx.timeoutMs ?? validation.timeoutMs)),
+        runInBackground: ctx.runInBackground,
+        signal: ctx.signal,
+      });
       return { ...result, risk: validation.risk, whitelisted: validation.whitelisted };
     }
 
@@ -359,7 +389,11 @@ export function createCodingToolHost(
       await whitelistStore.addFromCommand(validation.normalizedCommand);
     }
 
-    const result = await executeCommand(validation.normalizedCommand, cwd(), validation.timeoutMs, ctx.signal);
+    const result = await commandRunner.run(validation.normalizedCommand, cwd(), {
+      foregroundTimeoutMs: Math.max(1_000, Math.min(600_000, ctx.timeoutMs ?? validation.timeoutMs)),
+      runInBackground: ctx.runInBackground,
+      signal: ctx.signal,
+    });
     return {
       ...result,
       risk: validation.risk,
@@ -388,7 +422,7 @@ export function createCodingToolHost(
     });
 
   const mcpServer: McpServer = createMcpServer({
-    tools: buildToolDefinitions(workspaceService, runCommandSafe, readLintsFn, diffFileFn),
+    tools: buildToolDefinitions(workspaceService, runCommandSafe, commandRunner.read, commandRunner.stop, readLintsFn, diffFileFn),
     resources: buildResourceDefinitions(workspaceService),
     prompts: buildPromptDefinitions(),
   });
@@ -522,6 +556,8 @@ export function createCodingToolHost(
       '在工作区目录中执行命令（非白名单命令需用户确认）',
       (command: string, ctx?: RunCommandContext) => runCommandSafe(command, ctx),
     ),
+    readCommandOutput: wrapWithStats('read_command_output', '读取后台命令输出', (taskId: string, waitMs?: number) => commandRunner.read(taskId, waitMs)),
+    stopCommand: wrapWithStats('stop_command', '停止后台命令', (taskId: string) => commandRunner.stop(taskId)),
     readLints: wrapWithStats('read_lints', '读取静态检查与 lint 问题', (path?: string) => readLintsFn(path)),
     diffFile: wrapWithStats('diff_file', '对比文件与版本快照差异', (path: string, snapshotId?: string) =>
       diffFileFn(path, snapshotId),
@@ -550,6 +586,8 @@ export function createCodingToolHost(
     create_snapshot: 'write',
     restore_snapshot: 'write',
     run_command: 'execute',
+    read_command_output: 'read',
+    stop_command: 'execute',
     ask_user: 'interactive',
   };
 
@@ -567,7 +605,11 @@ export function createCodingToolHost(
 
     if (toolName === 'run_command') {
       command = normalizeCommand(String(input.command ?? ''));
-      normalizedInput = { command };
+      normalizedInput = {
+        command,
+        ...(typeof input.timeout_ms === 'number' ? { timeout_ms: input.timeout_ms } : {}),
+        ...(typeof input.run_in_background === 'boolean' ? { run_in_background: input.run_in_background } : {}),
+      };
       const entries = await whitelistStore.list();
       const validation = validateCommand(command, entries);
       if (!validation.allowed) hardDeniedReason = validation.reason;
@@ -575,6 +617,9 @@ export function createCodingToolHost(
       matchedRule = match?.id;
       if (!matchedRule && isTrustedReadonlyCommand(command)) effect = 'read';
       summary = validation.reason;
+    } else if (toolName === 'stop_command') {
+      normalizedInput = { task_id: String(input.task_id ?? '') };
+      summary = `停止后台命令 ${normalizedInput.task_id}`;
     } else if (toolName === 'write_file' || toolName === 'patch_file') {
       const path = String(input.path ?? '').trim().replace(/\\/g, '/');
       normalizedInput = { ...input, path };
@@ -664,7 +709,14 @@ export function createCodingToolHost(
       case 'write_file': return host.writeFile(String(args.path ?? ''), String(args.content ?? ''));
       case 'patch_file': return host.patchFile(String(args.path ?? ''), String(args.patch ?? ''));
       case 'search_in_workspace': return host.searchInWorkspace(String(args.query ?? ''), typeof args.path === 'string' ? args.path : undefined);
-      case 'run_command': return host.runCommand(String(args.command ?? ''), { approvalGranted: true, signal: context.signal });
+      case 'run_command': return host.runCommand(String(args.command ?? ''), {
+        approvalGranted: true,
+        signal: context.signal,
+        ...(typeof args.timeout_ms === 'number' ? { timeoutMs: args.timeout_ms } : {}),
+        ...(typeof args.run_in_background === 'boolean' ? { runInBackground: args.run_in_background } : {}),
+      });
+      case 'read_command_output': return host.readCommandOutput(String(args.task_id ?? ''), typeof args.wait_ms === 'number' ? args.wait_ms : undefined);
+      case 'stop_command': return host.stopCommand(String(args.task_id ?? ''));
       case 'read_lints': return host.readLints(typeof args.path === 'string' ? args.path : undefined);
       case 'diff_file': return host.diffFile(String(args.path ?? ''), typeof args.snapshotId === 'string' ? args.snapshotId : undefined);
       case 'list_workspace': return host.listWorkspace();

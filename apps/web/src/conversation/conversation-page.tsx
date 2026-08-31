@@ -62,6 +62,14 @@ function formatTokens(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value);
 }
 
+export function terminalTitle(status: string, reason: string): string {
+  if (status === 'aborted') return '运行已取消';
+  if (reason === 'model_turn_limit') return '模型回合数达到限制';
+  if (reason === 'model_attempt_limit') return '模型尝试次数达到限制';
+  if (reason === 'output_token_limit') return '单次模型输出达到长度限制';
+  return status === 'limited' ? '运行达到限制' : '运行未完成';
+}
+
 function ContextLabel({ usage, running }: { usage: ContextUsage; running: boolean }) {
   if (usage.percentage === undefined) return <span>{running && usage.source === 'unknown' ? '上下文计算中' : '上下文未知'}</span>;
   const detail = usage.usedTokens !== undefined && usage.contextWindowTokens !== undefined
@@ -515,7 +523,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           {state.streamError ? <div className="error-card"><strong>连接未完成</strong><span>{state.streamError}</span></div> : null}
           {state.terminal && state.terminal.status !== 'completed' ? (
             <div className="run-terminal-notice" role="status">
-              <strong>{state.terminal.status === 'aborted' ? '运行已取消' : state.terminal.status === 'limited' ? '运行达到限制' : '运行未完成'}</strong>
+              <strong>{terminalTitle(state.terminal.status, state.terminal.reason)}</strong>
               <span>{state.terminal.error?.message ?? state.terminal.reason}</span>
             </div>
           ) : null}

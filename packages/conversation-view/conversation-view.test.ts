@@ -307,3 +307,9 @@ test('projection marks only the explicit final assistant message and upgrades co
   assert.equal(legacy[0]?.kind === 'assistant' ? legacy[0].final : undefined, undefined);
   assert.equal(legacy[1]?.kind === 'assistant' ? legacy[1].final : undefined, true);
 });
+test('presents background command lifecycle distinctly', () => {
+  const started = presentTool({ callRef: 'command-1', tool: 'run_command', args: { command: 'npm test' }, result: { status: 'background', taskId: 'task-1' } });
+  const running = presentTool({ callRef: 'command-2', tool: 'read_command_output', args: { task_id: 'task-1' }, result: { status: 'background' } });
+  assert.equal(started.summary, '命令已转入后台');
+  assert.equal(running.summary, '命令仍在后台运行');
+});

@@ -29,7 +29,7 @@ export type AgentRunIdentity = {
 };
 
 export type AgentRunBudget = {
-  maxModelTurns: number;
+  maxModelTurns?: number;
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
   maxOutputTokens?: number;

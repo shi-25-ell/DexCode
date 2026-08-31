@@ -36,6 +36,7 @@ function outcomeStatus(result: unknown): ToolViewStatus {
   const status = String(object.status ?? '').toLowerCase();
   if (status === 'denied' || status === 'rejected') return 'denied';
   if (status === 'cancelled' || status === 'aborted') return 'cancelled';
+  if (status === 'failed' || status === 'blocked') return 'failed';
   if ('error' in object && object.error) return 'failed';
   return 'succeeded';
 }
@@ -45,6 +46,8 @@ function descriptor(tool: string, args: Record<string, unknown>) {
   if (tool === 'read_file') return { category: 'read' as const, name: '读取文件', target: targetPath };
   if (tool === 'write_file' || tool === 'patch_file') return { category: 'file' as const, name: '修改文件', target: targetPath };
   if (tool === 'run_command') return { category: 'command' as const, name: '执行命令', target: String(args.command ?? '') };
+  if (tool === 'read_command_output') return { category: 'command' as const, name: '读取命令输出', target: String(args.task_id ?? '') };
+  if (tool === 'stop_command') return { category: 'command' as const, name: '停止命令', target: String(args.task_id ?? '') };
   if (tool === 'search_in_workspace') return { category: 'search' as const, name: '搜索代码', target: [args.query, args.path].filter(Boolean).join(' · ') };
   if (tool === 'list_workspace') return { category: 'read' as const, name: '浏览目录', target: targetPath ?? '当前项目' };
   if (tool === 'read_lints') return { category: 'read' as const, name: '检查问题', target: targetPath ?? '当前项目' };
@@ -76,7 +79,9 @@ function successSummary(tool: string, result: unknown, status: ToolViewStatus): 
     return content ? `已读取 ${content.replace(/\r\n/g, '\n').split('\n').length.toLocaleString('zh-CN')} 行` : '读取完成';
   }
   if (tool === 'write_file' || tool === 'patch_file') return '文件已更新';
-  if (tool === 'run_command') return '命令执行完成';
+  if (tool === 'run_command') return String(objectValue(result).status ?? '') === 'background' ? '命令已转入后台' : '命令执行完成';
+  if (tool === 'read_command_output') return String(objectValue(result).status ?? '') === 'background' ? '命令仍在后台运行' : '后台命令已结束';
+  if (tool === 'stop_command') return '后台命令已停止';
   if (tool === 'activate_skill' || tool === 'read_skill') return '已加载能力说明';
   if (tool === 'memory_upsert') return '项目记忆已更新';
   if (tool === 'memory_remove') return '项目记忆已删除';

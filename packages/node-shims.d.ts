@@ -114,6 +114,7 @@ declare module 'child_process' {
     callback: (error: unknown, stdout: string, stderr: string) => void,
   ): void;
   export function spawn(command: string, args?: string[], options?: {
+    cwd?: string;
     env?: Record<string, string | undefined>;
     stdio?: Array<'pipe' | 'ignore' | 'inherit'>;
     shell?: boolean;
@@ -129,6 +130,7 @@ declare module 'child_process' {
       end(): void;
     };
     kill(): void;
+    pid?: number;
   };
 }
 

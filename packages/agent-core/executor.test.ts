@@ -443,6 +443,21 @@ test('escalates 16k to 32k to 64k, then continues a length-limited response', as
   assert.deepEqual(budgets, [16_384, 32_768, 65_536, 65_536]);
 });
 
+test('does not impose a fixed turn limit when no model turn budget is configured', async () => {
+  const { host } = toolHost();
+  const turns: ModelResponse[] = Array.from({ length: 21 }, (_, index) => ({
+    content: '',
+    reasoning: '',
+    toolCalls: [{ id: `call-${index}`, name: 'read_file', arguments: { path: 'a.ts' } }],
+    finishReason: 'tool_calls',
+  }));
+  turns.push({ content: 'finished after twenty turns', reasoning: '', toolCalls: [], finishReason: 'stop' });
+  const result = await createExecutor(host).runReActLoop(scriptedModel(turns), [], () => {});
+  assert.equal(result.status, 'completed');
+  assert.equal(result.modelTurnCount, 22);
+  assert.equal(result.finalContent, 'finished after twenty turns');
+});
+
 test('projects a valid request from a session that already contains an orphan empty assistant message', async () => {
   const { host } = toolHost();
   const legacyMessages: ChatMessage[] = [

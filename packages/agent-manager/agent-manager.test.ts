@@ -72,6 +72,13 @@ test('Definition parser rejects unknown fields and workspace definitions overrid
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('child Agent definitions default to 200 model turns', () => {
+  assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.maxModelTurns, 200);
+  assert.equal(BUILTIN_AGENT_DEFINITIONS[1]?.budget.maxModelTurns, 200);
+  const parsed = parseAgentDefinitionMarkdown('---\nname: scout\ndescription: test\n---\nInspect source.');
+  assert.equal(parsed.budget.maxModelTurns, 200);
+});
+
 test('AgentManager runs parallel children, waits, follows up and stops without deleting identity', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dexcode-agent-manager-'));
   const sessionId = 'session-manager';

@@ -71,11 +71,44 @@ export const LOCAL_TOOL_DEFINITIONS = [
     function: {
       name: 'run_command',
       description:
-        '在工作区执行 shell 命令。非白名单会等待用户确认。静态检查优先 read_lints。示例：{"command":"npm test"}',
+        '在工作区执行 shell 命令。可设置前台等待超时，超时后任务继续在后台运行；也可立即后台运行。非白名单会等待用户确认。',
       parameters: {
         type: 'object',
-        properties: { command: { type: 'string' } },
+        properties: {
+          command: { type: 'string' },
+          timeout_ms: { type: 'number', minimum: 1000, maximum: 600000, description: '前台等待时间；到期后返回 task_id，命令继续在后台运行' },
+          run_in_background: { type: 'boolean', description: '为 true 时立即返回后台 task_id' },
+        },
         required: ['command'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'read_command_output',
+      description: '读取后台命令的当前输出和状态；可短暂等待其完成。',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_id: { type: 'string' },
+          wait_ms: { type: 'number', minimum: 0, maximum: 60000 },
+        },
+        required: ['task_id'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'stop_command',
+      description: '停止一个仍在运行的后台命令。',
+      parameters: {
+        type: 'object',
+        properties: { task_id: { type: 'string' } },
+        required: ['task_id'],
         additionalProperties: false,
       },
     },

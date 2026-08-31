@@ -424,7 +424,7 @@ export function createCodingAgent(
             ...(prepared.activity ? { activity: prepared.activity } : {}),
           }).then(() => undefined),
         },
-        budget: { maxModelTurns: 20 },
+        budget: {},
         signal: options.signal,
         productSessionId: sessionId,
         executorHooks: resolvedHooks,
@@ -558,7 +558,7 @@ export function createCodingAgent(
       systemSections: [{ source: 'systemPrompt', content: system.content }],
       persistence: 'none',
       toolPolicy: { deny: [...MEMORY_TOOL_NAMES] },
-      budget: { maxModelTurns: 20 },
+      budget: {},
       signal: options.signal,
       onExecutorEvent: onEvent,
     });

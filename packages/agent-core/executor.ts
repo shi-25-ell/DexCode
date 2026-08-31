@@ -44,7 +44,9 @@ import { AGENT_ORCHESTRATION_TOOL_DEFINITIONS } from './tool-definitions.ts';
 export type CodingToolHost = {
   readFile: (path: string) => Promise<unknown> | unknown;
   writeFile: (path: string, content: string) => unknown;
-  runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook; signal?: AbortSignal }) => unknown;
+  runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook; signal?: AbortSignal; timeoutMs?: number; runInBackground?: boolean }) => unknown;
+  readCommandOutput?: (taskId: string, waitMs?: number) => unknown;
+  stopCommand?: (taskId: string) => unknown;
   readLints?: (path?: string) => unknown;
   diffFile?: (path: string, snapshotId?: string) => unknown;
   listWorkspace: () => unknown;
@@ -146,7 +148,6 @@ export type ReActLoopOptions = {
 
 export type Executor = ReturnType<typeof createExecutor>;
 
-const MAX_ITERATIONS = 20;
 const INITIAL_OUTPUT_TOKENS = 16_384;
 const SECOND_OUTPUT_TOKENS = 32_768;
 const MAX_RECOVERY_OUTPUT_TOKENS = 65_536;
@@ -355,7 +356,12 @@ export function createExecutor(
     write_file: ({ path, content }) => codingToolHost.writeFile(path as string, content as string),
     patch_file: ({ path, patch }) => codingToolHost.patchFile(path as string, patch as string),
     search_in_workspace: ({ query, path }) => codingToolHost.searchInWorkspace(query as string, path as string | undefined),
-    run_command: ({ command }) => codingToolHost.runCommand(command as string),
+    run_command: ({ command, timeout_ms, run_in_background }) => codingToolHost.runCommand(command as string, {
+      ...(typeof timeout_ms === 'number' ? { timeoutMs: timeout_ms } : {}),
+      ...(typeof run_in_background === 'boolean' ? { runInBackground: run_in_background } : {}),
+    }),
+    read_command_output: ({ task_id, wait_ms }) => codingToolHost.readCommandOutput?.(String(task_id ?? ''), typeof wait_ms === 'number' ? wait_ms : undefined) ?? { error: 'read_command_output unavailable' },
+    stop_command: ({ task_id }) => codingToolHost.stopCommand?.(String(task_id ?? '')) ?? { error: 'stop_command unavailable' },
     read_lints: ({ path }) => codingToolHost.readLints?.(path as string | undefined) ?? { error: 'read_lints unavailable' },
     diff_file: ({ path, snapshotId }) => codingToolHost.diffFile?.(path as string, snapshotId as string | undefined) ?? { error: 'diff_file unavailable' },
     list_workspace: () => codingToolHost.listWorkspace(),
@@ -426,8 +432,9 @@ export function createExecutor(
       let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
       let forkSnapshot: ChatMessage[] = [];
       const base = () => ({ messages: loopMessages, finalContent, ...(finalMessageId ? { finalMessageId } : {}), toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage, contextRefreshWarnings });
-      const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
-      const maxAttempts = options.maxModelAttempts ?? maxTurns * (MAX_CONTINUATIONS + 3);
+      const maxTurns = options.maxIterations ?? Number.POSITIVE_INFINITY;
+      const maxAttempts = options.maxModelAttempts
+        ?? (Number.isFinite(maxTurns) ? maxTurns * (MAX_CONTINUATIONS + 3) : Number.POSITIVE_INFINITY);
       const maxRetries = options.maxRetriesPerTurn ?? 1;
       const sessionId = options.sessionId ?? options.context?.sessionId ?? '';
 
