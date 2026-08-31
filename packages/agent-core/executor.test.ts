@@ -112,6 +112,46 @@ test('streams text deltas and completes a no-tool Run', async () => {
   assert.deepEqual(events.find((event) => (event as { type?: string }).type === 'chunk'), { type: 'chunk', chunk: 'done' });
 });
 
+test('keeps legacy reasoning and text streams separate while committing the complete assistant turn', async () => {
+  const { host } = toolHost();
+  const events: AgentEvent[] = [];
+  const committed: string[] = [];
+  const model: ModelClient = {
+    model: 'reasoning-script',
+    baseUrl: 'memory://reasoning-script',
+    async *streamMessage(): AsyncIterable<ModelEvent> {
+      yield { version: 1, type: 'turn_started', attemptId: 'attempt-reasoning' };
+      yield { version: 1, type: 'reasoning_delta', delta: 'private reasoning' };
+      yield { version: 1, type: 'text_delta', delta: 'public answer' };
+      yield {
+        version: 1,
+        type: 'turn_completed',
+        response: {
+          content: 'public answer',
+          reasoning: 'private reasoning',
+          toolCalls: [],
+          finishReason: 'stop',
+        },
+      };
+    },
+  };
+
+  const result = await createExecutor(host).runReActLoop(model, [], (event) => events.push(event), undefined, {
+    semantic: {
+      assistantCommitted: async (message) => { committed.push(message.content ?? ''); },
+      toolStarted: async () => {},
+      toolOutcome: async () => {},
+    },
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(events.filter((event) => event.type === 'reasoning_chunk' || event.type === 'chunk'), [
+    { type: 'reasoning_chunk', chunk: 'private reasoning' },
+    { type: 'chunk', chunk: 'public answer' },
+  ]);
+  assert.deepEqual(committed, ['public answer']);
+});
+
 test('commits assistant and tool start before effect, then commits outcome', async () => {
   const timeline: string[] = [];
   const { host, read } = toolHost(timeline);
