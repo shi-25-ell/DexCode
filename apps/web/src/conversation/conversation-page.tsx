@@ -26,6 +26,7 @@ import { QueuedMessageCard } from './queued-message-card';
 import { deliveryForFollowUp, readFollowUpBehavior, writeFollowUpBehavior } from '../settings/follow-up-behavior';
 import { agentActivityReducer, initialAgentActivityState } from './agent-reducer';
 import { AgentActivityCard, AgentDrawer } from './agent-activity';
+import { groupAgentTimeline } from './agent-timeline';
 
 type PageAction =
   | { type: 'hydrate'; snapshot: ConversationSnapshot }
@@ -440,17 +441,17 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   };
   const timeline = useMemo(() => state.committedItems, [state.committedItems]);
   const agentTree = agentState.tree ?? snapshot.data?.agents ?? null;
+  const agentGroups = useMemo(() => groupAgentTimeline(agentTree), [agentTree]);
+  const activeAgentGroups = useMemo(() => state.activeRun
+    ? agentGroups.filter((group) => group.sourceRunId === state.activeRun!.runId && group.sourceTurn !== undefined)
+    : [], [agentGroups, state.activeRun]);
   const trailingGroups = useMemo(() => {
-    if (!agentTree) return [];
-    const inlineAgentIds = new Set(timeline.flatMap((item) => item.kind === 'agent_activity' ? item.agentIds : []));
-    const groups = new Map<string, string[]>();
-    for (const agent of agentTree.agents) {
-      if (inlineAgentIds.has(agent.agentId)) continue;
-      const key = agent.delegationGroupId ?? agent.agentId;
-      groups.set(key, [...(groups.get(key) ?? []), agent.agentId]);
-    }
-    return [...groups.values()];
-  }, [agentTree, timeline]);
+    const inlineAgentRunIds = new Set(timeline.flatMap((item) => item.kind === 'agent_activity' ? item.agentRunIds : []));
+    const activeAgentRunIds = new Set(activeAgentGroups.flatMap((group) => group.agentRunIds));
+    return agentGroups
+      .map((group) => ({ ...group, agentRunIds: group.agentRunIds.filter((agentRunId) => !inlineAgentRunIds.has(agentRunId) && !activeAgentRunIds.has(agentRunId)) }))
+      .filter((group) => group.agentRunIds.length > 0);
+  }, [activeAgentGroups, agentGroups, timeline]);
   const openAgent = (agentId?: string) => { setSelectedAgentId(agentId); setAgentDrawerOpen(true); };
   const stopAgent = async (agentId: string) => {
     if (!conversationRef) return;
@@ -514,12 +515,12 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             }
             if (item.kind === 'tool') return <ToolCard key={item.id} tool={item.tool} />;
             if (item.kind === 'context') return <ContextCard key={item.id} context={item.context} />;
-            if (item.kind === 'agent_activity') return agentTree ? <AgentActivityCard key={item.id} tree={agentTree} agentIds={item.agentIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} /> : null;
+            if (item.kind === 'agent_activity') return agentTree ? <AgentActivityCard key={item.id} tree={agentTree} agentRunIds={item.agentRunIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} /> : null;
             if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} />;
             return <div key={item.id} className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;
           })}
-          {agentTree ? trailingGroups.map((agentIds) => <AgentActivityCard key={`agents-${agentIds.join('-')}`} tree={agentTree} agentIds={agentIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} />) : null}
-          {state.activeRun ? <RunActivity run={state.activeRun} workspaceRef={workspaceRef} needsResync={state.needsResync} /> : null}
+          {agentTree ? trailingGroups.map((group) => <AgentActivityCard key={group.key} tree={agentTree} agentRunIds={group.agentRunIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} />) : null}
+          {state.activeRun ? <RunActivity run={state.activeRun} workspaceRef={workspaceRef} needsResync={state.needsResync} agentTree={agentTree} agentGroups={activeAgentGroups} onOpenAgent={openAgent} onStopAgent={(agentId) => void stopAgent(agentId)} /> : null}
           {state.streamError ? <div className="error-card"><strong>连接未完成</strong><span>{state.streamError}</span></div> : null}
           {state.terminal && state.terminal.status !== 'completed' ? (
             <div className="run-terminal-notice" role="status">

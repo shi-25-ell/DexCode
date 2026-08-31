@@ -1,10 +1,13 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { ChevronDown, LoaderCircle } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { RunPhase } from '../../../../packages/run-protocol/contracts';
+import type { AgentTreeSnapshot } from '../types';
 import { ApprovalCard } from './approval-card';
+import { AgentActivityCard } from './agent-activity';
+import type { AgentTimelineGroup } from './agent-timeline';
 import { AssistantMessage } from './assistant-message';
 import { ContextCard } from './context-card';
 import { draftReasoning, draftText, type ActiveRunView, type RunActivityEntry } from './run-presentation';
@@ -94,7 +97,22 @@ function RunActivityItem({ entry, run, workspaceRef }: { entry: RunActivityEntry
   return approval ? <ApprovalCard item={approval} workspaceRef={workspaceRef} /> : null;
 }
 
-export function RunActivity({ run, workspaceRef, needsResync }: { run: ActiveRunView; workspaceRef?: string; needsResync: boolean }) {
+function turnForActivity(run: ActiveRunView, entry: RunActivityEntry): number | undefined {
+  if (entry.kind !== 'assistant') return undefined;
+  const committed = run.committedMessages.find((item) => item.kind === 'assistant' && (item.messageId === entry.messageId || item.id === entry.messageId));
+  if (committed?.kind === 'assistant') return committed.turn;
+  return run.assistantDraft?.messageId === entry.messageId ? run.assistantDraft.turn : undefined;
+}
+
+export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGroups = [], onOpenAgent, onStopAgent }: {
+  run: ActiveRunView;
+  workspaceRef?: string;
+  needsResync: boolean;
+  agentTree?: AgentTreeSnapshot | null;
+  agentGroups?: AgentTimelineGroup[];
+  onOpenAgent?(agentId: string): void;
+  onStopAgent?(agentId: string): void;
+}) {
   return (
     <section className="run-activity" aria-label="当前运行" aria-live="polite">
       <div className={`run-phase ${run.phase}`} role="status">
@@ -104,7 +122,18 @@ export function RunActivity({ run, workspaceRef, needsResync }: { run: ActiveRun
         {run.note ? <small>{run.note}</small> : null}
       </div>
       {needsResync ? <div className="run-resync-note">实时片段有缺失，完成后将使用已提交会话校准。</div> : null}
-      {run.activityOrder.map((entry) => <RunActivityItem key={activityKey(entry)} entry={entry} run={run} workspaceRef={workspaceRef} />)}
+      {run.activityOrder.map((entry) => {
+        const turn = turnForActivity(run, entry);
+        const anchoredGroups = turn === undefined ? [] : agentGroups.filter((group) => group.sourceTurn === turn);
+        return (
+          <Fragment key={activityKey(entry)}>
+            <RunActivityItem entry={entry} run={run} workspaceRef={workspaceRef} />
+            {agentTree && onOpenAgent && onStopAgent ? anchoredGroups.map((group) => (
+              <AgentActivityCard key={group.key} tree={agentTree} agentRunIds={group.agentRunIds} onOpen={onOpenAgent} onStop={onStopAgent} />
+            )) : null}
+          </Fragment>
+        );
+      })}
     </section>
   );
 }

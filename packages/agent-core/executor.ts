@@ -810,6 +810,7 @@ export function createExecutor(
                 sessionId,
                 ...(options.callerAgentId ? { callerAgentId: options.callerAgentId } : {}),
                 callerRunId: runId,
+                callerTurn: modelTurnCount,
                 toolCallId: call.id,
                 delegationGroupId: `delegation-${runId}-${modelTurnCount}`,
                 forkSnapshot: projectAgentFork(forkSnapshot, {

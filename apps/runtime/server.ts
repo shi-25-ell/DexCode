@@ -1548,7 +1548,7 @@ export function startRuntimeServer() {
       if (agentId && action === 'stop' && req.method === 'POST') {
         const body = await parseBody<{ reason?: string }>(req);
         const result = await runtime.agentManager.stop({ agentId, ...(body.reason ? { reason: body.reason } : {}) }, {
-          sessionId, callerRunId: 'web-control', toolCallId: crypto.randomUUID(), delegationGroupId: 'web-control', forkSnapshot: [],
+          sessionId, callerRunId: 'web-control', callerTurn: 0, toolCallId: crypto.randomUUID(), delegationGroupId: 'web-control', forkSnapshot: [],
         });
         sendJson(res, 200, result);
         return;

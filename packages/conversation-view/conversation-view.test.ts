@@ -314,3 +314,48 @@ test('presents background command lifecycle distinctly', () => {
   assert.equal(started.summary, '命令已转入后台');
   assert.equal(running.summary, '命令仍在后台运行');
 });
+
+test('projection anchors spawn and followup Run cards at their own calls', () => {
+  const now = new Date().toISOString();
+  const session: Session = {
+    sessionId: 'session-agent-order',
+    scope: { kind: 'workspace', workspaceId: 'workspace-test' },
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [
+      { seq: 1, at: now, runId: 'run-main', type: 'message', message: { role: 'user', content: '调用子 Agent' } },
+      { seq: 2, at: now, runId: 'run-main', type: 'message', message: { role: 'assistant', content: '正在委派' }, messageId: 'message-1', turn: 1 },
+      { seq: 3, at: now, runId: 'run-main', type: 'tool_started', callId: 'spawn-1', tool: 'spawn_agent', input: { task: '问好' } },
+      { seq: 4, at: now, runId: 'run-main', type: 'message', message: { role: 'assistant', content: '首次调用完成' }, messageId: 'message-2', turn: 2 },
+      { seq: 5, at: now, runId: 'run-main', type: 'message', message: { role: 'assistant', content: '继续调用同一 Agent' }, messageId: 'message-3', turn: 3 },
+      { seq: 6, at: now, runId: 'run-main', type: 'tool_started', callId: 'followup-1', tool: 'followup_agent', input: { agent_id: 'agent-a', task: '再次问好' } },
+      { seq: 7, at: now, runId: 'run-main', type: 'message', message: { role: 'assistant', content: '第二次调用完成' }, messageId: 'message-4', turn: 4 },
+    ],
+  };
+  const view = projectConversation(session, { agents: {
+    version: 1,
+    sessionId: session.sessionId,
+    rootAgentId: 'root',
+    revision: 1,
+    agents: [{ agentId: 'agent-a' }],
+    runs: [
+      {
+        agentRunId: 'agent-run-1', agentId: 'agent-a', invokedByRunId: 'run-main', invokedByTurn: 1,
+        invokedByToolCallId: 'spawn-1', delegationGroupId: 'delegation-run-main-1', trigger: 'spawn',
+      },
+      {
+        agentRunId: 'agent-run-2', agentId: 'agent-a', invokedByRunId: 'run-main', invokedByTurn: 3,
+        invokedByToolCallId: 'followup-1', delegationGroupId: 'delegation-run-main-3', trigger: 'followup',
+      },
+    ],
+  } });
+  assert.deepEqual(view.items.map((item) => item.kind), [
+    'user', 'assistant', 'agent_activity', 'assistant', 'assistant', 'agent_activity', 'assistant',
+  ]);
+  assert.deepEqual(view.items.filter((item) => item.kind === 'agent_activity').map((item) => item.agentRunIds), [
+    ['agent-run-1'], ['agent-run-2'],
+  ]);
+});

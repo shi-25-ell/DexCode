@@ -2,7 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Bot, ChevronRight, Square, X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { getAgentDetail } from '../api';
-import type { AgentRecordView, AgentTreeSnapshot, ConversationScope } from '../types';
+import type { AgentRecordView, AgentRunView, AgentTreeSnapshot, ConversationScope } from '../types';
 
 function runFor(tree: AgentTreeSnapshot, agent: AgentRecordView) {
   return tree.runs.find((run) => run.agentRunId === (agent.currentRunId ?? agent.lastRunId));
@@ -19,24 +19,38 @@ function statusLabel(tree: AgentTreeSnapshot, agent: AgentRecordView): string {
   return '空闲';
 }
 
-export function AgentActivityCard({ tree, agentIds, onOpen, onStop }: {
-  tree: AgentTreeSnapshot; agentIds: string[]; onOpen(agentId: string): void; onStop(agentId: string): void;
+function runStatusLabel(run: AgentRunView, agent: AgentRecordView): string {
+  if (run.status === 'running') return agent.status === 'stopping' && agent.currentRunId === run.agentRunId ? '正在停止' : '运行中';
+  if (run.status === 'completed') return '已完成';
+  if (run.status === 'interrupted') return '已停止 · 可继续';
+  if (run.status === 'failed') return '未完成';
+  return '达到限制';
+}
+
+export function AgentActivityCard({ tree, agentRunIds, onOpen, onStop }: {
+  tree: AgentTreeSnapshot; agentRunIds: string[]; onOpen(agentId: string): void; onStop(agentId: string): void;
 }) {
-  const agents = agentIds.map((id) => tree.agents.find((agent) => agent.agentId === id)).filter((agent): agent is AgentRecordView => Boolean(agent));
-  if (agents.length === 0) return null;
+  const entries = agentRunIds.flatMap((id) => {
+    const run = tree.runs.find((candidate) => candidate.agentRunId === id);
+    const agent = run ? tree.agents.find((candidate) => candidate.agentId === run.agentId) : undefined;
+    return run && agent ? [{ run, agent }] : [];
+  });
+  if (entries.length === 0) return null;
   return (
     <section className="agent-activity-card">
-      <div className="agent-card-heading"><span><Bot size={17} />{agents.length > 1 ? '并行任务' : '子 Agent'}</span><small>{agents.length} Agents</small></div>
-      {agents.map((agent) => (
-        <div className="agent-card-row" key={agent.agentId}>
+      <div className="agent-card-heading"><span><Bot size={17} />{entries.length > 1 ? '并行任务' : '子 Agent'}</span><small>{entries.length} 次运行</small></div>
+      {entries.map(({ agent, run }) => {
+        const running = run.status === 'running' && agent.currentRunId === run.agentRunId;
+        return (
+        <div className="agent-card-row" key={run.agentRunId}>
           <button className="agent-card-main" onClick={() => onOpen(agent.agentId)}>
-            <i className={`agent-dot ${agent.status}`} />
-            <span><strong>{agent.name}</strong><small>{agent.task}</small></span>
-            <em>{statusLabel(tree, agent)}</em><ChevronRight size={15} />
+            <i className={`agent-dot ${running ? agent.status : 'idle'}`} />
+            <span><strong>{agent.name}</strong><small>{run.input}</small></span>
+            <em>{runStatusLabel(run, agent)}</em><ChevronRight size={15} />
           </button>
-          {(agent.status === 'running' || agent.status === 'stopping') ? <button className="agent-stop" disabled={agent.status === 'stopping'} onClick={() => onStop(agent.agentId)} aria-label={`停止 ${agent.name}`}><Square size={12} fill="currentColor" /></button> : null}
+          {running ? <button className="agent-stop" disabled={agent.status === 'stopping'} onClick={() => onStop(agent.agentId)} aria-label={`停止 ${agent.name}`}><Square size={12} fill="currentColor" /></button> : null}
         </div>
-      ))}
+      );})}
     </section>
   );
 }

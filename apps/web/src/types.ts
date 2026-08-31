@@ -39,7 +39,7 @@ export type ConversationItem =
   | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
-  | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentIds: string[] }
+  | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentRunIds: string[] }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command' | 'tool'; title: string; target?: string; reason?: string; toolName?: string; effect?: ApprovalEffect; fingerprint?: string; options: string[]; resolved?: string }
   | { id: string; kind: 'error'; title: string; message: string };
 
@@ -102,11 +102,12 @@ export type AgentDefinitionView = { name: string; description: string };
 export type AgentRecordView = {
   agentId: string; sessionId: string; rootAgentId: string; parentAgentId: string | null; createdByRunId: string;
   name: string; task: string; contextMode: 'fresh' | 'fork'; isolation: 'shared' | 'worktree'; definitionName: string;
-  delegationGroupId?: string; status: 'creating' | 'running' | 'stopping' | 'idle'; currentRunId?: string; lastRunId?: string;
+  status: 'creating' | 'running' | 'stopping' | 'idle'; currentRunId?: string; lastRunId?: string;
   createdAt: string; updatedAt: string;
 };
 export type AgentRunView = {
   agentRunId: string; agentId: string; invokedByRunId: string; trigger: 'spawn' | 'followup';
+  invokedByTurn?: number; invokedByToolCallId?: string; delegationGroupId?: string;
   status: 'running' | 'completed' | 'failed' | 'interrupted' | 'limited'; input: string; startedAt: string; completedAt?: string;
   result?: { finalContent: string; terminationReason: string; toolsUsed: string[]; filesModified: string[]; usage?: { totalTokens: number }; error?: { code: string; message: string } };
 };

@@ -3,6 +3,7 @@ import { createElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ActiveRunView } from './run-presentation';
 import { RunActivity } from './run-activity';
+import type { AgentTreeSnapshot } from '../types';
 
 afterEach(cleanup);
 
@@ -64,6 +65,46 @@ describe('RunActivity', () => {
     expect(firstMessage.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(tool.compareDocumentPosition(approval) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(approval.compareDocumentPosition(laterMessage) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
+  it('keeps a live child Agent card at its invoking assistant turn', () => {
+    const tree: AgentTreeSnapshot = {
+      version: 1, sessionId: 'session-1', rootAgentId: 'root', revision: 1,
+      agents: [{
+        agentId: 'agent-a', sessionId: 'session-1', rootAgentId: 'root', parentAgentId: 'root', createdByRunId: 'run-1',
+        name: 'greeter', task: '问好', contextMode: 'fork', isolation: 'shared', definitionName: 'general-purpose',
+        status: 'running', currentRunId: 'agent-run-a', lastRunId: 'agent-run-a', createdAt: '', updatedAt: '',
+      }],
+      runs: [{
+        agentRunId: 'agent-run-a', agentId: 'agent-a', invokedByRunId: 'run-1', invokedByTurn: 1,
+        invokedByToolCallId: 'spawn-1', delegationGroupId: 'group-1', trigger: 'spawn', status: 'running', input: '问好', startedAt: '',
+      }],
+    };
+    render(createElement(RunActivity, {
+      run: run({
+        committedMessages: [
+          { id: 'message-1', kind: 'assistant', content: '先调用子 Agent', messageId: 'message-1', runId: 'run-1', turn: 1 },
+        ],
+        assistantDraft: {
+          messageId: 'message-2', turn: 2, committed: false, hasToolCalls: false,
+          blocks: { 0: { contentIndex: 0, kind: 'text', content: '子 Agent 已返回' } },
+        },
+        activityOrder: [
+          { kind: 'assistant', messageId: 'message-1' },
+          { kind: 'assistant', messageId: 'message-2' },
+        ],
+      }),
+      needsResync: false,
+      agentTree: tree,
+      agentGroups: [{ key: 'group-1', agentRunIds: ['agent-run-a'], sourceRunId: 'run-1', sourceTurn: 1 }],
+      onOpenAgent: () => {},
+      onStopAgent: () => {},
+    }));
+    const invokingMessage = screen.getByText('先调用子 Agent');
+    const child = screen.getByText('greeter');
+    const finalMessage = screen.getByText('子 Agent 已返回');
+    expect(invokingMessage.compareDocumentPosition(child) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(child.compareDocumentPosition(finalMessage) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
 
   it('shows an exact phase without rendering an empty reasoning disclosure', () => {

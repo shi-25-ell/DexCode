@@ -41,7 +41,6 @@ export type AgentRecord = {
   definitionDigest: string;
   definitionSnapshot: AgentDefinition;
   contextSeed: ChatMessage[];
-  delegationGroupId?: string;
   status: AgentStatus;
   currentRunId?: string;
   lastRunId?: string;
@@ -64,6 +63,9 @@ export type AgentRunRecord = {
   agentRunId: string;
   agentId: string;
   invokedByRunId: string;
+  invokedByTurn?: number;
+  invokedByToolCallId?: string;
+  delegationGroupId?: string;
   trigger: 'spawn' | 'followup';
   status: AgentRunStatus;
   input: string;
@@ -138,6 +140,7 @@ export type AgentCallerContext = {
   sessionId: string;
   callerAgentId?: string;
   callerRunId: string;
+  callerTurn: number;
   toolCallId: string;
   delegationGroupId: string;
   forkSnapshot: ChatMessage[];

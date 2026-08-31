@@ -81,8 +81,52 @@ function readableStoredPresentation(
   };
 }
 
-function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
+type AgentGroup = {
+  key: string;
+  runs: AgentTreeSnapshotView['runs'];
+  item: Extract<ConversationItem, { kind: 'agent_activity' }>;
+};
+
+function legacyDelegationGroupId(run: AgentTreeSnapshotView['runs'][number], agents: AgentTreeSnapshotView): string | undefined {
+  if (run.trigger !== 'spawn') return undefined;
+  return (agents.agents.find((agent) => agent.agentId === run.agentId) as { delegationGroupId?: string } | undefined)?.delegationGroupId;
+}
+
+function sourceTurn(run: AgentTreeSnapshotView['runs'][number], groupId?: string): number | undefined {
+  if (Number.isInteger(run.invokedByTurn) && run.invokedByTurn! > 0) return run.invokedByTurn;
+  const legacy = groupId?.match(/-(\d+)$/)?.[1];
+  return legacy ? Number(legacy) : undefined;
+}
+
+function agentGroups(agents: AgentTreeSnapshotView | null): AgentGroup[] {
+  if (!agents) return [];
+  const groups = new Map<string, AgentTreeSnapshotView['runs']>();
+  for (const run of agents.runs) {
+    const key = run.delegationGroupId ?? legacyDelegationGroupId(run, agents) ?? `agent-run:${run.agentRunId}`;
+    const group = groups.get(key) ?? [];
+    group.push(run);
+    groups.set(key, group);
+  }
+  return [...groups].map(([key, group]) => ({
+    key,
+    runs: group,
+    item: {
+      id: `agent-activity-${key}`,
+      kind: 'agent_activity',
+      sourceRunId: group[0]!.invokedByRunId,
+      ...(key.startsWith('agent-run:') ? {} : { delegationGroupId: key }),
+      agentRunIds: group.map((run) => run.agentRunId),
+    },
+  }));
+}
+
+function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshotView | null): ConversationItem[] {
   const items: ConversationItem[] = [];
+  const groups = agentGroups(agents);
+  const groupsByToolCall = new Map(groups.flatMap((group) => group.runs.flatMap((run) => (
+    run.invokedByToolCallId ? [[run.invokedByToolCallId, group] as const] : []
+  ))));
+  const placedAgentGroups = new Set<string>();
   const finalMessageIds = new Set(records.flatMap((record) => (
     record.type === 'run_terminal' && record.report.finalMessageId ? [record.report.finalMessageId] : []
   )));
@@ -113,6 +157,12 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
         ...(record.turn !== undefined ? { turn: record.turn } : {}),
         ...((record.messageId && finalMessageIds.has(record.messageId)) || legacyFinalAssistantSeqs.has(record.seq) ? { final: true } : {}),
       });
+    } else if (record.type === 'tool_started' && (record.tool === 'spawn_agent' || record.tool === 'followup_agent')) {
+      const group = groupsByToolCall.get(record.callId);
+      if (group && !placedAgentGroups.has(group.key)) {
+        items.push(group.item);
+        placedAgentGroups.add(group.key);
+      }
     } else if (record.type === 'tool_completed') {
       if (internalContextCalls.has(record.callId)) continue;
       items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: readableStoredPresentation(record.presentation, startedTools.get(record.callId)) });
@@ -153,27 +203,21 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
       items.push({ id: `error-${record.seq}`, kind: 'error', title: '本次运行未完成', message: record.report.error.message });
     }
   }
-  return items;
+  return withAgentActivities(items, agents, placedAgentGroups);
 }
 
-function withAgentActivities(items: ConversationItem[], agents: AgentTreeSnapshotView | null): ConversationItem[] {
-  if (!agents || agents.agents.length === 0) return items;
-  const groups = new Map<string, typeof agents.agents>();
-  for (const agent of agents.agents) {
-    const key = agent.delegationGroupId ?? `agent:${agent.agentId}`;
-    const group = groups.get(key) ?? [];
-    group.push(agent); groups.set(key, group);
-  }
+function withAgentActivities(items: ConversationItem[], agents: AgentTreeSnapshotView | null, alreadyPlaced = new Set<string>()): ConversationItem[] {
   const result = [...items];
-  for (const [key, group] of groups) {
-    const sourceRunId = group[0]!.createdByRunId;
-    const item: ConversationItem = { id: `agent-activity-${key}`, kind: 'agent_activity', sourceRunId, ...(group[0]?.delegationGroupId ? { delegationGroupId: group[0].delegationGroupId } : {}), agentIds: group.map((agent) => agent.agentId) };
+  for (const group of agentGroups(agents)) {
+    if (alreadyPlaced.has(group.key)) continue;
+    const sourceRunId = group.runs[0]!.invokedByRunId;
+    const turn = sourceTurn(group.runs[0]!, group.item.delegationGroupId);
     let index = -1;
     for (let cursor = result.length - 1; cursor >= 0; cursor -= 1) {
       const entry = result[cursor];
-      if (entry?.kind === 'assistant' && entry.runId === sourceRunId) { index = cursor; break; }
+      if (entry?.kind === 'assistant' && entry.runId === sourceRunId && (turn === undefined || entry.turn === turn)) { index = cursor; break; }
     }
-    result.splice(index >= 0 ? index + 1 : result.length, 0, item);
+    result.splice(index >= 0 ? index + 1 : result.length, 0, group.item);
   }
   return result;
 }
@@ -181,7 +225,7 @@ function withAgentActivities(items: ConversationItem[], agents: AgentTreeSnapsho
 export function projectConversation(session: Session, options: { contextWindow?: number; activePhase?: 'running' | 'waiting_confirm' | 'closing' | 'stopping'; agents?: AgentTreeSnapshotView | null } = {}): ConversationViewSnapshot {
   const item = projectConversationListItem(session);
   const queue = projectQueue(session.sessionId, session.ledger ?? []);
-  const items = projectLedger(session.ledger ?? []).map((entry) => (
+  const items = projectLedger(session.ledger ?? [], options.agents ?? null).map((entry) => (
     entry.kind === 'context' && entry.context.status === 'running' && !session.activeTaskId
       ? { ...entry, context: { ...entry.context, status: 'failed' as const, reason: 'interrupted' as const } }
       : entry
@@ -195,7 +239,7 @@ export function projectConversation(session: Session, options: { contextWindow?:
     queuePaused: queue.paused,
     updatedAt: item.updatedAt,
     revision: session.revision ?? 0,
-    items: withAgentActivities(items, options.agents ?? null),
+    items,
     contextUsage: contextUsage(session, options.contextWindow),
     agents: options.agents ?? null,
   };

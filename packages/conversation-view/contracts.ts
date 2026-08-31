@@ -5,7 +5,16 @@ export type AgentTreeSnapshotView = {
   sessionId: string;
   rootAgentId: string;
   revision: number;
-  agents: Array<{ agentId: string; createdByRunId: string; delegationGroupId?: string }>;
+  agents: Array<{ agentId: string }>;
+  runs: Array<{
+    agentRunId: string;
+    agentId: string;
+    invokedByRunId: string;
+    invokedByTurn?: number;
+    invokedByToolCallId?: string;
+    delegationGroupId?: string;
+    trigger: 'spawn' | 'followup';
+  }>;
 };
 
 export type ConversationState = 'idle' | 'running' | 'waiting' | 'failed';
@@ -38,7 +47,7 @@ export type ConversationItem =
   | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
-  | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentIds: string[] }
+  | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentRunIds: string[] }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'tool'; toolName: string; effect: ApprovalEffect; title: string; target?: string; reason: string; fingerprint: string; options: ApprovalOption[]; resolved?: ApprovalOption }
   | { id: string; kind: 'error'; title: string; message: string };
 

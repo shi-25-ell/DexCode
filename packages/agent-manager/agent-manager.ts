@@ -184,13 +184,17 @@ export function createAgentManager(options: {
       createdByRunId: caller.callerRunId, name: input.name?.trim() || resolved.definition.name, task: input.task,
       contextMode, isolation, definitionName: resolved.definition.name, definitionDigest: resolved.digest,
       definitionSnapshot: resolved.definition, contextSeed: contextMode === 'fork' ? structuredClone(caller.forkSnapshot) : [],
-      delegationGroupId: caller.delegationGroupId, status: 'running', currentRunId: agentRunId, lastRunId: agentRunId, createdAt: now, updatedAt: now,
+      status: 'running', currentRunId: agentRunId, lastRunId: agentRunId, createdAt: now, updatedAt: now,
     };
     if (isWriter(agent) && [...handles.values()].filter((handle) => {
       const running = existing?.agents.find((item) => item.agentId === handle.agentId);
       return running?.isolation === 'shared' && isWriter(running);
     }).length >= limits.maxConcurrentSharedWriters) throw new AgentManagerError('write_capacity_exceeded', 'A shared-workspace writer is already running');
-    const run: AgentRunRecord = { agentRunId, agentId, invokedByRunId: caller.callerRunId, trigger: 'spawn', status: 'running', input: input.task, startedAt: now };
+    const run: AgentRunRecord = {
+      agentRunId, agentId, invokedByRunId: caller.callerRunId, invokedByTurn: caller.callerTurn,
+      invokedByToolCallId: caller.toolCallId, delegationGroupId: caller.delegationGroupId,
+      trigger: 'spawn', status: 'running', input: input.task, startedAt: now,
+    };
     await options.store.createAgentRun(caller.sessionId, agent, run, `${caller.callerRunId}:${caller.toolCallId}`);
     launch(agent, run, [...agent.contextSeed, { role: 'user', content: input.task }]);
     return { agent_id: agentId, agent_run_id: agentRunId, status: 'running' };
@@ -205,7 +209,12 @@ export function createAgentManager(options: {
       const replay = tree.operations[operationId];
       if (replay?.agentRunId) return { agent_id: replay.agentId, agent_run_id: replay.agentRunId, status: 'running', replayed: true };
       const now = new Date().toISOString();
-      const run: AgentRunRecord = { agentRunId: `agent-run-${crypto.randomUUID()}`, agentId: agent.agentId, invokedByRunId: caller.callerRunId, trigger: 'followup', status: 'running', input: input.task, startedAt: now };
+      const run: AgentRunRecord = {
+        agentRunId: `agent-run-${crypto.randomUUID()}`, agentId: agent.agentId,
+        invokedByRunId: caller.callerRunId, invokedByTurn: caller.callerTurn,
+        invokedByToolCallId: caller.toolCallId, delegationGroupId: caller.delegationGroupId,
+        trigger: 'followup', status: 'running', input: input.task, startedAt: now,
+      };
       const next = await options.store.append(caller.sessionId, [
         { type: 'agent_run_started', run, operationId },
         { type: 'agent_context_committed', context: {
