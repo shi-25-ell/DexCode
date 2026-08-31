@@ -229,11 +229,13 @@ test('orchestration tools receive immutable caller context and stay out of ordin
   assert.equal((calls[0] as { caller: { forkSnapshot: ChatMessage[] } }).caller.forkSnapshot.at(-1)?.role, 'user');
   assert.deepEqual((calls[1] as { input: unknown }).input, { agentIds: ['agent-a'], mode: 'all', timeoutMs: 30_000 });
   assert.equal(events.some((event) => event.type === 'tool' || event.type === 'tool_view' || event.type === 'tool_status'), false);
-  const spawn = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'spawn_agent') as { function: { parameters: { required: string[]; properties: { agent: { enum?: string[]; default?: string; description?: string } } } } };
+  const spawn = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'spawn_agent') as { function: { description?: string; parameters: { required: string[]; properties: { agent: { enum?: string[]; default?: string; description?: string }; context_mode: { description?: string } } } } };
   assert.deepEqual(spawn.function.parameters.required, ['task']);
   assert.deepEqual(spawn.function.parameters.properties.agent.enum, ['general-purpose', 'researcher']);
   assert.equal(spawn.function.parameters.properties.agent.default, 'general-purpose');
   assert.match(spawn.function.parameters.properties.agent.description ?? '', /Omit to use general-purpose/);
+  assert.match(spawn.function.description ?? '', /fresh.*self-contained.*fork.*bounded snapshot.*continue independently/i);
+  assert.match(spawn.function.parameters.properties.context_mode.description ?? '', /fresh.*without the main conversation.*fork.*current context.*definition's default/i);
 });
 
 test('consumes one Steer at a natural safe boundary before the next model request', async () => {

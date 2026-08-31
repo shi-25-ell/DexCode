@@ -292,18 +292,21 @@ export const CONTEXT_TOOL_DEFINITIONS = [
   },
 ];
 
+const SPAWN_AGENT_DESCRIPTION = `Start a persistent child agent asynchronously for a bounded task. Use context_mode=fresh for self-contained work that does not need the current conversation; use context_mode=fork when the child needs a bounded snapshot of the main agent's current context. A fork is copied once and parent and child continue independently. Omit context_mode to use the selected agent definition's default. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`;
+const CONTEXT_MODE_DESCRIPTION = "Optional context strategy. fresh starts from the child agent's own system, workspace, memory, and task context without the main conversation. fork additionally copies a bounded snapshot of the main agent's current context; use it when prior discussion or findings are needed. The snapshot is copied once, so parent and child continue independently. Omit to use the selected agent definition's default.";
+
 export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
   {
     type: 'function' as const,
     function: {
       name: 'spawn_agent',
-      description: `Start a persistent child agent asynchronously for a bounded task. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`,
+      description: SPAWN_AGENT_DESCRIPTION,
       parameters: {
         type: 'object', additionalProperties: false, required: ['task'],
         properties: {
           task: { type: 'string', minLength: 1 },
           agent: { type: 'string', minLength: 1, default: DEFAULT_AGENT_DEFINITION_NAME, description: `Optional specialized agent type. Omit to use ${DEFAULT_AGENT_DEFINITION_NAME}.` },
-          context_mode: { type: 'string', enum: ['fresh', 'fork'] }, name: { type: 'string' },
+          context_mode: { type: 'string', enum: ['fresh', 'fork'], description: CONTEXT_MODE_DESCRIPTION }, name: { type: 'string' },
           isolation: { type: 'string', enum: ['shared', 'worktree'] },
         },
       },
@@ -350,7 +353,7 @@ export function agentOrchestrationToolDefinitions(agents: Array<{ name: string; 
     ...tool,
     function: {
       ...tool.function,
-      description: `Start a persistent child agent asynchronously for a bounded task. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}. Available agent definitions: ${descriptions}`,
+      description: `${SPAWN_AGENT_DESCRIPTION} Available agent definitions: ${descriptions}`,
       parameters: {
         ...tool.function.parameters,
         properties: {
