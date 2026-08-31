@@ -255,6 +255,35 @@ export type ToolPresentation = {
   };
 };
 
+export type QueueDelivery = 'next_run' | 'steer';
+export type QueueItemStatus = 'queued' | 'consumed' | 'cancelled';
+export type QueueRequeueReason = 'run_aborted' | 'run_failed' | 'run_limited' | 'budget_exhausted' | 'recovery';
+export type QueuePauseReason = 'user_stop' | 'disconnect' | 'failure' | 'recovery';
+
+export type QueueItemView = {
+  itemId: string;
+  sessionId: string;
+  content: string;
+  delivery: QueueDelivery;
+  status: QueueItemStatus;
+  targetRunId?: string;
+  createdAt: string;
+  updatedAt: string;
+  position: number;
+  revision: number;
+  consumedRunId?: string;
+};
+
+export type QueueLedgerRecord =
+  | { seq: number; at: string; type: 'queue_enqueued'; operationId: string; itemId: string; message: UserMessage; delivery: QueueDelivery; targetRunId?: string; position: number; sessionRevision: number }
+  | { seq: number; at: string; type: 'queue_retargeted'; operationId: string; itemId: string; from: 'next_run'; to: 'steer'; targetRunId: string; sessionRevision: number }
+  | { seq: number; at: string; type: 'queue_requeued'; operationId: string; itemId: string; fromRunId: string; reason: QueueRequeueReason; sessionRevision: number }
+  | { seq: number; at: string; type: 'queue_consumed'; operationId: string; itemId: string; delivery: QueueDelivery; runId: string; sessionRevision: number }
+  | { seq: number; at: string; type: 'queue_cancelled'; operationId: string; itemId: string; reason: 'user_deleted' | 'session_deleted'; sessionRevision: number }
+  | { seq: number; at: string; type: 'queue_reordered'; operationId: string; orderedItemIds: string[]; sessionRevision: number }
+  | { seq: number; at: string; type: 'queue_chain_paused'; operationId: string; reason: QueuePauseReason; sessionRevision: number }
+  | { seq: number; at: string; type: 'queue_chain_resumed'; operationId: string; sessionRevision: number };
+
 export type SessionLedgerRecord =
   | { seq: number; at: string; runId: string; type: 'run_started'; context?: RunContext }
   | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage }
@@ -269,7 +298,8 @@ export type SessionLedgerRecord =
   | { seq: number; at: string; runId: string; type: 'context_compaction_failed'; operationRef: string; reason: NonNullable<ContextPresentation['reason']> }
   | { seq: number; at: string; runId: string; type: 'context_usage_observed'; manifestId: string; usage: ContextUsageSnapshot }
   | { seq: number; at: string; runId: string; type: 'run_terminal'; report: RunReport }
-  | { seq: number; at: string; runId: string; type: 'recovery'; reason: 'interrupted' };
+  | { seq: number; at: string; runId: string; type: 'recovery'; reason: 'interrupted' }
+  | QueueLedgerRecord;
 
 export type FileDiff = {
   path: string;
@@ -508,6 +538,18 @@ export type SkillEvent = {
   summary?: string;
 };
 
+export type QueueEvent =
+  | { type: 'queue_item_added'; sessionId: string; item: QueueItemView; sessionRevision: number }
+  | { type: 'queue_item_updated'; sessionId: string; item: QueueItemView; sessionRevision: number }
+  | { type: 'queue_item_removed'; sessionId: string; itemId: string; reason: string; sessionRevision: number }
+  | { type: 'queue_reordered'; sessionId: string; orderedItemIds: string[]; sessionRevision: number }
+  | { type: 'run_started'; sessionId: string; runId: string; sourceItemId?: string }
+  | { type: 'user_message_committed'; sessionId: string; runId: string; itemId: string }
+  | { type: 'context_refresh_started'; sessionId: string; runId: string; itemId: string }
+  | { type: 'context_refresh_completed'; sessionId: string; runId: string; itemId: string }
+  | { type: 'context_refresh_failed'; sessionId: string; runId: string; itemId: string; message: string }
+  | { type: 'run_chain_paused'; sessionId: string; reason: QueuePauseReason };
+
 export type AgentEvent =
   | ChunkEvent
   | ReasoningChunkEvent
@@ -525,7 +567,8 @@ export type AgentEvent =
   | ConfirmResolvedEvent
   | TaskStatusEvent
   | SessionEvent
-  | SkillEvent;
+  | SkillEvent
+  | QueueEvent;
 
 // ── 挂起确认（服务端内存中维护）──
 

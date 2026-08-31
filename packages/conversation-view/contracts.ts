@@ -1,4 +1,4 @@
-import type { ApprovalEffect, ApprovalOption, ContextBreakdown, ContextPresentation, ContextUsageSource, ContextUsageTiming, ToolPresentation } from '../shared/types.ts';
+import type { ApprovalEffect, ApprovalOption, ContextBreakdown, ContextPresentation, ContextUsageSource, ContextUsageTiming, QueueItemView, ToolPresentation } from '../shared/types.ts';
 
 export type ConversationState = 'idle' | 'running' | 'waiting' | 'failed';
 
@@ -37,6 +37,10 @@ export type ConversationViewSnapshot = {
   ref: string;
   title: string;
   state: ConversationState;
+  activeRun?: { runId: string; phase: 'running' | 'waiting_confirm' | 'closing' | 'stopping' };
+  queuedItems: QueueItemView[];
+  queuePaused: boolean;
+  revision: number;
   updatedAt: string;
   items: ConversationItem[];
   contextUsage: ContextUsageView;

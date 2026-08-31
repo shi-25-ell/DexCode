@@ -329,3 +329,68 @@ test('context artifacts are Session scoped, digest idempotent and readable after
     await rm(projectDir, { recursive: true, force: true });
   }
 });
+
+test('Queue mutations are durable, revisioned and idempotent', async () => {
+  const repository = createSessionRepository({ projectId: `test-queue-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const runId = 'run-queue';
+    await repository.beginRun({ sessionId: session.sessionId, runId, userMessage: { role: 'user', content: 'start' }, context: generalContext });
+    const first = await repository.enqueueQueueItem({ sessionId: session.sessionId, content: 'queued', delivery: 'next_run', operationId: 'enqueue-1' });
+    const replay = await repository.enqueueQueueItem({ sessionId: session.sessionId, content: 'ignored retry body', delivery: 'next_run', operationId: 'enqueue-1' });
+    assert.equal(replay.item.itemId, first.item.itemId);
+    assert.equal(replay.replayed, true);
+    assert.equal((await repository.loadSession(session.sessionId))?.messages.some((message) => message.role === 'user' && message.content === 'queued'), false);
+    const promoted = await repository.promoteQueueItem({ sessionId: session.sessionId, itemId: first.item.itemId, expectedRunId: runId, operationId: 'promote-1' });
+    assert.equal(promoted.outcome, 'steered');
+    const consumed = await repository.consumeSteer({ sessionId: session.sessionId, runId, operationId: 'consume-1' });
+    assert.equal(consumed?.message.content, 'queued');
+    assert.equal((await repository.getQueue(session.sessionId)).pending.length, 0);
+    const cancelled = await repository.cancelQueueItem({ sessionId: session.sessionId, itemId: first.item.itemId, operationId: 'cancel-after-consume' });
+    assert.equal(cancelled.outcome, 'already_consumed');
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('beginRunFromQueue atomically starts a new Run and consumes one FIFO item', async () => {
+  const repository = createSessionRepository({ projectId: `test-queue-run-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const first = await repository.enqueueQueueItem({ sessionId: session.sessionId, content: 'first', delivery: 'next_run', operationId: 'enqueue-first' });
+    await repository.enqueueQueueItem({ sessionId: session.sessionId, content: 'second', delivery: 'next_run', operationId: 'enqueue-second' });
+    const claimed = await repository.beginRunFromQueue({ sessionId: session.sessionId, runId: 'run-from-queue', context: generalContext, operationId: 'claim-first' });
+    assert.equal(claimed?.item.itemId, first.item.itemId);
+    assert.equal(claimed?.session.activeTaskId, 'run-from-queue');
+    assert.equal(claimed?.session.messages.at(-1)?.role, 'user');
+    assert.equal(claimed?.session.messages.at(-1)?.content, 'first');
+    assert.deepEqual((await repository.getQueue(session.sessionId)).pending.map((item) => item.content), ['second']);
+    assert.deepEqual(claimed?.session.ledger?.slice(-4).map((record) => record.type), ['run_started', 'message', 'queue_consumed', 'queue_chain_resumed']);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('recovery requeues orphaned Steer and pauses pending Queue exactly once', async () => {
+  const projectId = `test-queue-recovery-${crypto.randomUUID()}`;
+  const firstRepository = createSessionRepository({ projectId });
+  const projectDir = dirname(firstRepository.sessionsDir);
+  try {
+    const session = await firstRepository.createSession();
+    await firstRepository.beginRun({ sessionId: session.sessionId, runId: 'run-recovery', userMessage: { role: 'user', content: 'start' }, context: generalContext });
+    await firstRepository.enqueueQueueItem({ sessionId: session.sessionId, content: 'steer me', delivery: 'steer', targetRunId: 'run-recovery', operationId: 'enqueue-steer' });
+    const reopened = createSessionRepository({ projectId });
+    const recovered = await reopened.loadSession(session.sessionId);
+    const queue = await reopened.getQueue(session.sessionId);
+    assert.equal(recovered?.activeTaskId, null);
+    assert.equal(queue.pending[0]?.delivery, 'next_run');
+    assert.equal(queue.paused, true);
+    const requeueCount = recovered?.ledger?.filter((record) => record.type === 'queue_requeued').length;
+    await reopened.loadSession(session.sessionId);
+    assert.equal((await reopened.loadSession(session.sessionId))?.ledger?.filter((record) => record.type === 'queue_requeued').length, requeueCount);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});

@@ -13,6 +13,10 @@ import type {
   ContextPresentation,
   ContextSummaryRecord,
   ContextUsageSnapshot,
+  QueueDelivery,
+  QueueItemView,
+  QueuePauseReason,
+  QueueRequeueReason,
   RunReport,
   RunContext,
   Session,
@@ -23,7 +27,10 @@ import type {
   ToolPresentation,
   ToolApprovalRequest,
   ApprovalOption,
+  UserMessage,
 } from '../shared/types.ts';
+import { findQueueOperation, projectQueue } from '../agent-core/queue-reducer.ts';
+import { QueueMutationError, type QueueMutationOutcome } from '../agent-core/session-contracts.ts';
 
 export type { Session, TaskSummary, ChatMessage };
 
@@ -120,7 +127,24 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return session.messages.length > 0
       || session.taskSummaries.length > 0
       || (session.ledger?.some((record) => record.type === 'run_started') ?? false)
-      || (session.runReports?.length ?? 0) > 0;
+      || (session.runReports?.length ?? 0) > 0
+      || projectQueue(session.sessionId, session.ledger ?? []).pending.length > 0;
+  }
+
+  function requireRevision(session: Session, expected: number | undefined) {
+    if (expected !== undefined && (session.revision ?? 0) !== expected) {
+      throw new QueueMutationError('REVISION_CONFLICT', `Session revision changed from ${expected} to ${session.revision ?? 0}`);
+    }
+  }
+
+  function requireOperationId(operationId: string) {
+    if (!operationId.trim()) throw new QueueMutationError('INVALID_STATE', 'operationId is required');
+  }
+
+  function queueItem(session: Session, itemId: string): QueueItemView {
+    const item = projectQueue(session.sessionId, session.ledger ?? []).items.find((candidate) => candidate.itemId === itemId);
+    if (!item) throw new QueueMutationError('NOT_FOUND', `Queue item not found: ${itemId}`);
+    return item;
   }
 
   function memoryPath(workspaceId?: string): string {
@@ -228,7 +252,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       const completedAt = new Date().toISOString();
       const started = session.ledger?.find(
         (record): record is Extract<SessionLedgerRecord, { type: 'run_started' }> =>
-          record.runId === runId && record.type === 'run_started',
+          record.type === 'run_started' && record.runId === runId,
       );
       const report: RunReport = {
         version: 1,
@@ -246,15 +270,38 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         error: { code: 'RECOVERED_INTERRUPTION', message: 'Previous Run was interrupted before terminal commit' },
       };
       const nextSeq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      const nextRevision = (session.revision ?? 0) + 1;
+      const pendingSteers = projectQueue(session.sessionId, session.ledger ?? []).pending.filter(
+        (item) => item.delivery === 'steer' && item.targetRunId === runId,
+      );
+      const requeueRecords = pendingSteers.map((item, index) => ({
+        seq: nextSeq + 2 + index,
+        at: completedAt,
+        type: 'queue_requeued' as const,
+        operationId: `recovery:${runId}:${item.itemId}`,
+        itemId: item.itemId,
+        fromRunId: runId,
+        reason: 'recovery' as const,
+        sessionRevision: nextRevision,
+      }));
       return saveUnlocked({
         ...session,
         activeTaskId: null,
-        revision: (session.revision ?? 0) + 1,
+        revision: nextRevision,
         runReports: [...(session.runReports ?? []), report],
         ledger: [
           ...(session.ledger ?? []),
           { seq: nextSeq, at: completedAt, runId, type: 'recovery', reason: 'interrupted' },
           { seq: nextSeq + 1, at: completedAt, runId, type: 'run_terminal', report },
+          ...requeueRecords,
+          ...(projectQueue(session.sessionId, session.ledger ?? []).pending.length > 0 ? [{
+            seq: nextSeq + 2 + requeueRecords.length,
+            at: completedAt,
+            type: 'queue_chain_paused' as const,
+            operationId: `recovery:${runId}:pause`,
+            reason: 'recovery' as const,
+            sessionRevision: nextRevision,
+          }] : []),
         ],
       });
     });
@@ -764,6 +811,251 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     };
   }
 
+  async function getQueue(sessionId: string) {
+    const session = await loadSession(sessionId);
+    if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${sessionId}`);
+    const queue = projectQueue(sessionId, session.ledger ?? []);
+    return { ...queue, sessionRevision: session.revision ?? 0 };
+  }
+
+  async function enqueueQueueItem(input: {
+    sessionId: string;
+    content: string;
+    delivery: QueueDelivery;
+    operationId: string;
+    targetRunId?: string;
+    expectedSessionRevision?: number;
+  }): Promise<Extract<QueueMutationOutcome, { outcome: 'queued' }>> {
+    requireOperationId(input.operationId);
+    if (!input.content.trim()) throw new QueueMutationError('INVALID_STATE', 'Queue message cannot be empty');
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${input.sessionId}`);
+      const replay = findQueueOperation(session.ledger ?? [], input.operationId);
+      if (replay?.type === 'queue_enqueued') {
+        return { outcome: 'queued', item: queueItem(session, replay.itemId), sessionRevision: replay.sessionRevision, replayed: true };
+      }
+      if (replay) throw new QueueMutationError('INVALID_STATE', 'operationId was already used by a different Queue mutation');
+      requireRevision(session, input.expectedSessionRevision);
+      if (input.delivery === 'steer' && (!input.targetRunId || session.activeTaskId !== input.targetRunId)) {
+        throw new QueueMutationError('RUN_MISMATCH', 'Steer target Run is no longer active');
+      }
+      const queue = projectQueue(input.sessionId, session.ledger ?? []);
+      const revision = (session.revision ?? 0) + 1;
+      const itemId = `queue-${crypto.randomUUID()}`;
+      const at = new Date().toISOString();
+      const record = {
+        seq: (session.ledger?.at(-1)?.seq ?? 0) + 1,
+        at,
+        type: 'queue_enqueued' as const,
+        operationId: input.operationId,
+        itemId,
+        message: { role: 'user', content: input.content.trim() } satisfies UserMessage,
+        delivery: input.delivery,
+        ...(input.targetRunId ? { targetRunId: input.targetRunId } : {}),
+        position: queue.pending.reduce((max, item) => Math.max(max, item.position), -1) + 1,
+        sessionRevision: revision,
+      };
+      const saved = await saveUnlocked({ ...session, revision, ledger: [...(session.ledger ?? []), record] });
+      return { outcome: 'queued', item: queueItem(saved, itemId), sessionRevision: revision };
+    });
+  }
+
+  async function promoteQueueItem(input: {
+    sessionId: string;
+    itemId: string;
+    expectedRunId: string;
+    operationId: string;
+    expectedSessionRevision?: number;
+  }): Promise<Extract<QueueMutationOutcome, { outcome: 'steered' | 'already_consumed' }>> {
+    requireOperationId(input.operationId);
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${input.sessionId}`);
+      const replay = findQueueOperation(session.ledger ?? [], input.operationId);
+      if (replay?.type === 'queue_retargeted') {
+        return { outcome: 'steered', item: queueItem(session, replay.itemId), targetRunId: replay.targetRunId, sessionRevision: replay.sessionRevision, replayed: true };
+      }
+      if (replay) throw new QueueMutationError('INVALID_STATE', 'operationId was already used by a different Queue mutation');
+      requireRevision(session, input.expectedSessionRevision);
+      const item = queueItem(session, input.itemId);
+      if (item.status === 'consumed') return { outcome: 'already_consumed', itemId: item.itemId, runId: item.consumedRunId!, sessionRevision: session.revision ?? 0 };
+      if (item.status !== 'queued' || item.delivery !== 'next_run') throw new QueueMutationError('INVALID_STATE', 'Only a pending next-run item can be steered');
+      if (session.activeTaskId !== input.expectedRunId) throw new QueueMutationError('RUN_MISMATCH', 'Target Run changed before Queue promotion');
+      const revision = (session.revision ?? 0) + 1;
+      const record = {
+        seq: (session.ledger?.at(-1)?.seq ?? 0) + 1,
+        at: new Date().toISOString(),
+        type: 'queue_retargeted' as const,
+        operationId: input.operationId,
+        itemId: input.itemId,
+        from: 'next_run' as const,
+        to: 'steer' as const,
+        targetRunId: input.expectedRunId,
+        sessionRevision: revision,
+      };
+      const saved = await saveUnlocked({ ...session, revision, ledger: [...(session.ledger ?? []), record] });
+      return { outcome: 'steered', item: queueItem(saved, input.itemId), targetRunId: input.expectedRunId, sessionRevision: revision };
+    });
+  }
+
+  async function cancelQueueItem(input: {
+    sessionId: string;
+    itemId: string;
+    operationId: string;
+    expectedSessionRevision?: number;
+  }): Promise<Extract<QueueMutationOutcome, { outcome: 'cancelled' | 'already_cancelled' | 'already_consumed' }>> {
+    requireOperationId(input.operationId);
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${input.sessionId}`);
+      const replay = findQueueOperation(session.ledger ?? [], input.operationId);
+      if (replay?.type === 'queue_cancelled') return { outcome: 'cancelled', itemId: replay.itemId, sessionRevision: replay.sessionRevision, replayed: true };
+      if (replay) throw new QueueMutationError('INVALID_STATE', 'operationId was already used by a different Queue mutation');
+      requireRevision(session, input.expectedSessionRevision);
+      const item = queueItem(session, input.itemId);
+      if (item.status === 'cancelled') return { outcome: 'already_cancelled', itemId: item.itemId, sessionRevision: session.revision ?? 0 };
+      if (item.status === 'consumed') return { outcome: 'already_consumed', itemId: item.itemId, runId: item.consumedRunId!, sessionRevision: session.revision ?? 0 };
+      const revision = (session.revision ?? 0) + 1;
+      const record = {
+        seq: (session.ledger?.at(-1)?.seq ?? 0) + 1,
+        at: new Date().toISOString(),
+        type: 'queue_cancelled' as const,
+        operationId: input.operationId,
+        itemId: input.itemId,
+        reason: 'user_deleted' as const,
+        sessionRevision: revision,
+      };
+      await saveUnlocked({ ...session, revision, ledger: [...(session.ledger ?? []), record] });
+      return { outcome: 'cancelled', itemId: input.itemId, sessionRevision: revision };
+    });
+  }
+
+  async function reorderQueueItems(input: { sessionId: string; orderedItemIds: string[]; operationId: string; expectedSessionRevision: number }) {
+    requireOperationId(input.operationId);
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${input.sessionId}`);
+      const replay = findQueueOperation(session.ledger ?? [], input.operationId);
+      if (replay?.type === 'queue_reordered') return { orderedItemIds: replay.orderedItemIds, sessionRevision: replay.sessionRevision, replayed: true };
+      if (replay) throw new QueueMutationError('INVALID_STATE', 'operationId was already used by a different Queue mutation');
+      requireRevision(session, input.expectedSessionRevision);
+      const pendingIds = projectQueue(input.sessionId, session.ledger ?? []).pending.map((item) => item.itemId);
+      if (input.orderedItemIds.length !== pendingIds.length || new Set(input.orderedItemIds).size !== pendingIds.length || input.orderedItemIds.some((id) => !pendingIds.includes(id))) {
+        throw new QueueMutationError('INVALID_ORDER', 'Queue order must contain every pending item exactly once');
+      }
+      const revision = (session.revision ?? 0) + 1;
+      const record = { seq: (session.ledger?.at(-1)?.seq ?? 0) + 1, at: new Date().toISOString(), type: 'queue_reordered' as const, operationId: input.operationId, orderedItemIds: input.orderedItemIds, sessionRevision: revision };
+      await saveUnlocked({ ...session, revision, ledger: [...(session.ledger ?? []), record] });
+      return { orderedItemIds: input.orderedItemIds, sessionRevision: revision };
+    });
+  }
+
+  async function consumeSteer(input: { sessionId: string; runId: string; operationId: string }) {
+    requireOperationId(input.operationId);
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${input.sessionId}`);
+      const replay = findQueueOperation(session.ledger ?? [], input.operationId);
+      if (replay?.type === 'queue_consumed' && replay.delivery === 'steer') {
+        const item = queueItem(session, replay.itemId);
+        return { item, message: { role: 'user', content: item.content } satisfies UserMessage, sessionRevision: replay.sessionRevision };
+      }
+      if (replay) throw new QueueMutationError('INVALID_STATE', 'operationId was already used by a different Queue mutation');
+      if (session.activeTaskId !== input.runId) throw new QueueMutationError('RUN_MISMATCH', 'Run is no longer active');
+      const item = projectQueue(input.sessionId, session.ledger ?? []).pending.find((candidate) => candidate.delivery === 'steer' && candidate.targetRunId === input.runId);
+      if (!item) return null;
+      const message = { role: 'user', content: item.content } satisfies UserMessage;
+      const revision = (session.revision ?? 0) + 1;
+      const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      const at = new Date().toISOString();
+      const saved = await saveUnlocked({
+        ...session,
+        revision,
+        messages: [...session.messages, message],
+        ledger: [
+          ...(session.ledger ?? []),
+          { seq, at, runId: input.runId, type: 'message', message },
+          { seq: seq + 1, at, type: 'queue_consumed', operationId: input.operationId, itemId: item.itemId, delivery: 'steer', runId: input.runId, sessionRevision: revision },
+        ],
+      });
+      return { item: queueItem(saved, item.itemId), message, sessionRevision: revision };
+    });
+  }
+
+  async function beginRunFromQueue(input: { sessionId: string; runId: string; context: RunContext; operationId: string }) {
+    requireOperationId(input.operationId);
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${input.sessionId}`);
+      const replay = findQueueOperation(session.ledger ?? [], input.operationId);
+      if (replay?.type === 'queue_consumed' && replay.delivery === 'next_run') {
+        const item = queueItem(session, replay.itemId);
+        return { session, item, message: { role: 'user', content: item.content } satisfies UserMessage };
+      }
+      if (replay) throw new QueueMutationError('INVALID_STATE', 'operationId was already used by a different Queue mutation');
+      if (session.activeTaskId) throw new QueueMutationError('RUN_MISMATCH', `Session already has active Run: ${session.activeTaskId}`);
+      if (!sameScope(session.scope, input.context.scope)) throw new QueueMutationError('RUN_MISMATCH', 'Run context does not match Session scope');
+      const item = projectQueue(input.sessionId, session.ledger ?? []).pending.find((candidate) => candidate.delivery === 'next_run');
+      if (!item) return null;
+      const message = { role: 'user', content: item.content } satisfies UserMessage;
+      const revision = (session.revision ?? 0) + 1;
+      const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      const at = new Date().toISOString();
+      const saved = await saveUnlocked({
+        ...session,
+        activeTaskId: input.runId,
+        revision,
+        messages: [...session.messages, message],
+        ledger: [
+          ...(session.ledger ?? []),
+          { seq, at, runId: input.runId, type: 'run_started', context: input.context },
+          { seq: seq + 1, at, runId: input.runId, type: 'message', message },
+          { seq: seq + 2, at, type: 'queue_consumed', operationId: input.operationId, itemId: item.itemId, delivery: 'next_run', runId: input.runId, sessionRevision: revision },
+          { seq: seq + 3, at, type: 'queue_chain_resumed', operationId: `${input.operationId}:resume`, sessionRevision: revision },
+        ],
+      });
+      activeRuns.add(`${input.sessionId}:${input.runId}`);
+      return { session: saved, item: queueItem(saved, item.itemId), message };
+    });
+  }
+
+  async function requeueSteers(input: { sessionId: string; runId: string; reason: QueueRequeueReason; operationId: string }) {
+    requireOperationId(input.operationId);
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${input.sessionId}`);
+      const pending = projectQueue(input.sessionId, session.ledger ?? []).pending.filter((item) => item.delivery === 'steer' && item.targetRunId === input.runId);
+      if (pending.length === 0) return { items: [], sessionRevision: session.revision ?? 0 };
+      const revision = (session.revision ?? 0) + 1;
+      const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
+      const at = new Date().toISOString();
+      const records = pending.map((item, index) => ({ seq: seq + index, at, type: 'queue_requeued' as const, operationId: `${input.operationId}:${item.itemId}`, itemId: item.itemId, fromRunId: input.runId, reason: input.reason, sessionRevision: revision }));
+      const saved = await saveUnlocked({ ...session, revision, ledger: [...(session.ledger ?? []), ...records] });
+      return { items: pending.map((item) => queueItem(saved, item.itemId)), sessionRevision: revision };
+    });
+  }
+
+  async function setQueuePaused(input: { sessionId: string; paused: boolean; operationId: string; reason?: QueuePauseReason }) {
+    requireOperationId(input.operationId);
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new QueueMutationError('NOT_FOUND', `Session not found: ${input.sessionId}`);
+      const replay = findQueueOperation(session.ledger ?? [], input.operationId);
+      if (replay?.type === 'queue_chain_paused' || replay?.type === 'queue_chain_resumed') return { paused: replay.type === 'queue_chain_paused', sessionRevision: replay.sessionRevision };
+      if (replay) throw new QueueMutationError('INVALID_STATE', 'operationId was already used by a different Queue mutation');
+      const current = projectQueue(input.sessionId, session.ledger ?? []).paused;
+      if (current === input.paused) return { paused: current, sessionRevision: session.revision ?? 0 };
+      if (input.paused && !input.reason) throw new QueueMutationError('INVALID_STATE', 'Queue pause reason is required');
+      const revision = (session.revision ?? 0) + 1;
+      const record = input.paused
+        ? { seq: (session.ledger?.at(-1)?.seq ?? 0) + 1, at: new Date().toISOString(), type: 'queue_chain_paused' as const, operationId: input.operationId, reason: input.reason!, sessionRevision: revision }
+        : { seq: (session.ledger?.at(-1)?.seq ?? 0) + 1, at: new Date().toISOString(), type: 'queue_chain_resumed' as const, operationId: input.operationId, sessionRevision: revision };
+      await saveUnlocked({ ...session, revision, ledger: [...(session.ledger ?? []), record] });
+      return { paused: input.paused, sessionRevision: revision };
+    });
+  }
+
   async function finishRun(input: { sessionId: string; report: RunReport; summary: TaskSummary }) {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
@@ -773,7 +1065,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       if (session.activeTaskId !== input.report.runId) throw new Error(`Run is not active: ${input.report.runId}`);
       const started = session.ledger?.find(
         (record): record is Extract<SessionLedgerRecord, { type: 'run_started' }> =>
-          record.runId === input.report.runId && record.type === 'run_started',
+          record.type === 'run_started' && record.runId === input.report.runId,
       );
       if (!started?.context) throw new Error(`Run context is missing: ${input.report.runId}`);
       if (input.report.context && JSON.stringify(input.report.context) !== JSON.stringify(started.context)) {
@@ -977,6 +1269,15 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     recordContextProviderUsage,
     putContextArtifact,
     readContextArtifact,
+    getQueue,
+    enqueueQueueItem,
+    promoteQueueItem,
+    cancelQueueItem,
+    reorderQueueItems,
+    consumeSteer,
+    beginRunFromQueue,
+    requeueSteers,
+    setQueuePaused,
     finishRun,
     readProjectMemory,
     getProjectMemory,

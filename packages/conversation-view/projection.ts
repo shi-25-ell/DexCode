@@ -2,9 +2,13 @@ import type { Session, SessionLedgerRecord } from '../shared/types.ts';
 import type { ConversationItem, ConversationListItem, ConversationState, ConversationViewSnapshot, ContextUsageView } from './contracts.ts';
 import { safeDisplayOutput } from './output-policy.ts';
 import { conversationTitle } from './title.ts';
+import { projectQueue } from '../agent-core/queue-reducer.ts';
 
 function sessionState(session: Session): ConversationState {
-  if (session.activeTaskId) return 'running';
+  if (session.activeTaskId) {
+    const pendingApproval = [...(session.ledger ?? [])].reverse().find((record) => record.type === 'approval_requested' || record.type === 'approval_resolved');
+    return pendingApproval?.type === 'approval_requested' ? 'waiting' : 'running';
+  }
   return session.runReports?.at(-1)?.status === 'failed' ? 'failed' : 'idle';
 }
 
@@ -112,8 +116,9 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
   return items;
 }
 
-export function projectConversation(session: Session, options: { contextWindow?: number } = {}): ConversationViewSnapshot {
+export function projectConversation(session: Session, options: { contextWindow?: number; activePhase?: 'running' | 'waiting_confirm' | 'closing' | 'stopping' } = {}): ConversationViewSnapshot {
   const item = projectConversationListItem(session);
+  const queue = projectQueue(session.sessionId, session.ledger ?? []);
   const items = projectLedger(session.ledger ?? []).map((entry) => (
     entry.kind === 'context' && entry.context.status === 'running' && !session.activeTaskId
       ? { ...entry, context: { ...entry.context, status: 'failed' as const, reason: 'interrupted' as const } }
@@ -123,6 +128,10 @@ export function projectConversation(session: Session, options: { contextWindow?:
     ref: item.ref,
     title: item.title,
     state: item.state,
+    ...(session.activeTaskId ? { activeRun: { runId: session.activeTaskId, phase: options.activePhase ?? (item.state === 'waiting' ? 'waiting_confirm' : 'running') } } : {}),
+    queuedItems: queue.pending,
+    queuePaused: queue.paused,
+    revision: session.revision ?? 0,
     updatedAt: item.updatedAt,
     items,
     contextUsage: contextUsage(session, options.contextWindow),

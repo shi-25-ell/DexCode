@@ -7,13 +7,39 @@ import type {
   ContextPresentation,
   ContextSummaryRecord,
   ContextUsageSnapshot,
+  QueueDelivery,
+  QueueItemView,
+  QueuePauseReason,
+  QueueRequeueReason,
   RunReport,
   RunContext,
   Session,
   SessionScope,
   TaskSummary,
   ToolPresentation,
+  UserMessage,
 } from '../shared/types.ts';
+
+export type QueueMutationOutcome =
+  | { outcome: 'queued'; item: QueueItemView; sessionRevision: number; replayed?: boolean }
+  | { outcome: 'steered'; item: QueueItemView; targetRunId: string; sessionRevision: number; replayed?: boolean }
+  | { outcome: 'remained_queued'; item: QueueItemView; reason: 'run_changed' | 'run_closing' | 'waiting_confirm'; sessionRevision: number }
+  | { outcome: 'cancelled'; itemId: string; sessionRevision: number; replayed?: boolean }
+  | { outcome: 'already_cancelled'; itemId: string; sessionRevision: number }
+  | { outcome: 'already_consumed'; itemId: string; runId: string; sessionRevision: number };
+
+export class QueueMutationError extends Error {
+  readonly code: 'NOT_FOUND' | 'REVISION_CONFLICT' | 'RUN_MISMATCH' | 'INVALID_STATE' | 'INVALID_ORDER';
+
+  constructor(
+    code: 'NOT_FOUND' | 'REVISION_CONFLICT' | 'RUN_MISMATCH' | 'INVALID_STATE' | 'INVALID_ORDER',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'QueueMutationError';
+    this.code = code;
+  }
+}
 
 export type BeginRunInput = {
   sessionId: string;
@@ -100,5 +126,14 @@ export interface SessionRepository {
     totalChars: number;
   }>;
   finishRun(input: FinishRunInput): Promise<{ session: Session; report: RunReport; committed: boolean }>;
+  getQueue(sessionId: string): Promise<{ items: QueueItemView[]; pending: QueueItemView[]; paused: boolean; sessionRevision: number }>;
+  enqueueQueueItem(input: { sessionId: string; content: string; delivery: QueueDelivery; operationId: string; targetRunId?: string; expectedSessionRevision?: number }): Promise<Extract<QueueMutationOutcome, { outcome: 'queued' }>>;
+  promoteQueueItem(input: { sessionId: string; itemId: string; expectedRunId: string; operationId: string; expectedSessionRevision?: number }): Promise<Extract<QueueMutationOutcome, { outcome: 'steered' | 'already_consumed' }>>;
+  cancelQueueItem(input: { sessionId: string; itemId: string; operationId: string; expectedSessionRevision?: number }): Promise<Extract<QueueMutationOutcome, { outcome: 'cancelled' | 'already_cancelled' | 'already_consumed' }>>;
+  reorderQueueItems(input: { sessionId: string; orderedItemIds: string[]; operationId: string; expectedSessionRevision: number }): Promise<{ orderedItemIds: string[]; sessionRevision: number; replayed?: boolean }>;
+  consumeSteer(input: { sessionId: string; runId: string; operationId: string }): Promise<{ item: QueueItemView; message: UserMessage; sessionRevision: number } | null>;
+  beginRunFromQueue(input: { sessionId: string; runId: string; context: RunContext; operationId: string }): Promise<{ session: Session; item: QueueItemView; message: UserMessage } | null>;
+  requeueSteers(input: { sessionId: string; runId: string; reason: QueueRequeueReason; operationId: string }): Promise<{ items: QueueItemView[]; sessionRevision: number }>;
+  setQueuePaused(input: { sessionId: string; paused: boolean; operationId: string; reason?: QueuePauseReason }): Promise<{ paused: boolean; sessionRevision: number }>;
   readProjectMemory(workspaceId?: string): Promise<string>;
 }
