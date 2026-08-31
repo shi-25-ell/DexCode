@@ -67,6 +67,18 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
   const finalMessageIds = new Set(records.flatMap((record) => (
     record.type === 'run_terminal' && record.report.finalMessageId ? [record.report.finalMessageId] : []
   )));
+  const legacyFinalAssistantSeqs = new Set<number>();
+  for (const terminal of records) {
+    if (terminal.type !== 'run_terminal' || terminal.report.status !== 'completed' || terminal.report.finalMessageId) continue;
+    const candidate = [...records].reverse().find((record) => (
+      record.runId === terminal.runId
+      && record.type === 'message'
+      && record.message.role === 'assistant'
+      && Boolean(record.message.content?.trim())
+      && (!terminal.report.finalAnswer || record.message.content === terminal.report.finalAnswer)
+    ));
+    if (candidate?.type === 'message') legacyFinalAssistantSeqs.add(candidate.seq);
+  }
   const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && record.tool === 'compact_context' ? [record.callId] : []));
   for (const record of records) {
     if (record.type === 'message') {
@@ -79,7 +91,7 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
         ...(record.messageId ? { messageId: record.messageId } : {}),
         runId: record.runId,
         ...(record.turn !== undefined ? { turn: record.turn } : {}),
-        ...(record.messageId && finalMessageIds.has(record.messageId) ? { final: true } : {}),
+        ...((record.messageId && finalMessageIds.has(record.messageId)) || legacyFinalAssistantSeqs.has(record.seq) ? { final: true } : {}),
       });
     } else if (record.type === 'tool_completed') {
       if (internalContextCalls.has(record.callId)) continue;

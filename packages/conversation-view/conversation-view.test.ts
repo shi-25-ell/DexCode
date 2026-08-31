@@ -181,3 +181,44 @@ test('projection restores generic approval cards and their resolved state', () =
     resolved: 'allow_once',
   }]);
 });
+
+test('projection marks only the explicit final assistant message and upgrades completed legacy ledgers', () => {
+  const now = new Date().toISOString();
+  const report = (runId: string, finalAnswer: string, finalMessageId?: string) => ({
+    version: 1 as const,
+    runId,
+    status: 'completed' as const,
+    terminationReason: 'natural_completion',
+    finalAnswer,
+    ...(finalMessageId ? { finalMessageId } : {}),
+    startedAt: now,
+    completedAt: now,
+    modelTurnCount: 2,
+    modelAttemptCount: 2,
+    usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, unknown: 0 },
+    toolsUsed: [],
+    filesModified: [],
+  });
+  const session = (runId: string, finalMessageId?: string): Session => ({
+    sessionId: `session-${runId}`,
+    scope: { kind: 'general' },
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [
+      { seq: 1, at: now, runId, type: 'message', messageId: 'intermediate', turn: 1, message: { role: 'assistant', content: '先调用工具' } },
+      { seq: 2, at: now, runId, type: 'message', messageId: 'final', turn: 2, message: { role: 'assistant', content: '最终回答' } },
+      { seq: 3, at: now, runId, type: 'run_terminal', report: report(runId, '最终回答', finalMessageId) },
+    ],
+  });
+
+  const explicit = projectConversation(session('run-v2', 'final')).items;
+  assert.equal(explicit[0]?.kind === 'assistant' ? explicit[0].final : undefined, undefined);
+  assert.equal(explicit[1]?.kind === 'assistant' ? explicit[1].final : undefined, true);
+
+  const legacy = projectConversation(session('run-legacy')).items;
+  assert.equal(legacy[0]?.kind === 'assistant' ? legacy[0].final : undefined, undefined);
+  assert.equal(legacy[1]?.kind === 'assistant' ? legacy[1].final : undefined, true);
+});

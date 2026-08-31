@@ -38,6 +38,8 @@ export type ActiveRunView = {
   startedAt: string;
   phase: RunPhase;
   phaseChangedAt: string;
+  reasoningStartedAt?: string;
+  reasoningCompletedAt?: string;
   note?: string;
   assistantDraft: AssistantDraftView | null;
   committedMessages: ConversationItem[];
@@ -115,7 +117,11 @@ export function beginRunPresentation(state: RunPresentation, input: { content: s
   };
 }
 
-function createActiveRun(envelope: RunEventEnvelope, sessionRun = false): ActiveRunView {
+export function failRunPresentation(state: RunPresentation, message: string): RunPresentation {
+  return { ...state, status: 'failed', streamError: message };
+}
+
+function createActiveRun(envelope: RunEventEnvelope): ActiveRunView {
   return {
     runId: envelope.runId,
     startedAt: envelope.at,
@@ -126,7 +132,6 @@ function createActiveRun(envelope: RunEventEnvelope, sessionRun = false): Active
     toolsByCallId: {},
     approvalsById: {},
     contextsById: {},
-    ...(sessionRun ? {} : {}),
   };
 }
 
@@ -209,9 +214,19 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
     return { ...state, activeRun: { ...active, runId: envelope.runId, startedAt: envelope.at }, status: 'running' };
   }
   if (event.type === 'run_phase_changed') {
+    const { note: _previousNote, ...activeWithoutNote } = active;
+    const reasoningCompletedAt = active.reasoningStartedAt && !active.reasoningCompletedAt && active.phase === 'thinking' && event.phase !== 'thinking'
+      ? envelope.at
+      : active.reasoningCompletedAt;
     return {
       ...state,
-      activeRun: { ...active, phase: event.phase, phaseChangedAt: envelope.at, ...(event.note ? { note: event.note } : {}) },
+      activeRun: {
+        ...activeWithoutNote,
+        phase: event.phase,
+        phaseChangedAt: envelope.at,
+        ...(reasoningCompletedAt ? { reasoningCompletedAt } : {}),
+        ...(event.note ? { note: event.note } : {}),
+      },
       status: event.phase === 'waiting_approval' ? 'waiting' : 'running',
     };
   }
@@ -239,6 +254,8 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
       ...state,
       activeRun: {
         ...active,
+        ...(event.kind === 'reasoning' && !active.reasoningStartedAt ? { reasoningStartedAt: envelope.at } : {}),
+        ...(event.kind !== 'reasoning' && active.reasoningStartedAt && !active.reasoningCompletedAt ? { reasoningCompletedAt: envelope.at } : {}),
         assistantDraft: { ...active.assistantDraft, blocks: { ...active.assistantDraft.blocks, [event.contentIndex]: block } },
       },
     };
@@ -313,7 +330,7 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
     };
   }
   if (event.type === 'resync_required') return { ...state, needsResync: true };
-  if (event.type === 'stream_error') return { ...state, status: 'failed', streamError: event.message };
+  if (event.type === 'stream_error') return { ...state, activeRun: null, status: 'failed', streamError: event.message };
   return state;
 }
 
@@ -322,7 +339,7 @@ export function reduceRunEvent(state: RunPresentation, envelope: RunEventEnvelop
     return { ...state, status: 'failed', streamError: '服务端返回了无效的运行事件' };
   }
   if (state.lastSeq !== undefined && envelope.seq <= state.lastSeq) return state;
-  const active = state.activeRun ?? createActiveRun(envelope, true);
+  const active = state.activeRun ?? createActiveRun(envelope);
   if (!active.runId.startsWith('pending:') && active.runId !== envelope.runId) {
     return { ...state, needsResync: true, status: 'failed', streamError: '运行事件串流到了错误的 Run' };
   }
@@ -347,4 +364,3 @@ export function draftReasoning(draft: AssistantDraftView | null): { content: str
   if (blocks.length === 0) return null;
   return { content: blocks.map((block) => block.content).join(''), truncated: blocks.some((block) => block.truncated) };
 }
-

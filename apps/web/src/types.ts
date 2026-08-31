@@ -97,19 +97,3 @@ export type ModelDescriptor = {
   contextWindow?: number;
   providerDisplayName?: string;
 };
-
-export type StreamEvent =
-  | { type: 'session'; sessionId: string; isNew: boolean }
-  | { type: 'chunk'; chunk: string }
-  | { type: 'tool_view'; presentation: ToolPresentation }
-  | ({ type: 'context_usage' } & ContextUsage)
-  | { type: 'context_activity'; presentation: ContextPresentation }
-  | { type: 'task_status'; status: string; taskId: string; note?: string }
-  | { type: 'confirm_request'; confirmId: string; question: string; options?: string[] }
-  | { type: 'command_confirm_request'; confirmId: string; command: string; cwd: string; risk: string; reason: string }
-  | { type: 'approval_request'; taskId: string; approvalId: string; toolName: string; effect: ApprovalEffect; title: string; target?: string; reason: string; fingerprint: string; options: ApprovalOption[] }
-  | { type: 'error'; message: string }
-  | { type: 'result'; result: unknown }
-  | { type: 'reasoning_chunk'; chunk: string }
-  | { type: 'skill'; skill: string; action: string }
-  | { type: 'tool_status'; callId: string; tool: string; status: string };

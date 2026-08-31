@@ -121,4 +121,45 @@ describe('RunPresentation', () => {
     expect(interrupted.committedItems.at(-1)).toMatchObject({ kind: 'error', title: '上次运行已中断' });
     expect(JSON.stringify(interrupted.committedItems)).not.toContain('reasoning');
   });
+
+  it.each(['aborted', 'failed', 'limited'] as const)('uses the authoritative snapshot for a %s terminal without inventing success', (status) => {
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'ephemeral' }));
+    const terminalSnapshot: ConversationViewSnapshot = {
+      ref: snapshot.ref,
+      title: snapshot.title,
+      state: 'failed',
+      updatedAt: snapshot.updatedAt,
+      revision: 3,
+      items: [
+        { id: 'user-1', kind: 'user', content: 'hello' },
+        { id: 'partial', kind: 'assistant', content: '可确认的部分结果', messageId: 'partial' },
+        { id: 'error', kind: 'error', title: '本次运行未完成', message: status },
+      ],
+      contextUsage: snapshot.contextUsage,
+    };
+    state = reduceRunEvent(state, envelope(4, {
+      type: 'run_finished',
+      terminal: { status, reason: `test_${status}` },
+      conversationRevision: terminalSnapshot.revision,
+      conversation: terminalSnapshot,
+    }));
+    expect(state.activeRun).toBeNull();
+    expect(state.status).toBe('failed');
+    expect(state.terminal?.status).toBe(status);
+    expect(state.committedItems).toEqual(terminalSnapshot.items);
+    expect(JSON.stringify(state.committedItems)).not.toContain('ephemeral');
+  });
+
+  it('bounds reasoning and tool progress display buffers and marks truncation', () => {
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'r'.repeat(70_000) }));
+    const queued = { callRef: 'call-1', category: 'command' as const, name: '运行命令', status: 'queued' as const, summary: '准备中' };
+    state = reduceRunEvent(state, envelope(4, { type: 'tool_started', callId: 'call-1', presentation: queued }));
+    state = reduceRunEvent(state, envelope(5, { type: 'tool_progress', callId: 'call-1', presentation: { ...queued, status: 'running', rawOutput: 'o'.repeat(40_000) } }));
+    expect(draftReasoning(state.activeRun?.assistantDraft ?? null)).toMatchObject({ truncated: true });
+    expect(draftReasoning(state.activeRun?.assistantDraft ?? null)?.content).toHaveLength(64_000);
+    expect(state.activeRun?.toolsByCallId['call-1']?.rawOutput).toHaveLength(32_000);
+    expect(state.activeRun?.toolsByCallId['call-1']?.truncated).toBe(true);
+  });
 });
