@@ -369,6 +369,34 @@ export function createCodingAgent(
           });
         },
       } : undefined;
+      const refreshDirective = async (directive: string) => {
+        const [refreshedContext, refreshedMemory] = await Promise.all([
+          agentEnvironment.scope.kind === 'workspace'
+            ? contextManager.buildForPrompt(directive, null, { projectMemory })
+            : Promise.resolve({
+                prompt: directive,
+                selectedFile: null,
+                selectedFileContent: null,
+                workspaceSummary: '',
+                projectMemorySummary: '',
+                contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
+              }),
+          agentEnvironment.scope.kind === 'workspace' && managedMemory
+            ? managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId, runId, query: directive, signal: options.signal })
+            : Promise.resolve({ sections: [], refs: [] }),
+        ]);
+        managedMemoryRefs = refreshedMemory.refs;
+        return {
+          systemSections: [...buildSystemSections(
+            refreshedContext,
+            projectMemory,
+            session.taskSummaries,
+            skillsBlock(effectiveSkillRegistry, directive),
+            agentEnvironment.scope,
+          ), ...refreshedMemory.sections],
+          managedMemoryRefs: refreshedMemory.refs,
+        };
+      };
       result = await runtime.runAgent({
         identity: { runId, profile: 'main', origin: 'user' },
         messages: executionMessages,
@@ -395,6 +423,7 @@ export function createCodingAgent(
         productSessionId: sessionId,
         executorHooks: resolvedHooks,
         commandSource: options.commandSource,
+        ...(contextStrategy === 'legacy' ? { refreshDirective } : {}),
         presentation: { emit: publish },
         onExecutorEvent: onEvent,
         lifecycle: composeLifecycleHooks(memoryLifecycle, options.lifecycle),
@@ -409,33 +438,7 @@ export function createCodingAgent(
           policy: contextPolicy,
           readArtifact: (input) => sessionRepository.readContextArtifact({ sessionId, ...input }),
           managedMemoryRefs: preparedMemory.refs,
-          refreshDirective: async (directive) => {
-            const [refreshedContext, refreshedMemory] = await Promise.all([
-              agentEnvironment.scope.kind === 'workspace'
-                ? contextManager.buildForPrompt(directive, null, { projectMemory })
-                : Promise.resolve({
-                  prompt: directive,
-                  selectedFile: null,
-                  selectedFileContent: null,
-                  workspaceSummary: '',
-                  projectMemorySummary: '',
-                  contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
-                }),
-              agentEnvironment.scope.kind === 'workspace' && managedMemory
-                ? managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId, runId, query: directive, signal: options.signal })
-                : Promise.resolve({ sections: [], refs: [] }),
-            ]);
-            return {
-              systemSections: [...buildSystemSections(
-                refreshedContext,
-                projectMemory,
-                session.taskSummaries,
-                skillsBlock(effectiveSkillRegistry, directive),
-                agentEnvironment.scope,
-              ), ...refreshedMemory.sections],
-              managedMemoryRefs: refreshedMemory.refs,
-            };
-          },
+          refreshDirective,
         } : { mode: 'isolated' },
       });
     } catch (error) {

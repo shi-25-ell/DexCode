@@ -127,6 +127,7 @@ export interface AgentRunSpec {
   toolHost?: CodingToolHost;
   executorHooks?: ConfirmHook | ExecutorHooks;
   commandSource?: RunCommandSource;
+  refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
   presentation?: { emit(event: RunEventPayload): void };
   onExecutorEvent?: (event: AgentEvent) => void;
   onEvent?: (event: AgentRuntimeEvent) => Promise<void> | void;
@@ -325,6 +326,7 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
           semantic,
           commandSource: spec.commandSource,
           presentation: spec.presentation,
+          refreshDirective: contextPolicy.mode === 'managed' ? contextPolicy.refreshDirective : spec.refreshDirective,
           ...(contextPolicy.mode === 'managed' ? {
             sessionId: spec.productSessionId ?? contextPolicy.sessionId,
             context: {
@@ -336,7 +338,6 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
               readArtifact: contextPolicy.readArtifact,
               ...(contextPolicy.managedMemoryRefs ? { managedMemoryRefs: contextPolicy.managedMemoryRefs } : {}),
             },
-            refreshDirective: contextPolicy.refreshDirective,
           } : {}),
         },
       );

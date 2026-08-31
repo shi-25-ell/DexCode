@@ -19,6 +19,7 @@ declare module 'node:fs' {
     readFile(path: string, options?: string): Promise<string>;
     writeFile(path: string, data: string, options?: string | { encoding?: string; flag?: string; mode?: number }): Promise<void>;
     appendFile(path: string, data: string, options?: string | { encoding?: string; mode?: number }): Promise<void>;
+    open(path: string, flags: string): Promise<{ writeFile(data: string, encoding?: string): Promise<void>; sync(): Promise<void>; close(): Promise<void> }>;
     rename(oldPath: string, newPath: string): Promise<void>;
     rm(path: string, options?: { recursive?: boolean; force?: boolean; maxRetries?: number; retryDelay?: number }): Promise<void>;
     cp(source: string, destination: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
@@ -33,6 +34,7 @@ declare module 'node:fs/promises' {
   export const readFile: typeof import('node:fs').promises.readFile;
   export const writeFile: typeof import('node:fs').promises.writeFile;
   export const appendFile: typeof import('node:fs').promises.appendFile;
+  export const open: typeof import('node:fs').promises.open;
   export const mkdir: typeof import('node:fs').promises.mkdir;
   export const cp: typeof import('node:fs').promises.cp;
   export const rename: typeof import('node:fs').promises.rename;

@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
@@ -71,7 +71,13 @@ export function createManagedMemoryStore(options: StoreOptions) {
   async function atomicWrite(target: string, content: string, operationId: string = crypto.randomUUID()): Promise<void> {
     await mkdir(dirname(target), { recursive: true });
     const temp = `${target}.${operationId.replace(/[^a-zA-Z0-9_-]/g, '_')}.tmp`;
-    await writeFile(temp, content, 'utf8');
+    const handle = await open(temp, 'w');
+    try {
+      await handle.writeFile(content, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     try {
       await rename(temp, target);
     } catch (error) {
