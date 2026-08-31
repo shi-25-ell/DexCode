@@ -19,6 +19,13 @@ import { createTemplateGenerator } from '../../packages/template-generator/index
 import { createSuccessResponse } from '../../packages/shared/index.ts';
 import { createCapabilityRegistry } from '../../packages/capability-registry/index.ts';
 import { presentTool, projectConversation, projectConversationListItem } from '../../packages/conversation-view/index.ts';
+import {
+  createRunReplayBuffer,
+  isDroppableRunEvent,
+  safeRunNote,
+  type RunEventEnvelope,
+  type RunEventPayload,
+} from '../../packages/run-protocol/index.ts';
 
 type RequestContext = {
   path?: string;
@@ -145,11 +152,30 @@ const pendingConfirms = new Map<string, PendingConfirm>();
 const pendingCommandConfirms = new Map<string, PendingCommandConfirm>();
 const pendingToolApprovals = new Map<string, PendingToolApproval>();
 const activeConversationRuns = new Map<string, AbortController>();
+const runReplayBuffer = createRunReplayBuffer();
+
+type V2Subscriber = {
+  writer: ReturnType<typeof createBoundedRunSseWriter>;
+  response: ServerResponse;
+  closed: boolean;
+};
+
+type ActiveV2Run = {
+  runId: string;
+  controller: AbortController;
+  subscribers: Set<V2Subscriber>;
+  lastSeq: number;
+  finished: boolean;
+  done: Promise<void>;
+};
+
+const activeV2Runs = new Map<string, ActiveV2Run>();
 
 function createToolApprovalHook(
   sessionId: string,
   taskId: string,
   onEvent: (event: AgentEvent) => void,
+  emit?: (event: RunEventPayload) => void,
 ): ToolApprovalHook {
   return async (request) => {
     const approvalId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -173,6 +199,21 @@ function createToolApprovalHook(
       });
       onEvent({ type: 'task_status', taskId, status: 'waiting_confirm', note: '等待工具批准' });
       onEvent({ ...durableRequest, type: 'approval_request', taskId, approvalId });
+      emit?.({ type: 'run_phase_changed', phase: 'waiting_approval' });
+      emit?.({
+        type: 'approval_requested',
+        request: {
+          kind: 'tool',
+          approvalId,
+          toolName: durableRequest.toolName,
+          effect: durableRequest.effect,
+          title: durableRequest.title,
+          ...(durableRequest.target ? { target: durableRequest.target } : {}),
+          reason: durableRequest.reason,
+          fingerprint: durableRequest.fingerprint,
+          options: durableRequest.options,
+        },
+      });
 
       setTimeout(() => {
         if (pendingToolApprovals.has(approvalId)) {
@@ -182,6 +223,7 @@ function createToolApprovalHook(
       }, CONFIRM_TIMEOUT_MS);
     });
     onEvent({ type: 'task_status', taskId, status: 'executing', note: '工具批准已处理' });
+    emit?.({ type: 'approval_resolved', approvalId, decision: response.decision });
     return response;
   };
 }
@@ -190,6 +232,7 @@ function createCommandConfirmHook(
   sessionId: string,
   taskId: string,
   onEvent: (event: AgentEvent) => void,
+  emit?: (event: RunEventPayload) => void,
 ): CommandConfirmHook {
   return (request) => {
     const confirmId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -219,6 +262,18 @@ function createCommandConfirmHook(
         risk: request.validation.risk,
         reason: request.validation.reason,
       });
+      emit?.({ type: 'run_phase_changed', phase: 'waiting_approval' });
+      emit?.({
+        type: 'approval_requested',
+        request: {
+          kind: 'command',
+          approvalId: confirmId,
+          title: '批准命令执行',
+          target: request.command,
+          reason: request.validation.reason,
+          options: ['allow_once', 'allow_whitelist', 'deny'],
+        },
+      });
 
       setTimeout(() => {
         if (pendingCommandConfirms.has(confirmId)) {
@@ -226,6 +281,9 @@ function createCommandConfirmHook(
           reject(new Error(`命令确认超时：${confirmId}`));
         }
       }, CONFIRM_TIMEOUT_MS);
+    }).then((decision) => {
+      emit?.({ type: 'approval_resolved', approvalId: confirmId, decision });
+      return decision;
     });
   };
 }
@@ -234,6 +292,7 @@ function createConfirmHook(
   sessionId: string,
   taskId: string,
   onEvent: (event: AgentEvent) => void,
+  emit?: (event: RunEventPayload) => void,
 ) {
   return async (question: string, options?: string[]): Promise<string> => {
     const confirmId = `confirm-${Date.now()}`;
@@ -252,6 +311,11 @@ function createConfirmHook(
       pendingConfirms.set(confirmId, pending);
 
       onEvent({ type: 'confirm_request', taskId, confirmId, question, options });
+      emit?.({ type: 'run_phase_changed', phase: 'waiting_approval' });
+      emit?.({
+        type: 'approval_requested',
+        request: { kind: 'question', approvalId: confirmId, title: question, options: options?.length ? options : ['确认', '取消'] },
+      });
 
       setTimeout(() => {
         if (pendingConfirms.has(confirmId)) {
@@ -259,6 +323,9 @@ function createConfirmHook(
           reject(new Error(`确认请求超时：${confirmId}`));
         }
       }, CONFIRM_TIMEOUT_MS);
+    }).then((answer) => {
+      emit?.({ type: 'approval_resolved', approvalId: confirmId, decision: answer });
+      return answer;
     });
   };
 }
@@ -309,6 +376,7 @@ type ConversationRunPayload = {
   prompt?: string;
   conversationRef?: string;
   clientRequestId?: string;
+  afterSeq?: number;
   scope?: { kind?: 'general' | 'workspace'; workspaceRef?: string };
 };
 
@@ -504,6 +572,139 @@ function createBoundedSseWriter(
   };
 }
 
+function createBoundedRunSseWriter(
+  res: ServerResponse,
+  onOverflow: () => void,
+  capacity = 256,
+) {
+  const queue: RunEventEnvelope[] = [];
+  let scheduled = false;
+  let active = Promise.resolve();
+  const waitForDrain = () => new Promise<void>((resolve) => res.once('drain', resolve));
+  const pump = async () => {
+    while (queue.length > 0) {
+      const event = queue.shift();
+      if (event && !res.write(`data: ${JSON.stringify(event)}\n\n`)) await waitForDrain();
+    }
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    active = (async () => {
+      await Promise.resolve();
+      try {
+        await pump();
+      } finally {
+        scheduled = false;
+        if (queue.length > 0) schedule();
+      }
+    })();
+  };
+
+  return {
+    write(event: RunEventEnvelope) {
+      if (queue.length >= capacity) {
+        const discardIndex = queue.findIndex(isDroppableRunEvent);
+        if (discardIndex >= 0) queue.splice(discardIndex, 1);
+        else if (isDroppableRunEvent(event)) return;
+        else {
+          onOverflow();
+          return;
+        }
+      }
+      queue.push(event);
+      schedule();
+    },
+    async drain() {
+      while (scheduled || queue.length > 0) {
+        await active;
+        if (!scheduled && queue.length > 0) schedule();
+      }
+    },
+  };
+}
+
+function runIdForClientRequest(session: Session, clientRequestId: string): string | undefined {
+  const started = [...(session.ledger ?? [])].reverse().find((record) => (
+    record.type === 'run_started' && record.clientRequestId === clientRequestId
+  ));
+  if (started?.type === 'run_started') return started.runId;
+  if (!session.clientRequestIds?.includes(clientRequestId)) return undefined;
+  return session.activeTaskId ?? session.runReports?.at(-1)?.runId;
+}
+
+function publishActiveV2(active: ActiveV2Run, event: RunEventEnvelope): void {
+  active.lastSeq = Math.max(active.lastSeq, event.seq);
+  runReplayBuffer.append(event);
+  for (const subscriber of active.subscribers) {
+    if (!subscriber.closed) subscriber.writer.write(event);
+  }
+}
+
+async function attachActiveV2Run(active: ActiveV2Run, res: ServerResponse, afterSeq: number): Promise<void> {
+  res.writeHead(200, sseHeaders());
+  const subscriber: V2Subscriber = {
+    writer: createBoundedRunSseWriter(res, () => active.controller.abort('SSE semantic backlog overflow')),
+    response: res,
+    closed: false,
+  };
+  const replay = runReplayBuffer.read(active.runId, afterSeq);
+  if (replay.status === 'available') {
+    for (const event of replay.events) subscriber.writer.write(event);
+  }
+  if (!active.finished) active.subscribers.add(subscriber);
+  res.on('close', () => {
+    subscriber.closed = true;
+    active.subscribers.delete(subscriber);
+  });
+  await active.done;
+  active.subscribers.delete(subscriber);
+  if (subscriber.closed) return;
+  await subscriber.writer.drain();
+  res.end();
+}
+
+async function writeCompletedV2Replay(res: ServerResponse, session: Session, runId: string, afterSeq: number): Promise<void> {
+  res.writeHead(200, sseHeaders());
+  const writer = createBoundedRunSseWriter(res, () => undefined);
+  const replay = runReplayBuffer.read(runId, afterSeq);
+  if (replay.status === 'available') {
+    for (const event of replay.events) writer.write(event);
+  } else {
+    const report = session.runReports?.find((candidate) => candidate.runId === runId);
+    const conversation = projectConversation(session, { contextWindow: modelClient.contextWindow });
+    const reconstructed: RunEventEnvelope[] = [
+      ...(afterSeq === 0 ? [{
+        version: 2,
+        runId,
+        seq: 1,
+        at: report?.startedAt ?? session.updatedAt,
+        event: { type: 'run_started', sessionId: session.sessionId, isNew: false },
+      } as RunEventEnvelope] : []),
+      ...(report ? [{
+        version: 2 as const,
+        runId,
+        seq: Math.max(2, afterSeq + 1),
+        at: report.completedAt,
+        event: {
+          type: 'run_finished' as const,
+          terminal: {
+            status: report.status,
+            reason: report.terminationReason,
+            ...(report.error ? { error: { code: report.error.code, message: safeRunNote(report.error.message) ?? '运行失败' } } : {}),
+          },
+          conversationRevision: session.revision ?? 0,
+          ...(report.finalMessageId ? { finalMessageId: report.finalMessageId } : {}),
+          conversation,
+        },
+      }] : []),
+    ];
+    for (const event of reconstructed) writer.write(event);
+  }
+  await writer.drain();
+  res.end();
+}
+
 export function startRuntimeServer() {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -632,6 +833,8 @@ export function startRuntimeServer() {
       const payload = await parseBody<ConversationRunPayload>(req);
       const prompt = payload.prompt?.trim() ?? '';
       const clientRequestId = payload.clientRequestId?.trim() ?? '';
+      const streamVersion = req.headers['x-dexcode-stream-version'] === '2' ? 2 : 1;
+      const afterSeq = Number.isSafeInteger(payload.afterSeq) && Number(payload.afterSeq) >= 0 ? Number(payload.afterSeq) : 0;
       if (!prompt) throw new HttpError(400, '消息不能为空');
       if (!clientRequestId) throw new HttpError(400, 'clientRequestId required');
 
@@ -665,6 +868,14 @@ export function startRuntimeServer() {
       if (payload.conversationRef) {
         session = await loadScopedSession(payload.conversationRef, scope);
         if (session.clientRequestIds?.includes(clientRequestId)) {
+          if (streamVersion === 2) {
+            const existingRunId = runIdForClientRequest(session, clientRequestId);
+            if (!existingRunId) throw new HttpError(409, '无法定位幂等请求对应的 Run');
+            const active = activeV2Runs.get(existingRunId);
+            if (active) await attachActiveV2Run(active, res, afterSeq);
+            else await writeCompletedV2Replay(res, session, existingRunId, afterSeq);
+            return;
+          }
           res.writeHead(200, sseHeaders());
           res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.sessionId, isNew: false })}\n\n`);
           res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }), idempotentReplay: true } })}\n\n`);
@@ -683,6 +894,14 @@ export function startRuntimeServer() {
         isNew = materialized.created;
         prestarted = materialized.created;
         if (!materialized.created) {
+          if (streamVersion === 2) {
+            const existingRunId = runIdForClientRequest(session, clientRequestId);
+            if (!existingRunId) throw new HttpError(409, '无法定位幂等请求对应的 Run');
+            const active = activeV2Runs.get(existingRunId);
+            if (active) await attachActiveV2Run(active, res, afterSeq);
+            else await writeCompletedV2Replay(res, session, existingRunId, afterSeq);
+            return;
+          }
           res.writeHead(200, sseHeaders());
           res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.sessionId, isNew: false })}\n\n`);
           res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }), idempotentReplay: true } })}\n\n`);
@@ -691,11 +910,62 @@ export function startRuntimeServer() {
         }
       }
 
+      if (streamVersion === 2) {
+        const controller = new AbortController();
+        const active: ActiveV2Run = {
+          runId,
+          controller,
+          subscribers: new Set(),
+          lastSeq: 0,
+          finished: false,
+          done: Promise.resolve(),
+        };
+        activeConversationRuns.set(runId, controller);
+        activeV2Runs.set(runId, active);
+        active.done = (async () => {
+          try {
+            await agent.runTask(
+              session.sessionId,
+              prompt,
+              null,
+              () => {},
+              {},
+              {
+                runId,
+                signal: controller.signal,
+                prestarted,
+                clientRequestId,
+                legacyEvents: false,
+                onRunEvent: (event) => publishActiveV2(active, event),
+                presentationHooks: (emit) => ({
+                  onConfirm: createConfirmHook(session.sessionId, runId, () => {}, emit),
+                  onCommandConfirm: createCommandConfirmHook(session.sessionId, runId, () => {}, emit),
+                  onApproval: createToolApprovalHook(session.sessionId, runId, () => {}, emit),
+                }),
+              },
+            );
+          } catch (error) {
+            publishActiveV2(active, {
+              version: 2,
+              runId,
+              seq: active.lastSeq + 1,
+              at: new Date().toISOString(),
+              event: { type: 'stream_error', message: safeRunNote(error instanceof Error ? error.message : String(error)) ?? '运行失败' },
+            });
+          } finally {
+            active.finished = true;
+            activeConversationRuns.delete(runId);
+            activeV2Runs.delete(runId);
+          }
+        })();
+        await attachActiveV2Run(active, res, afterSeq);
+        return;
+      }
+
       res.writeHead(200, sseHeaders());
       const controller = new AbortController();
       activeConversationRuns.set(runId, controller);
       const writer = createBoundedSseWriter(res, () => controller.abort());
-      writer.write({ type: 'session', sessionId: session.sessionId, isNew });
       const onEvent = (event: AgentEvent) => writer.write(event);
       let responseFinished = false;
       res.on('close', () => {
@@ -817,6 +1087,7 @@ export function startRuntimeServer() {
         llmEnabled: modelClient.model !== 'mock',
         model: {
           displayName: modelClient.displayName ?? modelClient.model,
+          reasoning: modelClient.reasoning,
           ...(modelClient.contextWindow ? { contextWindow: modelClient.contextWindow } : {}),
           ...(modelClient.providerDisplayName ? { providerDisplayName: modelClient.providerDisplayName } : {}),
         },
