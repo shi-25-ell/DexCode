@@ -1,14 +1,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Square } from 'lucide-react';
-import { type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { Fragment, type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getAgentTree, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopChildAgent, stopConversationRun, streamAgentActivity, streamConversation, streamQueueResume } from '../api';
 import type { RunEventEnvelope } from '../../../../packages/run-protocol/contracts';
 import { AppShell } from '../shell/app-shell';
-import type { ContextUsage, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueMutationOutcome } from '../types';
+import type { AgentTreeSnapshot, ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueMutationOutcome } from '../types';
 import { ApprovalCard } from './approval-card';
 import { AssistantMessage } from './assistant-message';
-import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
+import { assistantResponseCopyText, groupConversationHistory, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ToolBatchCard } from './tool-batch-card';
 import { ContextCard } from './context-card';
@@ -28,6 +28,7 @@ import { deliveryForFollowUp, readFollowUpBehavior, writeFollowUpBehavior } from
 import { agentActivityReducer, initialAgentActivityState } from './agent-reducer';
 import { AgentActivityCard, AgentDrawer } from './agent-activity';
 import { groupAgentTimeline } from './agent-timeline';
+import { ExecutionHistoryDisclosure } from './execution-history';
 
 type PageAction =
   | { type: 'hydrate'; snapshot: ConversationSnapshot }
@@ -35,6 +36,27 @@ type PageAction =
   | { type: 'commit_queued_user'; itemId: string; content: string }
   | { type: 'run_event'; event: RunEventEnvelope }
   | { type: 'error'; message: string };
+
+function ConversationTimelineItem({ item, status, workspaceRef, agentTree, onOpenAgent, onStopAgent }: {
+  item: ConversationItem;
+  status: RunPresentation['status'];
+  workspaceRef?: string;
+  agentTree: AgentTreeSnapshot | null;
+  onOpenAgent(agentId?: string): void;
+  onStopAgent(agentId: string): void;
+}) {
+  if (item.kind === 'user') return <UserMessage content={item.content} />;
+  if (item.kind === 'assistant') {
+    const showCopy = isCompleteAssistantResponse(item, status);
+    return <AssistantMessage content={item.content} copyContent={assistantResponseCopyText(item)} showCopy={showCopy} />;
+  }
+  if (item.kind === 'tool') return <ToolCard tool={item.tool} />;
+  if (item.kind === 'tool_batch') return <ToolBatchCard batch={item.batch} />;
+  if (item.kind === 'context') return <ContextCard context={item.context} />;
+  if (item.kind === 'agent_activity') return agentTree ? <AgentActivityCard tree={agentTree} agentRunIds={item.agentRunIds} onOpen={onOpenAgent} onStop={onStopAgent} /> : null;
+  if (item.kind === 'approval') return <ApprovalCard item={item} workspaceRef={workspaceRef} />;
+  return <div className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;
+}
 
 const emptySnapshot: ConversationSnapshot = {
   ref: 'draft',
@@ -453,6 +475,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     }
   };
   const timeline = useMemo(() => state.committedItems, [state.committedItems]);
+  const timelineGroups = useMemo(() => groupConversationHistory(timeline), [timeline]);
   const agentTree = agentState.tree ?? snapshot.data?.agents ?? null;
   const agentGroups = useMemo(() => groupAgentTimeline(agentTree), [agentTree]);
   const activeAgentGroups = useMemo(() => state.activeRun
@@ -520,20 +543,28 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
               <p>{scope.kind === 'general' ? '这里不会启用项目文件与命令工具。加载项目后可以让 Agent 阅读和修改代码。' : '描述你的目标，DexCode 会在对话中展示每一步工具调用。'}</p>
             </div>
           ) : null}
-          {timeline.map((item, index) => {
-            if (item.kind === 'user') return <UserMessage key={item.id} content={item.content} />;
-            if (item.kind === 'assistant') {
-              const showCopy = isCompleteAssistantResponse(item, state.status);
-              return <AssistantMessage key={item.id} content={item.content} copyContent={showCopy ? assistantResponseCopyText(timeline, index) : item.content} showCopy={showCopy} />;
-            }
-            if (item.kind === 'tool') return <ToolCard key={item.id} tool={item.tool} />;
-            if (item.kind === 'tool_batch') return <ToolBatchCard key={item.id} batch={item.batch} />;
-            if (item.kind === 'context') return <ContextCard key={item.id} context={item.context} />;
-            if (item.kind === 'agent_activity') return agentTree ? <AgentActivityCard key={item.id} tree={agentTree} agentRunIds={item.agentRunIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} /> : null;
-            if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} />;
-            return <div key={item.id} className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;
+          {timelineGroups.map((group) => {
+            if (group.kind === 'item') return (
+              <ConversationTimelineItem key={group.entry.item.id} item={group.entry.item} status={state.status} workspaceRef={workspaceRef} agentTree={agentTree} onOpenAgent={openAgent} onStopAgent={stopAgent} />
+            );
+            return (
+              <Fragment key={`response-${group.final.item.id}`}>
+                {group.history.length > 0 ? (
+                  <ExecutionHistoryDisclosure itemCount={group.history.length}>
+                    {group.history.map(({ item }) => (
+                      <ConversationTimelineItem key={item.id} item={item} status={state.status} workspaceRef={workspaceRef} agentTree={agentTree} onOpenAgent={openAgent} onStopAgent={stopAgent} />
+                    ))}
+                  </ExecutionHistoryDisclosure>
+                ) : null}
+                <ConversationTimelineItem item={group.final.item} status={state.status} workspaceRef={workspaceRef} agentTree={agentTree} onOpenAgent={openAgent} onStopAgent={stopAgent} />
+              </Fragment>
+            );
           })}
-          {agentTree ? trailingGroups.map((group) => <AgentActivityCard key={group.key} tree={agentTree} agentRunIds={group.agentRunIds} onOpen={openAgent} onStop={(agentId) => void stopAgent(agentId)} />) : null}
+          {agentTree && trailingGroups.length > 0 ? (
+            <ExecutionHistoryDisclosure itemCount={trailingGroups.length} label="子 Agent 执行过程">
+              {trailingGroups.map((group) => <AgentActivityCard key={group.key} tree={agentTree} agentRunIds={group.agentRunIds} onOpen={openAgent} onStop={stopAgent} />)}
+            </ExecutionHistoryDisclosure>
+          ) : null}
           {state.activeRun ? <RunActivity run={state.activeRun} workspaceRef={workspaceRef} needsResync={state.needsResync} agentTree={agentTree} agentGroups={activeAgentGroups} onOpenAgent={openAgent} onStopAgent={(agentId) => void stopAgent(agentId)} /> : null}
           {state.streamError ? <div className="error-card"><strong>连接未完成</strong><span>{state.streamError}</span></div> : null}
           {state.terminal && state.terminal.status !== 'completed' ? (

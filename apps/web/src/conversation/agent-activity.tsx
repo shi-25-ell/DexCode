@@ -2,10 +2,11 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { Bot, ChevronDown, ChevronRight, LoaderCircle, Square, X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
-import { type ReactNode, useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { getAgentDetail } from '../api';
 import type { AgentDetail, AgentRecordView, AgentRunView, AgentToolView, AgentTreeSnapshot, ConversationScope, ToolPresentation } from '../types';
 import { AssistantMessage } from './assistant-message';
+import { ExecutionHistoryDisclosure } from './execution-history';
 import { ToolCard } from './tool-card';
 
 function runFor(tree: AgentTreeSnapshot, agent: AgentRecordView) {
@@ -98,6 +99,109 @@ function fallbackToolPresentation(tool: AgentToolView | undefined, input: { call
   };
 }
 
+type AgentTranscriptEntry =
+  | { key: string; kind: 'assistant'; content: string }
+  | { key: string; kind: 'tool'; tool: ToolPresentation };
+
+type AgentTranscriptSegment = {
+  key: string;
+  prompt?: string;
+  run?: AgentRunView;
+  entries: AgentTranscriptEntry[];
+};
+
+function buildAgentTranscriptSegments(detail: AgentDetail): AgentTranscriptSegment[] {
+  const tools = new Map((detail.tools ?? []).map((tool) => [tool.callId, tool]));
+  const renderedTools = new Set<string>();
+  const segments: AgentTranscriptSegment[] = [];
+  let runIndex = 0;
+  let current: AgentTranscriptSegment = { key: 'agent-transcript-orphan', entries: [] };
+  const flush = () => {
+    if (current.prompt !== undefined || current.entries.length > 0) segments.push(current);
+  };
+  const appendTool = (callId: string, name: string, output?: string) => {
+    if (renderedTools.has(callId)) return;
+    renderedTools.add(callId);
+    const tool = tools.get(callId);
+    current.entries.push({
+      key: `tool-${callId}`,
+      kind: 'tool',
+      tool: tool?.presentation ?? fallbackToolPresentation(tool, { callId, name, ...(output ? { output } : {}) }),
+    });
+  };
+
+  detail.messages.forEach((message, messageIndex) => {
+    if (message.role === 'user') {
+      flush();
+      const run = detail.runs[runIndex++];
+      current = {
+        key: run?.agentRunId ?? `agent-transcript-run-${messageIndex}`,
+        prompt: message.content,
+        ...(run ? { run } : {}),
+        entries: [],
+      };
+      return;
+    }
+    if (message.role === 'assistant') {
+      if (message.content?.trim()) current.entries.push({ key: `assistant-${messageIndex}`, kind: 'assistant', content: message.content });
+      for (const call of message.tool_calls ?? []) appendTool(call.id, call.function.name);
+      return;
+    }
+    if (message.role === 'tool') appendTool(message.tool_call_id, message.name, message.content);
+  });
+  for (const tool of detail.tools ?? []) appendTool(tool.callId, tool.name);
+  flush();
+  return segments;
+}
+
+function finalAssistantIndex(segment: AgentTranscriptSegment): number {
+  if (segment.run?.status !== 'completed') return -1;
+  const expected = segment.run.result?.finalContent.trim();
+  let fallback = -1;
+  for (let index = segment.entries.length - 1; index >= 0; index -= 1) {
+    const entry = segment.entries[index];
+    if (entry?.kind !== 'assistant') continue;
+    if (fallback < 0) fallback = index;
+    if (expected && entry.content.trim() === expected) return index;
+  }
+  return fallback;
+}
+
+function AgentParentPrompt({ content }: { content: string }) {
+  return (
+    <Collapsible.Root className="agent-parent-prompt">
+      <Collapsible.Trigger><span>父 Agent 指令</span><ChevronDown className="chevron" size={15} /></Collapsible.Trigger>
+      <Collapsible.Content><pre>{content}</pre></Collapsible.Content>
+    </Collapsible.Root>
+  );
+}
+
+function AgentTranscriptEntryView({ entry, showCopy = false }: { entry: AgentTranscriptEntry; showCopy?: boolean }) {
+  if (entry.kind === 'assistant') return <AssistantMessage content={entry.content} showCopy={showCopy} />;
+  return <ToolCard tool={entry.tool} />;
+}
+
+function AgentTranscriptSegmentView({ segment }: { segment: AgentTranscriptSegment }) {
+  const finalIndex = finalAssistantIndex(segment);
+  const final = finalIndex >= 0 ? segment.entries[finalIndex] : undefined;
+  const history = finalIndex >= 0 ? segment.entries.filter((_entry, index) => index !== finalIndex) : [];
+  return (
+    <section className="agent-transcript-run">
+      {segment.prompt !== undefined ? <AgentParentPrompt content={segment.prompt} /> : null}
+      {final?.kind === 'assistant' ? (
+        <>
+          {history.length > 0 ? (
+            <ExecutionHistoryDisclosure itemCount={history.length}>
+              {history.map((entry) => <AgentTranscriptEntryView key={entry.key} entry={entry} />)}
+            </ExecutionHistoryDisclosure>
+          ) : null}
+          <AgentTranscriptEntryView entry={final} showCopy />
+        </>
+      ) : segment.entries.map((entry) => <AgentTranscriptEntryView key={entry.key} entry={entry} />)}
+    </section>
+  );
+}
+
 export function AgentTranscript({ detail }: { detail: AgentDetail }) {
   const detailTools = detail.tools ?? [];
   const hasRunningTool = detailTools.some((tool) => tool.status === 'running');
@@ -106,38 +210,11 @@ export function AgentTranscript({ detail }: { detail: AgentDetail }) {
     : detail.agent.status === 'running' && !hasRunningTool
       ? '正在思考…'
       : undefined;
-  const tools = new Map(detailTools.map((tool) => [tool.callId, tool]));
-  const renderedTools = new Set<string>();
-  const entries: ReactNode[] = [];
-  const appendTool = (callId: string, name: string, key: string, output?: string) => {
-    if (renderedTools.has(callId)) return;
-    renderedTools.add(callId);
-    const tool = tools.get(callId);
-    entries.push(<ToolCard key={key} tool={tool?.presentation ?? fallbackToolPresentation(tool, { callId, name, ...(output ? { output } : {}) })} />);
-  };
-
-  detail.messages.forEach((message, index) => {
-    if (message.role === 'user') {
-      entries.push(
-        <Collapsible.Root key={`parent-prompt-${index}`} className="agent-parent-prompt">
-          <Collapsible.Trigger><span>父 Agent 指令</span><ChevronDown className="chevron" size={15} /></Collapsible.Trigger>
-          <Collapsible.Content><pre>{message.content}</pre></Collapsible.Content>
-        </Collapsible.Root>,
-      );
-      return;
-    }
-    if (message.role === 'assistant') {
-      if (message.content?.trim()) entries.push(<AssistantMessage key={`assistant-${index}`} content={message.content} />);
-      for (const call of message.tool_calls ?? []) appendTool(call.id, call.function.name, `tool-${call.id}`);
-      return;
-    }
-    if (message.role === 'tool') appendTool(message.tool_call_id, message.name, `tool-${message.tool_call_id}`, message.content);
-  });
-  for (const tool of detailTools) appendTool(tool.callId, tool.name, `tool-${tool.callId}`);
+  const segments = useMemo(() => buildAgentTranscriptSegments(detail), [detail]);
 
   return (
     <div className="agent-transcript-stream">
-      {entries.length > 0 ? entries : activityLabel ? null : <p className="agent-transcript-empty">尚无对话内容</p>}
+      {segments.length > 0 ? segments.map((segment) => <AgentTranscriptSegmentView key={segment.key} segment={segment} />) : activityLabel ? null : <p className="agent-transcript-empty">尚无对话内容</p>}
       {activityLabel ? <div className="agent-thinking" role="status"><LoaderCircle size={15} />{activityLabel}</div> : null}
     </div>
   );

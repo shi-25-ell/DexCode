@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConversationItem } from '../types';
 import { ApprovalCard } from './approval-card';
-import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
+import { assistantResponseCopyText, groupConversationHistory, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
 import { shouldShowConversationLoading, terminalTitle } from './conversation-page';
@@ -26,7 +26,7 @@ describe('conversation presentation', () => {
     })).toBe(false);
   });
 
-  it('only marks the terminal assistant segment of each completed response as copyable', () => {
+  it('collapses committed process items behind each final answer and copies only the final answer', () => {
     const items: ConversationItem[] = [
       { id: 'u1', kind: 'user', content: '搜索仓库' },
       { id: 'a1', kind: 'assistant', content: '我先搜索' },
@@ -40,8 +40,38 @@ describe('conversation presentation', () => {
 
     expect(items.map((item) => isCompleteAssistantResponse(item, 'idle'))).toEqual([false, false, false, true, false, false, false, true]);
     expect(isCompleteAssistantResponse(items[7]!, 'running')).toBe(false);
-    expect(assistantResponseCopyText(items, 3)).toBe('我先搜索\n\n请完成授权');
-    expect(assistantResponseCopyText(items, 7)).toBe('我重新尝试\n\n这是最终结果');
+    expect(assistantResponseCopyText(items[3]!)).toBe('请完成授权');
+    expect(assistantResponseCopyText(items[7]!)).toBe('这是最终结果');
+    expect(groupConversationHistory(items)).toMatchObject([
+      { kind: 'item', entry: { item: { id: 'u1' } } },
+      { kind: 'completed_response', history: [{ item: { id: 'a1' } }, { item: { id: 't1' } }], final: { item: { id: 'a2' } } },
+      { kind: 'item', entry: { item: { id: 'u2' } } },
+      { kind: 'completed_response', history: [{ item: { id: 'a3' } }, { item: { id: 't2' } }], final: { item: { id: 'a4' } } },
+    ]);
+  });
+
+  it('keeps unfinished and failed response items expanded when no final answer exists', () => {
+    const items: ConversationItem[] = [
+      { id: 'u1', kind: 'user', content: '运行测试' },
+      { id: 'a1', kind: 'assistant', content: '正在运行' },
+      { id: 'e1', kind: 'error', title: '本次运行未完成', message: '测试失败' },
+    ];
+    expect(groupConversationHistory(items).map((group) => group.kind)).toEqual(['item', 'item', 'item']);
+  });
+
+  it('keeps a failed command inside the completed response execution history', () => {
+    const items: ConversationItem[] = [
+      { id: 'u1', kind: 'user', content: '运行测试' },
+      { id: 'a1', kind: 'assistant', content: '我来运行测试' },
+      { id: 't1', kind: 'tool', tool: { callRef: 'call-1', toolName: 'run_command', category: 'command', name: '执行命令', status: 'failed', summary: '测试失败' } },
+      { id: 'a2', kind: 'assistant', content: '测试失败，原因如下', final: true },
+    ];
+    const response = groupConversationHistory(items)[1];
+    expect(response).toMatchObject({
+      kind: 'completed_response',
+      history: [{ item: { id: 'a1' } }, { item: { id: 't1', tool: { status: 'failed' } } }],
+      final: { item: { id: 'a2' } },
+    });
   });
 
   it('does not expose a copy action before a pending approval', () => {
