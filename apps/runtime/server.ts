@@ -376,10 +376,12 @@ const modelClient = createModelClient();
 const sessionRepository: SessionRepository = createSessionRepository();
 const multiAgentFeatureEnabled = multiAgentEnabled();
 const agentActivityStream = createAgentActivityStream();
+let agentInboxWake: (sessionId: string) => void = () => undefined;
 const agentStore = createAgentStore({
   sessionsDir: sessionRepository.sessionsDir,
   observe(sessionId, events, snapshot) {
     for (const event of activityEventsFromStore(events, snapshot)) agentActivityStream.publish(sessionId, event);
+    if (events.some((event) => event.type === 'agent_completion_notification')) agentInboxWake(sessionId);
   },
 });
 const approvalModeStore = await createApprovalModeStore({
@@ -554,8 +556,29 @@ const conversationRunCoordinator = createConversationRunCoordinator({
     onApproval: createToolApprovalHook(sessionId, runId, sink, emit),
   }),
   cancelPending: (_sessionId, runId, reason) => cancelPendingRun(runId, reason),
+  agentInbox: {
+    pending: (sessionId) => agentStore.pendingNotifications(sessionId),
+    consume: (sessionId, notificationIds, consumedByRunId) => agentStore.consumeNotifications(sessionId, notificationIds, consumedByRunId),
+  },
   observe: (observation) => console.info(JSON.stringify({ type: 'metric', ...observation })),
 });
+
+const agentInboxWakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function scheduleAgentInboxWake(sessionId: string): void {
+  const existing = agentInboxWakeTimers.get(sessionId);
+  if (existing) clearTimeout(existing);
+  agentInboxWakeTimers.set(sessionId, setTimeout(() => {
+    agentInboxWakeTimers.delete(sessionId);
+    void startAgentInboxContinuation(sessionId);
+  }, 100));
+}
+agentInboxWake = scheduleAgentInboxWake;
+void (async () => {
+  for (const session of await sessionRepository.listSessions()) {
+    const tree = await agentStore.load(session.sessionId, true);
+    if (tree?.inbox.some((item) => item.status === 'pending')) scheduleAgentInboxWake(session.sessionId);
+  }
+})().catch((error) => console.error('Failed to recover Agent Inbox', error));
 
 function workspaceScope(runtime: WorkspaceRuntime): SessionScope {
   return { kind: 'workspace', workspaceId: runtime.workspace.workspaceId };
@@ -855,6 +878,32 @@ function completeV2Chain(chain: ActiveV2Chain): void {
     completedV2Chains.delete(chain.initialRunId);
     completedV2Chains.set(chain.initialRunId, chain);
     while (completedV2Chains.size > 64) completedV2Chains.delete(completedV2Chains.keys().next().value!);
+  }
+}
+
+async function startAgentInboxContinuation(sessionId: string): Promise<void> {
+  try {
+    const runtime = await conversationRunCoordinator.snapshot(sessionId);
+    if (runtime.activeRun) return;
+    const chain = createV2Chain(sessionId);
+    chain.done = (async () => {
+      try {
+        await conversationRunCoordinator.resume(
+          sessionId,
+          (event) => coordinatorEventToV2(chain, event),
+          { onRunEvent: (event) => publishActiveV2(chain, event), legacyEvents: false },
+        );
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes('already has an active Run')) {
+          console.error('Failed to deliver Agent Inbox', error);
+        }
+      } finally {
+        completeV2Chain(chain);
+      }
+    })();
+    await chain.done;
+  } catch (error) {
+    console.error('Failed to schedule Agent Inbox continuation', error);
   }
 }
 

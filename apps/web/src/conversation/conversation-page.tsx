@@ -103,6 +103,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const [agentState, agentDispatch] = useReducer(agentActivityReducer, initialAgentActivityState);
   const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState<string>();
+  const [agentWakePolling, setAgentWakePolling] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [followUpBehavior, setFollowUpBehavior] = useState<FollowUpBehavior>(() => readFollowUpBehavior());
   const [queueBusy, setQueueBusy] = useState<Set<string>>(() => new Set());
@@ -126,6 +127,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     queryKey: ['conversation', scope, conversationRef],
     queryFn: () => getConversation(scope, conversationRef!),
     enabled: Boolean(conversationRef),
+    refetchInterval: (query) => query.state.data?.activeRun || agentWakePolling ? 1_000 : false,
   });
   const meta = useQuery({
     queryKey: ['meta', workspaceRef],
@@ -177,11 +179,21 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       onEvent(envelope) {
         agentDispatch({ type: 'event', envelope });
         if (envelope.event.type === 'agent_resync_required') void queryClient.invalidateQueries({ queryKey: ['agents', scope, conversationRef] });
-        if (envelope.event.type === 'agent_run_finished' || envelope.event.type === 'agent_recovered') void queryClient.invalidateQueries({ queryKey: ['agent-detail', scope, conversationRef] });
+        if (envelope.event.type === 'agent_run_finished' || envelope.event.type === 'agent_recovered') {
+          setAgentWakePolling(true);
+          void queryClient.invalidateQueries({ queryKey: ['agent-detail', scope, conversationRef] });
+          void queryClient.invalidateQueries({ queryKey: ['conversation', scope, conversationRef] });
+        }
       },
     }).catch((error) => { if (!controller.signal.aborted) console.warn('Agent activity stream ended', error); });
     return () => controller.abort();
   }, [agents.data === undefined, conversationRef, meta.data?.multiAgentEnabled, queryClient, scopeIdentity]);
+
+  useEffect(() => {
+    if (!agentWakePolling) return;
+    const timer = window.setTimeout(() => setAgentWakePolling(false), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [agentWakePolling]);
 
   useEffect(() => {
     if (agentState.needsResync && conversationRef) void queryClient.invalidateQueries({ queryKey: ['agents', scope, conversationRef] });

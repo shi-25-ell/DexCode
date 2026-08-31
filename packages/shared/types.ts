@@ -331,7 +331,7 @@ export type SessionLedgerRecord =
       profile?: string;
       origin?: string;
     }
-  | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage; messageId?: string; turn?: number }
+  | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage; messageId?: string; turn?: number; origin?: string }
   | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string; input?: Record<string, unknown> }
   | { seq: number; at: string; runId: string; type: 'tool_completed'; callId: string; presentation: ToolPresentation }
   | { seq: number; at: string; runId: string; type: 'approval_requested'; approvalId: string; request: ToolApprovalRequest }

@@ -82,6 +82,7 @@ export type ExecutorSemanticHooks = {
   toolOutcome(message: ToolResultMessage, presentation: import('../shared/types.ts').ToolPresentation): Promise<void>;
   contextPrepared?(prepared: PreparedContext): Promise<void>;
   turnEnded?(event: { turn: number; toolCalls: ToolCall[]; finishReason: ModelResponse['finishReason'] }): Promise<void>;
+  usageUpdated?(usage: { inputTokens: number; outputTokens: number; totalTokens: number; unknown: number }): Promise<void>;
 };
 export type ToolPolicy = {
   allow?: string[];
@@ -444,8 +445,8 @@ export function createExecutor(
       const applySteer = async (decision: Extract<Awaited<ReturnType<RunCommandSource['atSafeBoundary']>>, { action: 'continue' }>) => {
         workingMessages.push(decision.steer);
         loopMessages.push(decision.steer);
-        if (options.context) options.context.activeRequest = decision.directive;
-        if (!options.refreshDirective) return;
+        if (options.context && decision.updateActiveRequest !== false) options.context.activeRequest = decision.directive;
+        if (!options.refreshDirective || decision.refreshContext === false) return;
         onEvent({ type: 'context_refresh_started', sessionId, runId, itemId: decision.itemId });
         try {
           const refreshed = await options.refreshDirective(decision.directive);
@@ -648,6 +649,7 @@ export function createExecutor(
             else onEvent({ type: 'context_usage', ...latestContextUsage });
           }
           usage = usageSummary(usage, turn.response.usage);
+          await options.semantic?.usageUpdated?.(usage);
           latestInputTokens = turn.response.usage?.inputTokens;
           if (turn.response.finishReason === 'length') {
             if (outputBudgetIndex < outputBudgets.length - 1) {
@@ -817,6 +819,7 @@ export function createExecutor(
                   maxSegments: 4,
                   maxTokens: Math.max(1_000, Math.floor((modelClient.contextWindow ?? 32_000) * 0.25)),
                 }).messages,
+                signal,
               };
               if (toolName === 'spawn_agent') {
                 toolResult = await orchestration.spawn({
@@ -830,6 +833,7 @@ export function createExecutor(
                 toolResult = await orchestration.wait({
                   agentIds: (args.agent_ids as unknown[]).map(String),
                   ...(typeof args.mode === 'string' ? { mode: args.mode as 'any' | 'all' } : {}),
+                  ...(typeof args.block === 'boolean' ? { block: args.block } : {}),
                   ...(typeof args.timeout_ms === 'number' ? { timeoutMs: args.timeout_ms } : {}),
                 }, caller);
               } else if (toolName === 'followup_agent') {

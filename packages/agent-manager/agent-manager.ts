@@ -4,6 +4,7 @@ import type { AgentDefinitionRegistry } from './agent-definitions.ts';
 import type { AgentStore } from './agent-store.ts';
 import {
   type AgentCallerContext,
+  type AgentCompletionNotification,
   type AgentContextMode,
   type AgentIsolation,
   type AgentOrchestrationPort,
@@ -59,6 +60,35 @@ function resultView(run: AgentRunRecord, maxBytes: number) {
       ...run.result,
       finalContent: truncated ? new TextDecoder().decode(content.slice(0, maxBytes)) : run.result.finalContent,
       ...(truncated ? { truncated: true, totalBytes: content.byteLength } : {}),
+    },
+  };
+}
+
+function boundedText(value: string, maxBytes: number): { text: string; truncated: boolean } {
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.byteLength <= maxBytes) return { text: value, truncated: false };
+  return { text: new TextDecoder().decode(bytes.slice(0, maxBytes)), truncated: true };
+}
+
+function completionNotification(agent: AgentRecord, run: AgentRunRecord, result: StoredAgentRunResult, completedAt: string): AgentCompletionNotification {
+  const maxBytes = Math.min(agent.definitionSnapshot.budget.maxResultBytes ?? 64 * 1024, 64 * 1024);
+  const bounded = boundedText(result.finalContent, maxBytes);
+  const summaryText = boundedText(result.finalContent.trim() || result.error?.message || `${result.status}: ${result.terminationReason}`, 4 * 1024).text;
+  return {
+    notificationId: `notification-${run.agentRunId}`,
+    agentId: agent.agentId,
+    agentRunId: run.agentRunId,
+    ...(run.delegationGroupId ? { delegationGroupId: run.delegationGroupId } : {}),
+    createdAt: completedAt,
+    status: 'pending',
+    summary: summaryText,
+    result: {
+      status: result.status,
+      terminationReason: result.terminationReason,
+      finalContent: bounded.text,
+      ...(result.usage ? { usage: result.usage } : {}),
+      ...(result.error ? { error: result.error } : {}),
+      ...(bounded.truncated ? { error: result.error ?? { code: 'RESULT_TRUNCATED', message: `Result truncated to ${maxBytes} bytes` } } : {}),
     },
   };
 }
@@ -122,6 +152,10 @@ export function createAgentManager(options: {
 
   const launch = (agent: AgentRecord, run: AgentRunRecord, initialMessages: ChatMessage[]): Handle => {
     const abortController = new AbortController();
+    const maxRunDurationMs = agent.definitionSnapshot.budget.maxRunDurationMs;
+    const durationTimer = maxRunDurationMs === undefined ? undefined : setTimeout(() => {
+      abortController.abort(`Agent Run exceeded maxRunDurationMs (${maxRunDurationMs})`);
+    }, maxRunDurationMs);
     const persistenceHooks: AgentPersistenceHooks = {
       assistantCommitted: (message) => options.store.append(agent.sessionId, [{ type: 'agent_message_committed', agentId: agent.agentId, agentRunId: run.agentRunId, message }]).then(() => undefined),
       toolStarted: (call: ToolCall) => {
@@ -136,6 +170,9 @@ export function createAgentManager(options: {
         { type: 'agent_message_committed', agentId: agent.agentId, agentRunId: run.agentRunId, message },
         { type: 'agent_tool_finished', agentId: agent.agentId, agentRunId: run.agentRunId, callId: message.tool_call_id, presentation },
       ]).then(() => undefined),
+      usageUpdated: (usage) => options.store.append(agent.sessionId, [
+        { type: 'agent_run_usage', agentId: agent.agentId, agentRunId: run.agentRunId, usage },
+      ]).then(() => undefined),
     };
     const promise = (async () => {
       let result: StoredAgentRunResult;
@@ -149,7 +186,12 @@ export function createAgentManager(options: {
           error: { code: 'CHILD_RUN_FAILURE', message: error instanceof Error ? error.message : String(error) },
         };
       }
-      await options.store.append(agent.sessionId, [{ type: 'agent_run_terminal', agentId: agent.agentId, agentRunId: run.agentRunId, status: result.status, result, completedAt: new Date().toISOString() }]);
+      if (durationTimer) clearTimeout(durationTimer);
+      const completedAt = new Date().toISOString();
+      await options.store.append(agent.sessionId, [
+        { type: 'agent_run_terminal', agentId: agent.agentId, agentRunId: run.agentRunId, status: result.status, result, completedAt },
+        { type: 'agent_completion_notification', notification: completionNotification(agent, run, result, completedAt) },
+      ]);
       handles.delete(agent.agentId);
       return result;
     })();
@@ -198,7 +240,10 @@ export function createAgentManager(options: {
     };
     await options.store.createAgentRun(caller.sessionId, agent, run, `${caller.callerRunId}:${caller.toolCallId}`);
     launch(agent, run, [...agent.contextSeed, { role: 'user', content: input.task }]);
-    return { agent_id: agentId, agent_run_id: agentRunId, status: 'running' };
+    return {
+      agent_id: agentId, agent_run_id: agentRunId, status: 'running', background: true,
+      message: 'Child agent is running in the background. Do not poll or immediately block with wait_agent. Continue independent work; completion will be delivered automatically in a later model turn.',
+    };
   }
 
   async function followupRaw(input: { agentId: string; task: string }, caller: AgentCallerContext) {
@@ -228,7 +273,10 @@ export function createAgentManager(options: {
       ]);
       const messages = next.conversations.find((item) => item.agentId === agent.agentId)?.messages ?? [{ role: 'user', content: input.task }];
       launch(agent, run, messages);
-      return { agent_id: agent.agentId, agent_run_id: run.agentRunId, status: 'running' };
+      return {
+        agent_id: agent.agentId, agent_run_id: run.agentRunId, status: 'running', background: true,
+        message: 'Child agent follow-up is running in the background. Do not poll or immediately block with wait_agent. Completion will be delivered automatically.',
+      };
     });
   }
 
@@ -242,7 +290,7 @@ export function createAgentManager(options: {
     return { agent_id: agent.agentId, agent_run_id: handle.agentRunId, status: 'stopped' };
   }
 
-  async function waitRaw(input: { agentIds: string[]; mode?: 'any' | 'all'; timeoutMs?: number }, caller: AgentCallerContext) {
+  async function waitRaw(input: { agentIds: string[]; mode?: 'any' | 'all'; block?: boolean; timeoutMs?: number }, caller: AgentCallerContext) {
     requireEnabled();
     const tree = await treeFor(caller.sessionId);
     const targets = input.agentIds.map((agentId) => {
@@ -254,23 +302,35 @@ export function createAgentManager(options: {
       return { agent, run, handle: handles.get(agentId) };
     });
     const mode = input.mode ?? 'all';
+    const block = input.block ?? false;
     const timeoutMs = input.timeoutMs ?? 60_000;
     const waitable = targets.filter((target) => target.run.status === 'running' && target.handle?.agentRunId === target.run.agentRunId);
     let timedOut = false;
-    if (waitable.length > 0 && timeoutMs > 0) {
+    let cancelled = false;
+    if (block && waitable.length > 0 && timeoutMs > 0 && !caller.signal?.aborted) {
       const completion = mode === 'any'
         ? Promise.race(waitable.map((item) => item.handle!.promise))
         : Promise.all(waitable.map((item) => item.handle!.promise));
       let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([completion, new Promise<void>((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(); }, timeoutMs); })]);
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<void>((resolve) => {
+        if (!caller.signal) return;
+        onAbort = () => { cancelled = true; resolve(); };
+        caller.signal.addEventListener('abort', onAbort, { once: true });
+      });
+      await Promise.race([completion, aborted, new Promise<void>((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(); }, timeoutMs); })]);
       if (timer) clearTimeout(timer);
-    } else if (waitable.length > 0) timedOut = true;
+      if (onAbort) caller.signal?.removeEventListener('abort', onAbort);
+    } else if (block && waitable.length > 0) {
+      cancelled = Boolean(caller.signal?.aborted);
+      timedOut = !cancelled;
+    }
     const latest = (await options.store.load(caller.sessionId, false))!;
     const completed = targets.flatMap(({ agent, run }) => {
       const current = latest.runs.find((item) => item.agentRunId === run.agentRunId)!;
       return current.status === 'running' ? [] : [{ agent_id: agent.agentId, ...resultView(current, agent.definitionSnapshot.budget.maxResultBytes ?? 64 * 1024) }];
     });
-    return { mode, timed_out: timedOut, completed, running: targets.filter(({ run }) => latest.runs.find((item) => item.agentRunId === run.agentRunId)?.status === 'running').map(({ agent, run }) => ({ agent_id: agent.agentId, agent_run_id: run.agentRunId })) };
+    return { mode, block, timed_out: timedOut, cancelled, completed, running: targets.filter(({ run }) => latest.runs.find((item) => item.agentRunId === run.agentRunId)?.status === 'running').map(({ agent, run }) => ({ agent_id: agent.agentId, agent_run_id: run.agentRunId })) };
   }
 
   return {

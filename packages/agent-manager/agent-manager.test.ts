@@ -36,7 +36,13 @@ test('Agent Store is lazy, repairs a torn tail and recovers once', async () => {
     const recovered = await reopened.load(sessionId);
     assert.equal(recovered?.revision, 2);
     assert.equal(recovered?.runs[0]?.status, 'interrupted');
-    assert.equal((await reopened.load(sessionId))?.revision, 2);
+    assert.equal(recovered?.inbox[0]?.status, 'pending');
+    assert.equal(recovered?.inbox[0]?.agentRunId, 'agent-run-a');
+    await reopened.consumeNotifications(sessionId, [recovered!.inbox[0]!.notificationId], 'main-recovery-run');
+    const afterConsumption = await createAgentStore({ sessionsDir: root }).load(sessionId, false);
+    assert.equal(afterConsumption?.inbox[0]?.status, 'consumed');
+    assert.equal(afterConsumption?.inbox[0]?.consumedByRunId, 'main-recovery-run');
+    assert.equal((await reopened.load(sessionId))?.revision, 3);
     assert.equal((await readFile(path, 'utf8')).endsWith('\n'), true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -129,9 +135,14 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     assert.equal(firstRun?.invokedByToolCallId, 'spawn-1');
     assert.equal(firstRun?.delegationGroupId, 'group-1');
     const second = await manager.spawn({ task: 'two', agent: 'reviewer' }, caller('spawn-2')) as { agent_id: string };
-    const waited = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all', timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[]; timed_out: boolean };
+    const immediate = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all' }, caller('wait-now')) as { completed: unknown[]; block: boolean };
+    assert.equal(immediate.block, false);
+    const waited = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all', block: true, timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[]; timed_out: boolean };
     assert.equal(waited.timed_out, false);
     assert.equal(waited.completed.length, 2);
+    const inbox = await store.pendingNotifications(sessionId);
+    assert.equal(inbox.length, 2);
+    assert.ok(inbox.every((item) => item.delegationGroupId === 'group-1'));
     const followup = await manager.followup({ agentId: first.agent_id, task: 'three' }, caller('followup-1')) as { agent_run_id: string };
     assert.match(followup.agent_run_id, /^agent-run-/);
     const followupRun = (await manager.detail(sessionId, first.agent_id))?.runs.at(-1);
@@ -139,12 +150,20 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     assert.equal(followupRun?.invokedByTurn, 1);
     assert.equal(followupRun?.invokedByToolCallId, 'followup-1');
     assert.equal(followupRun?.delegationGroupId, 'group-1');
-    await manager.wait({ agentIds: [first.agent_id], timeoutMs: 1_000 }, caller('wait-2'));
+    await manager.wait({ agentIds: [first.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-2'));
     const slow = await manager.spawn({ task: 'slow', agent: 'researcher' }, caller('spawn-3')) as { agent_id: string };
+    const waitAbort = new AbortController();
+    const cancelledWait = manager.wait(
+      { agentIds: [slow.agent_id], block: true, timeoutMs: 1_000 },
+      { ...caller('wait-cancelled'), signal: waitAbort.signal },
+    ) as Promise<{ cancelled: boolean }>;
+    waitAbort.abort('stop main only');
+    assert.equal((await cancelledWait).cancelled, true);
+    assert.equal((await manager.detail(sessionId, slow.agent_id))?.agent.status, 'running');
     assert.equal((await manager.stop({ agentId: slow.agent_id }, caller('stop-1')) as { status: string }).status, 'stopped');
-    await manager.wait({ agentIds: [slow.agent_id], timeoutMs: 1_000 }, caller('wait-3'));
+    await manager.wait({ agentIds: [slow.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-3'));
     assert.match((await manager.followup({ agentId: slow.agent_id, task: 'after-stop' }, caller('followup-2')) as { agent_run_id: string }).agent_run_id, /^agent-run-/);
-    await manager.wait({ agentIds: [slow.agent_id], timeoutMs: 1_000 }, caller('wait-4'));
+    await manager.wait({ agentIds: [slow.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-4'));
     assert.deepEqual(completedInputs.sort(), ['after-stop', 'one', 'three', 'two'].sort());
     assert.equal((await manager.detail(sessionId, first.agent_id))?.runs.length, 2);
   } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }); }

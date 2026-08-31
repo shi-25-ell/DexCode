@@ -292,7 +292,7 @@ export const CONTEXT_TOOL_DEFINITIONS = [
   },
 ];
 
-const SPAWN_AGENT_DESCRIPTION = `Start a persistent child agent asynchronously for a bounded task. Use context_mode=fresh for self-contained work that does not need the current conversation; use context_mode=fork when the child needs a bounded snapshot of the main agent's current context. A fork is copied once and parent and child continue independently. Omit context_mode to use the selected agent definition's default. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`;
+const SPAWN_AGENT_DESCRIPTION = `Start a persistent child agent asynchronously for a bounded task. The child always runs in the background: do not immediately call blocking wait_agent and do not poll it. Continue independent work; completion is delivered automatically in a later model turn. Use context_mode=fresh for self-contained work that does not need the current conversation; use context_mode=fork when the child needs a bounded snapshot of the main agent's current context. A fork is copied once and parent and child continue independently. Omit context_mode to use the selected agent definition's default. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`;
 const CONTEXT_MODE_DESCRIPTION = "Optional context strategy. fresh starts from the child agent's own system, workspace, memory, and task context without the main conversation. fork additionally copies a bounded snapshot of the main agent's current context; use it when prior discussion or findings are needed. The snapshot is copied once, so parent and child continue independently. Omit to use the selected agent definition's default.";
 
 export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
@@ -316,12 +316,13 @@ export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
     type: 'function' as const,
     function: {
       name: 'wait_agent',
-      description: 'Wait for the current Runs of one or more child agents. A timeout is a normal result.',
+      description: 'Inspect current child-agent Run status without polling. block defaults to false and returns immediately. Use block=true only for an explicit synchronization barrier; normal completions are delivered automatically to a later model turn. Cancelling this Main Run only cancels the wait, never the child.',
       parameters: {
         type: 'object', additionalProperties: false, required: ['agent_ids'],
         properties: {
           agent_ids: { type: 'array', minItems: 1, items: { type: 'string' } },
           mode: { type: 'string', enum: ['any', 'all'] },
+          block: { type: 'boolean', default: false },
           timeout_ms: { type: 'integer', minimum: 0, maximum: 60000 },
         },
       },

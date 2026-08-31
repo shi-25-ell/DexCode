@@ -21,6 +21,7 @@ export type AgentDefinition = {
     maxRetriesPerTurn?: number;
     maxOutputTokens?: number;
     maxResultBytes?: number;
+    maxRunDurationMs?: number;
   };
   model?: string;
   memoryPolicy: { read: boolean; write: boolean; automaticExtraction: false };
@@ -71,6 +72,7 @@ export type AgentRunRecord = {
   input: string;
   startedAt: string;
   completedAt?: string;
+  usage?: { inputTokens: number; outputTokens: number; totalTokens: number; unknown?: number };
   result?: StoredAgentRunResult;
 };
 
@@ -107,6 +109,20 @@ export type AgentTreeSnapshot = {
   conversations: AgentConversation[];
   contexts: AgentContextRecord[];
   operations: Record<string, { agentId: string; agentRunId: string }>;
+  inbox: AgentCompletionNotification[];
+};
+
+export type AgentCompletionNotification = {
+  notificationId: string;
+  agentId: string;
+  agentRunId: string;
+  delegationGroupId?: string;
+  createdAt: string;
+  status: 'pending' | 'consumed';
+  summary: string;
+  result: Pick<StoredAgentRunResult, 'status' | 'terminationReason' | 'finalContent' | 'usage' | 'error'>;
+  consumedAt?: string;
+  consumedByRunId?: string;
 };
 
 export type AgentStoreEvent =
@@ -116,9 +132,12 @@ export type AgentStoreEvent =
   | { type: 'agent_context_committed'; context: AgentContextRecord }
   | { type: 'agent_tool_started'; agentId: string; agentRunId: string; tool: AgentToolRecord }
   | { type: 'agent_tool_finished'; agentId: string; agentRunId: string; callId: string; presentation: ToolPresentation }
+  | { type: 'agent_run_usage'; agentId: string; agentRunId: string; usage: { inputTokens: number; outputTokens: number; totalTokens: number; unknown?: number } }
   | { type: 'agent_stop_requested'; agentId: string; agentRunId: string; reason?: string }
   | { type: 'agent_run_terminal'; agentId: string; agentRunId: string; status: Exclude<AgentRunStatus, 'running'>; result: StoredAgentRunResult; completedAt: string }
-  | { type: 'agent_recovered'; agentId: string; agentRunId: string; completedAt: string };
+  | { type: 'agent_recovered'; agentId: string; agentRunId: string; completedAt: string }
+  | { type: 'agent_completion_notification'; notification: AgentCompletionNotification }
+  | { type: 'agent_completion_consumed'; notificationIds: string[]; consumedAt: string; consumedByRunId: string };
 
 export type AgentActivityEvent =
   | { type: 'agent_created'; agent: AgentRecord }
@@ -144,6 +163,7 @@ export type AgentCallerContext = {
   toolCallId: string;
   delegationGroupId: string;
   forkSnapshot: ChatMessage[];
+  signal?: AbortSignal;
 };
 
 export const DEFAULT_AGENT_DEFINITION_NAME = 'general-purpose';
@@ -151,7 +171,7 @@ export const DEFAULT_AGENT_DEFINITION_NAME = 'general-purpose';
 export interface AgentOrchestrationPort {
   definitions?(): Array<{ name: string; description: string }>;
   spawn(input: { task: string; agent?: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext): Promise<unknown>;
-  wait(input: { agentIds: string[]; mode?: 'any' | 'all'; timeoutMs?: number }, caller: AgentCallerContext): Promise<unknown>;
+  wait(input: { agentIds: string[]; mode?: 'any' | 'all'; block?: boolean; timeoutMs?: number }, caller: AgentCallerContext): Promise<unknown>;
   followup(input: { agentId: string; task: string }, caller: AgentCallerContext): Promise<unknown>;
   stop(input: { agentId: string; reason?: string }, caller: AgentCallerContext): Promise<unknown>;
 }
@@ -186,6 +206,7 @@ export function validateOrchestrationToolInput(name: AgentOrchestrationToolName,
   } else if (name === 'wait_agent') {
     if (!Array.isArray(args.agent_ids) || args.agent_ids.length < 1 || args.agent_ids.some((id) => typeof id !== 'string' || !id)) return 'agent_ids must be a non-empty string array';
     if (args.mode !== undefined && args.mode !== 'any' && args.mode !== 'all') return 'mode must be any or all';
+    if (args.block !== undefined && typeof args.block !== 'boolean') return 'block must be boolean';
     if (args.timeout_ms !== undefined && (!Number.isInteger(args.timeout_ms) || Number(args.timeout_ms) < 0 || Number(args.timeout_ms) > 60_000)) return 'timeout_ms must be an integer from 0 to 60000';
   } else if (name === 'followup_agent') {
     if (typeof args.agent_id !== 'string' || !args.agent_id) return 'agent_id is required';

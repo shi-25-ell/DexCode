@@ -181,7 +181,7 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
     }
     if (record.type === 'message') {
       const message = record.message;
-      if (message.role === 'user') pushItem({ id: `message-${record.seq}`, kind: 'user', content: message.content });
+      if (message.role === 'user' && !record.origin?.startsWith('agent_notification:')) pushItem({ id: `message-${record.seq}`, kind: 'user', content: message.content });
       if (message.role === 'assistant') {
         if (message.content?.trim()) pushItem({
           id: record.messageId ?? `message-${record.seq}`,

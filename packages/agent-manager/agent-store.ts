@@ -2,7 +2,7 @@ import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/prom
 import { dirname, join } from 'node:path';
 import { applyAgentStoreEvent, createAgentTreeSnapshot } from './agent-journal-reducer.ts';
 import { createHash } from 'node:crypto';
-import type { AgentRecord, AgentRunRecord, AgentStoreEvent, AgentTreeSnapshot } from './contracts.ts';
+import type { AgentCompletionNotification, AgentRecord, AgentRunRecord, AgentStoreEvent, AgentTreeSnapshot } from './contracts.ts';
 
 type Header = { version: 1; type: 'agent_tree_header'; sessionId: string; rootAgentId: string; createdAt: string };
 type Commit = { version: 1; type: 'agent_commit'; sessionId: string; revision: number; at: string; events: AgentStoreEvent[] };
@@ -111,7 +111,22 @@ export function createAgentStore(options: { sessionsDir: string; observe?: (sess
       const running = snapshot.runs.filter((run) => run.status === 'running');
       if (running.length === 0) return snapshot;
       const completedAt = new Date().toISOString();
-      const events: AgentStoreEvent[] = running.map((run) => ({ type: 'agent_recovered', agentId: run.agentId, agentRunId: run.agentRunId, completedAt }));
+      const events: AgentStoreEvent[] = running.flatMap((run) => {
+        const notification: AgentCompletionNotification = {
+          notificationId: `notification-${run.agentRunId}`,
+          agentId: run.agentId,
+          agentRunId: run.agentRunId,
+          ...(run.delegationGroupId ? { delegationGroupId: run.delegationGroupId } : {}),
+          createdAt: completedAt,
+          status: 'pending',
+          summary: 'Child agent run was interrupted by process restart.',
+          result: { status: 'interrupted', terminationReason: 'recovered_interruption', finalContent: '', error: { code: 'RUN_INTERRUPTED', message: 'Agent Run was interrupted by process restart' } },
+        };
+        return [
+          { type: 'agent_recovered', agentId: run.agentId, agentRunId: run.agentRunId, completedAt },
+          { type: 'agent_completion_notification', notification },
+        ];
+      });
       const commit: Commit = { version: 1, type: 'agent_commit', sessionId, revision: snapshot!.revision + 1, at: completedAt, events };
       for (const event of events) applyAgentStoreEvent(snapshot!, event);
       snapshot!.revision = commit.revision;
@@ -134,6 +149,18 @@ export function createAgentStore(options: { sessionsDir: string; observe?: (sess
     { type: 'agent_message_committed', agentId: agent.agentId, agentRunId: run.agentRunId, message: { role: 'user', content: run.input } },
   ], { create: true });
 
+  async function pendingNotifications(sessionId: string): Promise<AgentCompletionNotification[]> {
+    const snapshot = await load(sessionId, false);
+    return snapshot?.inbox.filter((item) => item.status === 'pending') ?? [];
+  }
+
+  async function consumeNotifications(sessionId: string, notificationIds: string[], consumedByRunId: string): Promise<AgentTreeSnapshot | null> {
+    if (notificationIds.length === 0) return load(sessionId, false);
+    return append(sessionId, [{
+      type: 'agent_completion_consumed', notificationIds: [...new Set(notificationIds)], consumedAt: new Date().toISOString(), consumedByRunId,
+    }]);
+  }
+
   return {
     pathFor,
     exists: async (sessionId: string) => (await loadRaw(sessionId)) !== null,
@@ -141,6 +168,8 @@ export function createAgentStore(options: { sessionsDir: string; observe?: (sess
     loadRaw,
     append,
     createAgentRun,
+    pendingNotifications,
+    consumeNotifications,
     remove: async (sessionId: string) => { cache.delete(sessionId); await rm(pathFor(sessionId), { force: true }); },
   };
 }

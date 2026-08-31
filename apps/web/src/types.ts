@@ -118,6 +118,7 @@ export type AgentRunView = {
   agentRunId: string; agentId: string; invokedByRunId: string; trigger: 'spawn' | 'followup';
   invokedByTurn?: number; invokedByToolCallId?: string; delegationGroupId?: string;
   status: 'running' | 'completed' | 'failed' | 'interrupted' | 'limited'; input: string; startedAt: string; completedAt?: string;
+  usage?: { totalTokens: number };
   result?: { finalContent: string; terminationReason: string; toolsUsed: string[]; filesModified: string[]; usage?: { totalTokens: number }; error?: { code: string; message: string } };
 };
 export type AgentTreeSnapshot = { version: 1; sessionId: string; rootAgentId: string; revision: number; agents: AgentRecordView[]; runs: AgentRunView[] };

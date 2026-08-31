@@ -33,6 +33,16 @@ type AgentRunner = {
 
 type RunEnvironment = { agent: AgentRunner; context: RunContext };
 type EventSink = (event: AgentEvent) => void;
+type AgentInboxNotification = {
+  notificationId: string;
+  agentId: string;
+  agentRunId: string;
+  delegationGroupId?: string;
+  createdAt: string;
+  summary: string;
+  result: { status: string; terminationReason: string; finalContent: string; usage?: unknown; error?: { code: string; message: string } };
+};
+type AgentInboxBatch = { notifications: AgentInboxNotification[]; message: { role: 'user'; content: string }; origin: string };
 export type CoordinatorStreamOptions = {
   onRunEvent?: (event: RunEventEnvelope) => void;
   legacyEvents?: boolean;
@@ -105,6 +115,10 @@ export function createConversationRunCoordinator(dependencies: {
   createHooks(sessionId: string, runId: string, sink: EventSink, emit?: (event: RunEventPayload) => void): ExecutorHooks;
   createLifecycleHooks?(sessionId: string, runId: string): AgentLifecycleHooks;
   cancelPending?(sessionId: string, runId: string, reason: QueuePauseReason): void;
+  agentInbox?: {
+    pending(sessionId: string): Promise<AgentInboxNotification[]>;
+    consume(sessionId: string, notificationIds: string[], consumedByRunId: string): Promise<unknown>;
+  };
   observe?(observation: QueueObservation): void;
 }) {
   const { repository } = dependencies;
@@ -113,6 +127,63 @@ export function createConversationRunCoordinator(dependencies: {
   const chainsBySessionId = new Map<string, ConversationRunChain>();
   const locks = new Map<string, Promise<void>>();
   const observe = (observation: QueueObservation) => dependencies.observe?.(observation);
+
+  function notificationIdsFromOrigin(origin: string | undefined): string[] {
+    return origin?.startsWith('agent_notification:') ? origin.slice('agent_notification:'.length).split(',').filter(Boolean) : [];
+  }
+
+  async function pendingAgentBatch(sessionId: string): Promise<AgentInboxBatch | null> {
+    if (!dependencies.agentInbox) return null;
+    let pending = await dependencies.agentInbox.pending(sessionId);
+    if (pending.length === 0) return null;
+    const session = await repository.loadSession(sessionId);
+    if (!session) return null;
+    const delivered = new Map<string, string>();
+    for (const record of session.ledger ?? []) {
+      const ids = notificationIdsFromOrigin(record.type === 'run_started' || record.type === 'message' ? record.origin : undefined);
+      for (const id of ids) delivered.set(id, 'runId' in record ? record.runId : 'recovered');
+    }
+    const alreadyDelivered = pending.filter((item) => delivered.has(item.notificationId));
+    if (alreadyDelivered.length > 0) {
+      const byRun = new Map<string, string[]>();
+      for (const item of alreadyDelivered) {
+        const runId = delivered.get(item.notificationId)!;
+        byRun.set(runId, [...(byRun.get(runId) ?? []), item.notificationId]);
+      }
+      for (const [runId, ids] of byRun) await dependencies.agentInbox.consume(sessionId, ids, runId);
+      pending = await dependencies.agentInbox.pending(sessionId);
+      if (pending.length === 0) return null;
+    }
+    pending.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const first = pending[0]!;
+    const groupKey = first.delegationGroupId ?? first.notificationId;
+    const notifications = pending.filter((item) => (item.delegationGroupId ?? item.notificationId) === groupKey);
+    const ids = notifications.map((item) => item.notificationId);
+    const content = [
+      'The following background child-agent runs completed. Incorporate the useful results, continue the parent task if needed, and do not claim they are still running.',
+      JSON.stringify(notifications.map((item) => ({
+        agentId: item.agentId,
+        agentRunId: item.agentRunId,
+        ...(item.delegationGroupId ? { delegationGroupId: item.delegationGroupId } : {}),
+        status: item.result.status,
+        terminationReason: item.result.terminationReason,
+        summary: item.summary,
+        result: item.result.finalContent,
+        ...(item.result.usage ? { usage: item.result.usage } : {}),
+        ...(item.result.error ? { error: item.result.error } : {}),
+      }))),
+    ].join('\n');
+    return { notifications, message: { role: 'user', content }, origin: `agent_notification:${ids.join(',')}` };
+  }
+
+  async function beginAgentNotificationRun(sessionId: string, context: RunContext): Promise<{ runId: string; prompt: string } | null> {
+    const batch = await pendingAgentBatch(sessionId);
+    if (!batch || !dependencies.agentInbox) return null;
+    const runId = crypto.randomUUID();
+    await repository.beginRun({ sessionId, runId, userMessage: batch.message, context, profile: 'main', origin: batch.origin });
+    await dependencies.agentInbox.consume(sessionId, batch.notifications.map((item) => item.notificationId), runId);
+    return { runId, prompt: batch.message.content };
+  }
 
   async function withSessionLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
     const previous = locks.get(sessionId) ?? Promise.resolve();
@@ -213,6 +284,23 @@ export function createConversationRunCoordinator(dependencies: {
             observe({ metric: 'queue.wait_ms', value: waited, sessionId: handle.sessionId, runId: handle.runId, itemId: consumed.item.itemId, delivery: 'steer' });
             observe({ metric: 'steer.safe_boundary_wait_ms', value: waited, sessionId: handle.sessionId, runId: handle.runId, itemId: consumed.item.itemId });
             return { action: 'continue', steer: consumed.message, itemId: consumed.item.itemId, directive: consumed.message.content } as const;
+          }
+          const queue = await repository.getQueue(handle.sessionId);
+          if (!queue.pending.some((item) => item.delivery === 'next_run')) {
+            const batch = await pendingAgentBatch(handle.sessionId);
+            if (batch && dependencies.agentInbox) {
+              await repository.appendRunMessage({
+                sessionId: handle.sessionId,
+                runId: handle.runId,
+                message: batch.message,
+                origin: batch.origin,
+              });
+              await dependencies.agentInbox.consume(handle.sessionId, batch.notifications.map((item) => item.notificationId), handle.runId);
+              return {
+                action: 'continue', steer: batch.message, itemId: batch.notifications[0]!.notificationId,
+                directive: batch.message.content, refreshContext: false, updateActiveRequest: false,
+              } as const;
+            }
           }
           if (input.wouldNaturallyComplete) {
             handle.phase = 'closing';
@@ -332,6 +420,11 @@ export function createConversationRunCoordinator(dependencies: {
         operationId: `drain:${current.runId}:${nextRunId}`,
       });
       if (!claimed) {
+        const notificationRun = await beginAgentNotificationRun(current.sessionId, environment.context);
+        if (notificationRun) {
+          current = { sessionId: current.sessionId, runId: notificationRun.runId, prompt: notificationRun.prompt, prestarted: true };
+          continue;
+        }
         observe({ metric: 'run_chain.length', value: summaries.length, sessionId: current.sessionId, runId: current.runId, outcome: 'completed' });
         return { summaries, paused: false };
       }
@@ -356,7 +449,7 @@ export function createConversationRunCoordinator(dependencies: {
 
   async function resume(sessionId: string, sink: EventSink, stream: CoordinatorStreamOptions = {}): Promise<RunChainResult> {
     const chain: ConversationRunChain = { chainId: crypto.randomUUID(), sessionId, sink };
-    let next: { runId: string; prompt: string; sourceItemId: string } | null;
+    let next: { runId: string; prompt: string; sourceItemId?: string } | null;
     try {
       next = await withSessionLock(sessionId, async () => {
         if (chainsBySessionId.has(sessionId) || activeBySessionId.has(sessionId)) throw new Error('Session already has an active Run');
@@ -366,7 +459,7 @@ export function createConversationRunCoordinator(dependencies: {
         const environment = await dependencies.resolveEnvironment(session);
         const runId = crypto.randomUUID();
         const claimed = await repository.beginRunFromQueue({ sessionId, runId, context: environment.context, operationId: `resume:${runId}` });
-        if (!claimed) return null;
+        if (!claimed) return beginAgentNotificationRun(sessionId, environment.context);
         queueUpdated(sink, sessionId, claimed.item, claimed.session.revision ?? 0);
         return { runId, prompt: claimed.message.content, sourceItemId: claimed.item.itemId };
       });
@@ -379,7 +472,7 @@ export function createConversationRunCoordinator(dependencies: {
       return { summaries: [], paused: false };
     }
     try {
-      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, sourceItemId: next.sourceItemId }, sink, chain, stream);
+      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, ...(next.sourceItemId ? { sourceItemId: next.sourceItemId } : {}) }, sink, chain, stream);
     } finally {
       await unregisterChain(chain);
     }

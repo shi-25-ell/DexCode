@@ -664,7 +664,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
             profile: input.profile ?? 'main',
             origin: input.origin ?? 'user',
           },
-          { seq: seq + 1, at, runId: input.runId, type: 'message', message: input.userMessage },
+          { seq: seq + 1, at, runId: input.runId, type: 'message', message: input.userMessage, ...(input.origin ? { origin: input.origin } : {}) },
         ],
       });
       activeRuns.add(`${input.sessionId}:${input.runId}`);
@@ -672,7 +672,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function appendRunMessage(input: { sessionId: string; runId: string; message: ChatMessage; messageId?: string; turn?: number }): Promise<Session> {
+  async function appendRunMessage(input: { sessionId: string; runId: string; message: ChatMessage; messageId?: string; turn?: number; origin?: string }): Promise<Session> {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
@@ -690,6 +690,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
           message: input.message,
           ...(input.messageId ? { messageId: input.messageId } : {}),
           ...(input.turn !== undefined ? { turn: input.turn } : {}),
+          ...(input.origin ? { origin: input.origin } : {}),
         }],
       });
     });

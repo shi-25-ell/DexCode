@@ -76,7 +76,7 @@ function bool(value: string, key: string): boolean {
 
 const KEYS = new Set([
   'name', 'description', 'default-context-mode', 'allowed-context-modes', 'allowed-tools', 'denied-tools', 'allow-external-mcp', 'allow-skills',
-  'max-model-turns', 'max-model-attempts', 'max-retries-per-turn', 'max-output-tokens', 'max-result-bytes', 'model',
+  'max-model-turns', 'max-model-attempts', 'max-retries-per-turn', 'max-output-tokens', 'max-result-bytes', 'max-run-duration-ms', 'model',
   'memory-read', 'memory-write', 'automatic-extraction', 'default-isolation', 'allowed-isolation',
 ]);
 
@@ -118,6 +118,7 @@ export function parseAgentDefinitionMarkdown(content: string): AgentDefinition {
       ...(values.has('max-retries-per-turn') ? { maxRetriesPerTurn: integer(values.get('max-retries-per-turn')!, 'max-retries-per-turn') } : {}),
       ...(values.has('max-output-tokens') ? { maxOutputTokens: integer(values.get('max-output-tokens')!, 'max-output-tokens') } : {}),
       ...(values.has('max-result-bytes') ? { maxResultBytes: integer(values.get('max-result-bytes')!, 'max-result-bytes') } : {}),
+      ...(values.has('max-run-duration-ms') ? { maxRunDurationMs: integer(values.get('max-run-duration-ms')!, 'max-run-duration-ms') } : {}),
     },
     ...(values.has('model') ? { model: scalar(values.get('model')!) } : {}),
     memoryPolicy: {

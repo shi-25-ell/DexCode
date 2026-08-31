@@ -105,7 +105,7 @@ export interface AgentLifecycleHooks {
 
 export type AgentPersistenceHooks = Pick<
   ExecutorSemanticHooks,
-  'assistantCommitted' | 'toolStarted' | 'toolOutcome' | 'contextPrepared'
+  'assistantCommitted' | 'toolStarted' | 'toolOutcome' | 'contextPrepared' | 'usageUpdated'
 >;
 
 export interface AgentRunSpec {
@@ -289,6 +289,9 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
       },
       contextPrepared: persistence?.contextPrepared
         ? (prepared) => persistence.contextPrepared!(prepared)
+        : undefined,
+      usageUpdated: persistence?.usageUpdated
+        ? (usage) => persistence.usageUpdated!(usage)
         : undefined,
       turnEnded: async ({ turn, toolCalls, finishReason }) => {
         const event: AgentTurnEndedEvent = { type: 'turn_end', identity, turn, toolCalls, finishReason };

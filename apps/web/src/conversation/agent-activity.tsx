@@ -2,7 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { Bot, ChevronDown, ChevronRight, LoaderCircle, Square, X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { getAgentDetail } from '../api';
 import type { AgentDetail, AgentRecordView, AgentRunView, AgentToolView, AgentTreeSnapshot, ConversationScope, ToolPresentation } from '../types';
 import { AssistantMessage } from './assistant-message';
@@ -31,6 +31,24 @@ function runStatusLabel(run: AgentRunView, agent: AgentRecordView): string {
   return '达到限制';
 }
 
+function durationLabel(startedAt: string, completedAt: string | undefined, now: number): string {
+  const elapsed = Math.max(0, Math.floor(((completedAt ? Date.parse(completedAt) : now) - Date.parse(startedAt)) / 1_000));
+  const minutes = Math.floor(elapsed / 60);
+  const seconds = elapsed % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function AgentRunMeta({ run }: { run: AgentRunView }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (run.status !== 'running') return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [run.status]);
+  const tokens = run.usage?.totalTokens ?? run.result?.usage?.totalTokens;
+  return <>{durationLabel(run.startedAt, run.completedAt, now)}{tokens !== undefined ? ` · ${tokens.toLocaleString('zh-CN')} tok` : ''}</>;
+}
+
 export function AgentActivityCard({ tree, agentRunIds, onOpen, onStop }: {
   tree: AgentTreeSnapshot; agentRunIds: string[]; onOpen(agentId: string): void; onStop(agentId: string): void;
 }) {
@@ -50,7 +68,7 @@ export function AgentActivityCard({ tree, agentRunIds, onOpen, onStop }: {
           <button className="agent-card-main" onClick={() => onOpen(agent.agentId)}>
             <i className={`agent-dot ${running ? agent.status : 'idle'}`} />
             <span><strong>{agent.name}</strong><small>{run.input}</small></span>
-            <em>{runStatusLabel(run, agent)}</em><ChevronRight size={15} />
+            <em>{runStatusLabel(run, agent)} · <AgentRunMeta run={run} /></em><ChevronRight size={15} />
           </button>
           {running ? <button className="agent-stop" disabled={agent.status === 'stopping'} onClick={() => onStop(agent.agentId)} aria-label={`停止 ${agent.name}`}><Square size={12} fill="currentColor" /></button> : null}
         </div>
@@ -147,7 +165,7 @@ export function AgentDrawer({ open, onOpenChange, tree, scope, sessionId, select
           </div>
           {selectedAgentId ? (
             <div className="agent-transcript">
-              <h3>{detail.data?.agent.name ?? 'Agent 对话'}</h3>
+              <h3>{detail.data?.agent.name ?? 'Agent 对话'}{detail.data?.runs.at(-1) ? <small><AgentRunMeta run={detail.data.runs.at(-1)!} /></small> : null}</h3>
               {detail.isPending ? <span>加载中…</span> : detail.data ? <AgentTranscript detail={detail.data} /> : <span>无法加载 Agent 对话</span>}
             </div>
           ) : (
@@ -155,7 +173,7 @@ export function AgentDrawer({ open, onOpenChange, tree, scope, sessionId, select
               <div className="agent-tree-root"><i />Main</div>
               {tree.agents.map((agent) => (
                 <div className="agent-tree-row" key={agent.agentId}>
-                  <button onClick={() => onSelect(agent.agentId)}><i className={`agent-dot ${agent.status}`} /><span><strong>{agent.name}</strong><small>{agent.definitionName} · {agent.contextMode === 'fork' ? '继承上下文' : '独立上下文'}</small></span><em>{statusLabel(tree, agent)}</em></button>
+                  <button onClick={() => onSelect(agent.agentId)}><i className={`agent-dot ${agent.status}`} /><span><strong>{agent.name}</strong><small>{agent.definitionName} · {agent.contextMode === 'fork' ? '继承上下文' : '独立上下文'}</small></span><em>{statusLabel(tree, agent)}{runFor(tree, agent) ? <> · <AgentRunMeta run={runFor(tree, agent)!} /></> : null}</em></button>
                   {(agent.status === 'running' || agent.status === 'stopping') ? <button className="agent-stop" disabled={agent.status === 'stopping'} onClick={() => onStop(agent.agentId)}><Square size={12} fill="currentColor" /></button> : null}
                 </div>
               ))}

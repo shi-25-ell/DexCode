@@ -10,10 +10,24 @@ function conversation(snapshot: AgentTreeSnapshot, agentId: string) {
 }
 
 export function createAgentTreeSnapshot(sessionId: string, rootAgentId: string): AgentTreeSnapshot {
-  return { version: 1, sessionId, rootAgentId, revision: 0, agents: [], runs: [], conversations: [], contexts: [], operations: {} };
+  return { version: 1, sessionId, rootAgentId, revision: 0, agents: [], runs: [], conversations: [], contexts: [], operations: {}, inbox: [] };
 }
 
 export function applyAgentStoreEvent(snapshot: AgentTreeSnapshot, event: AgentStoreEvent): void {
+  if (event.type === 'agent_completion_notification') {
+    if (!snapshot.inbox.some((item) => item.notificationId === event.notification.notificationId)) snapshot.inbox.push(structuredClone(event.notification));
+    return;
+  }
+  if (event.type === 'agent_completion_consumed') {
+    for (const notificationId of event.notificationIds) {
+      const notification = snapshot.inbox.find((item) => item.notificationId === notificationId);
+      if (!notification || notification.status === 'consumed') continue;
+      notification.status = 'consumed';
+      notification.consumedAt = event.consumedAt;
+      notification.consumedByRunId = event.consumedByRunId;
+    }
+    return;
+  }
   if (event.type === 'agent_created') {
     if (!snapshot.agents.some((agent) => agent.agentId === event.agent.agentId)) snapshot.agents.push(structuredClone(event.agent));
     snapshot.operations[event.operationId] = { agentId: event.agent.agentId, agentRunId: '' };
@@ -48,6 +62,8 @@ export function applyAgentStoreEvent(snapshot: AgentTreeSnapshot, event: AgentSt
       tool.status = 'finished';
       tool.presentation = structuredClone(event.presentation);
     }
+  } else if (event.type === 'agent_run_usage') {
+    run.usage = structuredClone(event.usage);
   } else if (event.type === 'agent_stop_requested') {
     agent.status = 'stopping';
   } else {
