@@ -98,6 +98,7 @@ test('backend strategy selects the legacy or four-layer request path and records
       assert.equal(events.some((event) => event.type === 'context_usage' && event.source === 'provider' && event.usedTokens === 120), true);
       assert.equal(runEvents[0]?.event.type, 'run_started');
       assert.equal(runEvents[1]?.event.type, 'run_phase_changed');
+      assert.equal(runEvents[1]?.event.type === 'run_phase_changed' ? runEvents[1].event.phase : undefined, 'preparing_context');
       assert.deepEqual(runEvents.map((event) => event.seq), runEvents.map((_, index) => index + 1));
       const committed = runEvents.find((event) => event.event.type === 'assistant_message_committed');
       const terminal = runEvents.at(-1);

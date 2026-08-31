@@ -123,15 +123,18 @@ export class RunEventSequenceValidator {
       return;
     }
     if (event.type === 'tool_started') {
+      if (event.presentation.callRef !== event.callId) throw new RunProtocolError(`Tool presentation crossed callId: ${event.callId}`);
       if (this.#tools.has(event.callId)) throw new RunProtocolError(`Tool already started: ${event.callId}`);
       this.#tools.set(event.callId, 'started');
       return;
     }
     if (event.type === 'tool_progress') {
+      if (event.presentation.callRef !== event.callId) throw new RunProtocolError(`Tool presentation crossed callId: ${event.callId}`);
       if (this.#tools.get(event.callId) !== 'started') throw new RunProtocolError(`Tool progress references inactive call: ${event.callId}`);
       return;
     }
     if (event.type === 'tool_finished') {
+      if (event.presentation.callRef !== event.callId) throw new RunProtocolError(`Tool presentation crossed callId: ${event.callId}`);
       if (this.#tools.get(event.callId) !== 'started') throw new RunProtocolError(`Tool finish references inactive call: ${event.callId}`);
       this.#tools.set(event.callId, 'finished');
       return;

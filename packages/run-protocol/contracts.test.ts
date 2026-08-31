@@ -38,7 +38,7 @@ test('RunEvent V2 validates stable message, tool and terminal lifecycles', () =>
         finishReason: 'tool_calls',
       },
     }),
-    event(5, { type: 'tool_started', callId: 'call-1', presentation: { callRef: 'call-1', category: 'read', name: '读取文件', status: 'running', summary: '准备执行' } }),
+    event(5, { type: 'tool_started', callId: 'call-1', presentation: { callRef: 'call-1', category: 'read', name: '读取文件', status: 'queued', summary: '准备执行' } }),
     event(6, { type: 'tool_progress', callId: 'call-1', presentation: { callRef: 'call-1', category: 'read', name: '读取文件', status: 'running', summary: '正在执行' } }),
     event(7, { type: 'tool_finished', callId: 'call-1', presentation: { callRef: 'call-1', category: 'read', name: '读取文件', status: 'succeeded', summary: '完成' } }),
     event(8, { type: 'run_finished', terminal: { status: 'completed', reason: 'natural_completion' }, conversationRevision: 7, conversation: emptyConversation }),
@@ -60,6 +60,10 @@ test('RunEvent V2 detects gaps, unknown drafts and invalid tool progress', () =>
   const tool = new RunEventSequenceValidator(runId);
   tool.accept(event(1, { type: 'run_started', sessionId: 'session-contract' }));
   assert.throws(() => tool.accept(event(2, { type: 'tool_progress', callId: 'missing', presentation: { callRef: 'missing', category: 'other', name: '工具', status: 'running', summary: 'x' } })), /inactive call/);
+
+  const crossedTool = new RunEventSequenceValidator(runId);
+  crossedTool.accept(event(1, { type: 'run_started', sessionId: 'session-contract' }));
+  assert.throws(() => crossedTool.accept(event(2, { type: 'tool_started', callId: 'call-1', presentation: { callRef: 'call-2', category: 'other', name: '工具', status: 'queued', summary: 'x' } })), /crossed callId/);
 });
 
 test('only recoverable deltas and progress are droppable and compatible deltas coalesce', () => {
@@ -86,4 +90,3 @@ test('legacy adapter preserves text, tool terminal and final conversation meanin
   assert.equal(terminal.at(-1)?.type, 'result');
   assert.match(JSON.stringify(terminal), /session-contract/);
 });
-

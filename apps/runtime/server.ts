@@ -152,6 +152,7 @@ const pendingConfirms = new Map<string, PendingConfirm>();
 const pendingCommandConfirms = new Map<string, PendingCommandConfirm>();
 const pendingToolApprovals = new Map<string, PendingToolApproval>();
 const activeConversationRuns = new Map<string, AbortController>();
+const activeConversationRequestIds = new Map<string, AbortController>();
 const runReplayBuffer = createRunReplayBuffer();
 
 type V2Subscriber = {
@@ -822,7 +823,7 @@ export function startRuntimeServer() {
       const runRef = decodeURIComponent(runCommandMatch[1]);
       const { action } = await parseBody<{ action?: 'stop' }>(req);
       if (action !== 'stop') throw new HttpError(400, '不支持的运行命令');
-      const controller = activeConversationRuns.get(runRef);
+      const controller = activeConversationRuns.get(runRef) ?? activeConversationRequestIds.get(runRef);
       if (!controller) throw new HttpError(404, '当前运行不存在或已经结束');
       controller.abort();
       sendJson(res, 200, { ok: true });
@@ -921,6 +922,7 @@ export function startRuntimeServer() {
           done: Promise.resolve(),
         };
         activeConversationRuns.set(runId, controller);
+        activeConversationRequestIds.set(clientRequestId, controller);
         activeV2Runs.set(runId, active);
         active.done = (async () => {
           try {
@@ -955,6 +957,7 @@ export function startRuntimeServer() {
           } finally {
             active.finished = true;
             activeConversationRuns.delete(runId);
+            activeConversationRequestIds.delete(clientRequestId);
             activeV2Runs.delete(runId);
           }
         })();

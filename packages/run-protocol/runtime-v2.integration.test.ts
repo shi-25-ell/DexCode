@@ -108,4 +108,23 @@ test('runtime V2 streams a terminal snapshot and replays it idempotently after s
   if (replay[0]?.event.type === 'run_finished') {
     assert.deepEqual(replay[0].event.conversation, terminal.event.conversation);
   }
+
+  const legacyResponse = await fetch(`${baseUrl}/api/conversation-runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt: 'legacy contract smoke',
+      clientRequestId: 'request-legacy-smoke',
+      conversationRef: started.sessionId,
+      scope: { kind: 'general' },
+    }),
+  });
+  assert.equal(legacyResponse.status, 200);
+  const legacyEvents = (await legacyResponse.text())
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => JSON.parse(line.slice(6)) as { type?: string });
+  assert.equal(legacyEvents.some((item) => item.type === 'session'), true);
+  assert.equal(legacyEvents.some((item) => item.type === 'chunk'), true);
+  assert.equal(legacyEvents.at(-1)?.type, 'result');
 });
