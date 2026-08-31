@@ -291,19 +291,29 @@ export type QueueLedgerRecord =
   | { seq: number; at: string; type: 'queue_chain_resumed'; operationId: string; sessionRevision: number };
 
 export type SessionLedgerRecord =
-  | { seq: number; at: string; runId: string; type: 'run_started'; context?: RunContext; clientRequestId?: string }
+  | {
+      seq: number;
+      at: string;
+      runId: string;
+      type: 'run_started';
+      context?: RunContext;
+      clientRequestId?: string;
+      parentRunId?: string;
+      profile?: string;
+      origin?: string;
+    }
   | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage; messageId?: string; turn?: number }
   | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string; input?: Record<string, unknown> }
   | { seq: number; at: string; runId: string; type: 'tool_completed'; callId: string; presentation: ToolPresentation }
   | { seq: number; at: string; runId: string; type: 'approval_requested'; approvalId: string; request: ToolApprovalRequest }
   | { seq: number; at: string; runId: string; type: 'approval_resolved'; approvalId: string; decision: ApprovalOption }
   | { seq: number; at: string; runId: string; type: 'context_committed'; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }
-  | { seq: number; at: string; runId: string; type: 'context_prepare_committed'; manifest: ContextManifestV2 }
+  | { seq: number; at: string; runId: string; type: 'context_prepare_committed'; manifest: ContextManifestV2; summaryRecord?: ContextSummaryRecord }
   | { seq: number; at: string; runId: string; type: 'context_compaction_started'; operationRef: string }
   | { seq: number; at: string; runId: string; type: 'context_compaction_completed'; presentation: ContextPresentation; summaryRecordId?: string }
   | { seq: number; at: string; runId: string; type: 'context_compaction_failed'; operationRef: string; reason: NonNullable<ContextPresentation['reason']> }
-  | { seq: number; at: string; runId: string; type: 'context_usage_observed'; manifestId: string; usage: ContextUsageSnapshot }
-  | { seq: number; at: string; runId: string; type: 'run_terminal'; report: RunReport }
+  | { seq: number; at: string; runId: string; type: 'context_usage_observed'; manifestId: string; actualInputTokens?: number; usage: ContextUsageSnapshot }
+  | { seq: number; at: string; runId: string; type: 'run_terminal'; report: RunReport; summary?: TaskSummary }
   | { seq: number; at: string; runId: string; type: 'recovery'; reason: 'interrupted' }
   | QueueLedgerRecord;
 

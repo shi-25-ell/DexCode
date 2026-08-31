@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { DEFAULT_PROJECT_ID } from '../shared/index.ts';
 import { conversationTitle } from '../conversation-view/title.ts';
@@ -31,6 +31,15 @@ import type {
 } from '../shared/types.ts';
 import { findQueueOperation, projectQueue } from '../agent-core/queue-reducer.ts';
 import { QueueMutationError, type QueueMutationOutcome } from '../agent-core/session-contracts.ts';
+import { applyCommit, projectionFromHeader, validateCommit } from './journal-reducer.ts';
+import { createJsonlFilesystem } from './jsonl-filesystem.ts';
+import {
+  SESSION_JOURNAL_VERSION,
+  type SessionJournalCommit,
+  type SessionJournalHeader,
+  type SessionJournalMeta,
+  type SessionJournalRecord,
+} from './journal-types.ts';
 
 export type { Session, TaskSummary, ChatMessage };
 
@@ -38,12 +47,15 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
   const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
   const projectDir = join(process.cwd(), 'workspaces', projectId);
   const sessionsDir = join(process.cwd(), 'workspaces', projectId, 'sessions');
+  const filesystem = createJsonlFilesystem(sessionsDir);
   const currentFile = join(sessionsDir, 'current.json');
   const memoryFile = join(projectDir, 'project-memory.md');
   const workspaceDataDir = join(projectDir, 'workspace-data');
   const locks = new Map<string, Promise<void>>();
   const activeRuns = new Set<string>();
   const knownSessions = new Set<string>();
+  const projections = new Map<string, Session>();
+  const journalBytes = new Map<string, number>();
   let currentLock: Promise<void> = Promise.resolve();
   let materializationLock: Promise<void> = Promise.resolve();
 
@@ -73,14 +85,8 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     await mkdir(projectDir, { recursive: true });
   }
 
-  function sessionPath(sessionId: string) {
-    if (!/^session-[a-zA-Z0-9-]+$/.test(sessionId)) throw new Error('Invalid session id');
-    return join(sessionsDir, `${sessionId}.json`);
-  }
-
   function artifactRoot(sessionId: string) {
-    sessionPath(sessionId);
-    return join(sessionsDir, sessionId, 'artifacts');
+    return filesystem.artifactRoot(sessionId);
   }
 
   function contained(root: string, target: string): boolean {
@@ -167,30 +173,182 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     }
   }
 
-  async function loadRaw(sessionId: string): Promise<Session | null> {
+  function materializedMeta(session: Session, bytes: number): SessionJournalMeta {
+    const lastUser = [...session.messages].reverse().find((message) => message.role === 'user');
+    const pendingApproval = [...(session.ledger ?? [])].reverse().find((record) => record.type === 'approval_requested' || record.type === 'approval_resolved');
+    const state: SessionJournalMeta['state'] = session.activeTaskId
+      ? pendingApproval?.type === 'approval_requested' ? 'waiting' : 'running'
+      : session.runReports?.at(-1)?.status === 'failed' ? 'failed' : 'idle';
+    const payload: Omit<SessionJournalMeta, 'checksum'> = {
+      version: 1,
+      sessionId: session.sessionId,
+      scope: structuredClone(session.scope),
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      title: session.title ?? '',
+      archived: session.archived ?? false,
+      state,
+      messageCount: session.messages.length,
+      taskCount: session.taskSummaries.length,
+      lastMessage: typeof lastUser?.content === 'string' ? lastUser.content.slice(0, 60) : '',
+      materialized: isMaterialized(session),
+      revision: session.revision ?? 0,
+      journalBytes: bytes,
+      clientRequestIds: [...(session.clientRequestIds ?? [])],
+    };
+    return { ...payload, checksum: `sha256-${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}` };
+  }
+
+  async function writeMeta(session: Session, bytes: number): Promise<void> {
+    await filesystem.ensureSessionDir(session.sessionId);
+    await filesystem.publish(filesystem.metaPath(session.sessionId), `${JSON.stringify(materializedMeta(session, bytes))}\n`);
+  }
+
+  async function refreshMeta(session: Session, bytes: number): Promise<void> {
     try {
-      const raw = await readFile(sessionPath(sessionId), 'utf8');
-      return normalized(JSON.parse(raw) as Session);
+      await writeMeta(session, bytes);
     } catch (error) {
-      if ((error as { code?: string }).code === 'ENOENT') return null;
-      if (error instanceof SyntaxError) throw new Error(`Session is corrupt: ${sessionId}`, { cause: error });
-      throw error;
+      console.warn(`Session metadata index will be rebuilt: ${session.sessionId}`, error);
     }
+  }
+
+  async function loadMeta(sessionId: string): Promise<SessionJournalMeta | null> {
+    const size = await filesystem.journalSize(sessionId);
+    if (size === null) return null;
+    try {
+      const meta = JSON.parse(await readFile(filesystem.metaPath(sessionId), 'utf8')) as SessionJournalMeta;
+      const { checksum, ...payload } = meta;
+      const expected = `sha256-${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
+      if (meta.version === 1 && meta.sessionId === sessionId && meta.journalBytes === size && Number.isSafeInteger(meta.revision) && checksum === expected) {
+        return meta;
+      }
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    }
+    const session = await loadRaw(sessionId);
+    if (!session) return null;
+    const bytes = journalBytes.get(sessionId) ?? size;
+    await refreshMeta(session, bytes);
+    return materializedMeta(session, bytes);
+  }
+
+  async function loadRaw(sessionId: string): Promise<Session | null> {
+    const cached = projections.get(sessionId);
+    if (cached) return structuredClone(cached);
+    const loaded = await filesystem.load(sessionId);
+    if (!loaded) return null;
+    const session = normalized(loaded.session);
+    projections.set(sessionId, session);
+    journalBytes.set(sessionId, loaded.journalBytes);
+    await refreshMeta(session, loaded.journalBytes);
+    return structuredClone(session);
+  }
+
+  function added<T>(before: T[] | undefined, after: T[] | undefined, label: string): T[] {
+    const previous = before ?? [];
+    const next = after ?? [];
+    if (next.length < previous.length || JSON.stringify(next.slice(0, previous.length)) !== JSON.stringify(previous)) {
+      throw new Error(`Session mutation must be append-only for ${label}`);
+    }
+    return next.slice(previous.length);
+  }
+
+  function recordsForMutation(before: Session, after: Session): SessionJournalRecord[] {
+    const records: SessionJournalRecord[] = [];
+    if (before.title !== after.title || before.archived !== after.archived) {
+      records.push({
+        type: 'session_meta_updated',
+        ...(before.title !== after.title ? { title: after.title ?? null } : {}),
+        ...(before.archived !== after.archived ? { archived: after.archived ?? false } : {}),
+      });
+    }
+
+    const ledgerRecords = added(before.ledger, after.ledger, 'ledger');
+    const newMessages = added(before.messages, after.messages, 'messages');
+    const ledgerMessages = ledgerRecords.filter((record) => record.type === 'message');
+    if (ledgerMessages.length > newMessages.length) throw new Error('Session ledger contains more messages than the projection');
+    for (let index = 0; index < ledgerMessages.length; index += 1) {
+      if (JSON.stringify(ledgerMessages[index]!.message) !== JSON.stringify(newMessages[index])) {
+        throw new Error('Session message projection diverges from its ledger');
+      }
+    }
+
+    const newSummaries = added(before.taskSummaries, after.taskSummaries, 'task summaries');
+    const newContextSummaries = added(before.contextSummaries, after.contextSummaries, 'context summaries');
+    let summaryIndex = 0;
+    for (const ledgerRecord of ledgerRecords) {
+      if (ledgerRecord.type === 'run_terminal' && newSummaries[summaryIndex]?.taskId === ledgerRecord.runId) {
+        records.push({ ...ledgerRecord, summary: newSummaries[summaryIndex++] });
+      } else if (ledgerRecord.type === 'context_prepare_committed') {
+        const summaryRecord = newContextSummaries.find((candidate) => candidate.id === ledgerRecord.manifest.summaryRecordId);
+        records.push({ ...ledgerRecord, ...(summaryRecord ? { summaryRecord } : {}) });
+      } else {
+        records.push(structuredClone(ledgerRecord));
+      }
+    }
+    for (const message of newMessages.slice(ledgerMessages.length)) records.push({ type: 'session_message_committed', message });
+    for (const summary of newSummaries.slice(summaryIndex)) records.push({ type: 'task_summary_committed', summary });
+    for (const artifact of added(before.contextArtifacts, after.contextArtifacts, 'context artifacts')) {
+      records.push({ type: 'context_artifact_registered', artifact });
+    }
+    const previousRequests = new Set(before.clientRequestIds ?? []);
+    for (const clientRequestId of after.clientRequestIds ?? []) {
+      if (!previousRequests.has(clientRequestId)) records.push({ type: 'client_request_registered', clientRequestId });
+    }
+    return records;
   }
 
   async function saveUnlocked(session: Session): Promise<Session> {
     await ensureDir();
-    const updated = normalized({ ...session, updatedAt: new Date().toISOString() });
-    const target = sessionPath(session.sessionId);
-    const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(updated, null, 2), 'utf8');
-    try {
-      await rename(temporary, target);
-    } catch (error) {
-      await rm(temporary, { force: true });
-      throw error;
+    let before = projections.get(session.sessionId);
+    let bytes = journalBytes.get(session.sessionId);
+    if (!before) {
+      const loaded = await filesystem.load(session.sessionId);
+      if (loaded) {
+        before = normalized(loaded.session);
+        bytes = loaded.journalBytes;
+      } else {
+        const header: SessionJournalHeader = {
+          kind: 'header',
+          version: SESSION_JOURNAL_VERSION,
+          sessionId: session.sessionId,
+          scope: normalizeScope(session.scope),
+          createdAt: session.createdAt,
+        };
+        bytes = await filesystem.create(header);
+        before = projectionFromHeader(header);
+      }
     }
-    return updated;
+    const desiredRevision = session.revision ?? before.revision ?? 0;
+    const revision = desiredRevision === (before.revision ?? 0) ? desiredRevision + 1 : desiredRevision;
+    const records = recordsForMutation(before, normalized(session));
+    if (records.length === 0 && (before.revision ?? 0) === 0 && desiredRevision === 0) {
+      projections.set(session.sessionId, before);
+      journalBytes.set(session.sessionId, bytes!);
+      await refreshMeta(before, bytes!);
+      return structuredClone(before);
+    }
+    if (records.length === 0) return structuredClone(before);
+    if (revision !== (before.revision ?? 0) + 1) {
+      throw new Error(`Session revision must advance from ${before.revision ?? 0} to ${(before.revision ?? 0) + 1}`);
+    }
+    const commit: SessionJournalCommit = {
+      kind: 'commit',
+      version: SESSION_JOURNAL_VERSION,
+      commitId: crypto.randomUUID(),
+      sessionId: session.sessionId,
+      revision,
+      at: new Date().toISOString(),
+      records,
+    };
+    validateCommit(before, commit);
+    const appendedBytes = await filesystem.append(commit);
+    const next = normalized(applyCommit(before, commit));
+    bytes = (bytes ?? 0) + appendedBytes;
+    projections.set(session.sessionId, next);
+    journalBytes.set(session.sessionId, bytes);
+    await refreshMeta(next, bytes);
+    return structuredClone(next);
   }
 
   async function readCurrentSessions(): Promise<Record<string, string>> {
@@ -335,28 +493,23 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     runId: string;
     userMessage: ChatMessage;
     context: RunContext;
+    parentRunId?: string;
+    profile?: string;
+    origin?: string;
   }): Promise<{ session: Session; created: boolean }> {
     const scope = normalizeScope(input.scope);
     if (!input.clientRequestId.trim()) throw new Error('clientRequestId is required');
     if (!sameScope(scope, input.context.scope)) throw new Error('Run context does not match Session scope');
     return withMaterializationLock(async () => {
       await ensureDir();
-      let files: string[] = [];
-      try {
-        files = await readdir(sessionsDir) as string[];
-      } catch {
-        files = [];
-      }
-      for (const file of files) {
-        if (!file.endsWith('.json') || file === 'current.json') continue;
-        try {
-          const candidate = normalized(JSON.parse(await readFile(join(sessionsDir, file), 'utf8')) as Session);
-          if (sameScope(candidate.scope, scope) && candidate.clientRequestIds?.includes(input.clientRequestId)) {
+      for (const candidateId of await filesystem.listJournalIds()) {
+        const meta = await loadMeta(candidateId);
+        if (meta && sameScope(meta.scope, scope) && meta.clientRequestIds.includes(input.clientRequestId)) {
+          const candidate = await loadRaw(candidateId);
+          if (candidate) {
             knownSessions.add(candidate.sessionId);
             return { session: candidate, created: false };
           }
-        } catch {
-          continue;
         }
       }
 
@@ -374,7 +527,17 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         activeTaskId: input.runId,
         revision: 1,
         ledger: [
-          { seq: 1, at, runId: input.runId, type: 'run_started', context: input.context, clientRequestId: input.clientRequestId },
+          {
+            seq: 1,
+            at,
+            runId: input.runId,
+            type: 'run_started',
+            context: input.context,
+            clientRequestId: input.clientRequestId,
+            ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
+            profile: input.profile ?? 'main',
+            origin: input.origin ?? 'user',
+          },
           { seq: 2, at, runId: input.runId, type: 'message', message: input.userMessage },
         ],
         runReports: [],
@@ -452,7 +615,16 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function beginRun(input: { sessionId: string; runId: string; userMessage: ChatMessage; context: RunContext; clientRequestId?: string }): Promise<Session> {
+  async function beginRun(input: {
+    sessionId: string;
+    runId: string;
+    userMessage: ChatMessage;
+    context: RunContext;
+    clientRequestId?: string;
+    parentRunId?: string;
+    profile?: string;
+    origin?: string;
+  }): Promise<Session> {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
@@ -488,6 +660,9 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
             type: 'run_started',
             context: input.context,
             ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
+            ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
+            profile: input.profile ?? 'main',
+            origin: input.origin ?? 'user',
           },
           { seq: seq + 1, at, runId: input.runId, type: 'message', message: input.userMessage },
         ],
@@ -762,6 +937,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
           runId: input.runId,
           type: 'context_usage_observed',
           manifestId: input.manifestId,
+          actualInputTokens: input.actualInputTokens,
           usage: input.usage,
         }],
       });
@@ -1045,7 +1221,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         messages: [...session.messages, message],
         ledger: [
           ...(session.ledger ?? []),
-          { seq, at, runId: input.runId, type: 'run_started', context: input.context },
+          { seq, at, runId: input.runId, type: 'run_started', context: input.context, profile: 'main', origin: 'user' },
           { seq: seq + 1, at, runId: input.runId, type: 'message', message },
           { seq: seq + 2, at, type: 'queue_consumed', operationId: input.operationId, itemId: item.itemId, delivery: 'next_run', runId: input.runId, sessionRevision: revision },
           { seq: seq + 3, at, type: 'queue_chain_resumed', operationId: `${input.operationId}:resume`, sessionRevision: revision },
@@ -1182,45 +1358,28 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     updatedAt: string;
     title: string;
     archived: boolean;
+    state: 'idle' | 'running' | 'waiting' | 'failed';
     messageCount: number;
     taskCount: number;
     lastMessage: string;
   }>> {
     await ensureDir();
-    let files: string[];
-    try {
-      files = await readdir(sessionsDir) as string[];
-    } catch {
-      return [];
-    }
-    const results = await Promise.all(
-      files
-        .filter((f) => f.endsWith('.json') && f !== 'current.json')
-        .map(async (f) => {
-          try {
-            const raw = await readFile(join(sessionsDir, f), 'utf8');
-            const s = JSON.parse(raw) as Session;
-            const normalizedSession = normalized(s);
-            if (!isMaterialized(normalizedSession)) return null;
-            const lastUser = [...s.messages].reverse().find((m) => m.role === 'user');
-            const lastMsg = typeof lastUser?.content === 'string' ? lastUser.content : '';
-            if (scope && !sameScope(normalizedSession.scope, scope)) return null;
-            return {
-              sessionId: s.sessionId,
-              scope: normalizedSession.scope,
-              createdAt: s.createdAt,
-              updatedAt: s.updatedAt,
-              title: s.title ?? '',
-              archived: s.archived ?? false,
-              messageCount: s.messages.length,
-              taskCount: s.taskSummaries.length,
-              lastMessage: lastMsg.slice(0, 60),
-            };
-          } catch {
-            return null;
-          }
-        }),
-    );
+    const results = await Promise.all((await filesystem.listJournalIds()).map(async (sessionId) => {
+      const meta = await loadMeta(sessionId);
+      if (!meta?.materialized || (scope && !sameScope(meta.scope, scope))) return null;
+      return {
+        sessionId: meta.sessionId,
+        scope: meta.scope,
+        createdAt: meta.createdAt,
+        updatedAt: meta.updatedAt,
+        title: meta.title,
+        archived: meta.archived,
+        state: meta.state,
+        messageCount: meta.messageCount,
+        taskCount: meta.taskCount,
+        lastMessage: meta.lastMessage,
+      };
+    }));
     return results
       .filter((r): r is NonNullable<typeof r> => r !== null)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -1240,9 +1399,10 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     const session = await loadRaw(sessionId);
     if (!session) return false;
     if (session.activeTaskId) throw new Error(`Cannot delete Session with active Run: ${session.activeTaskId}`);
-    await rm(sessionPath(sessionId), { force: true });
-    await rm(join(sessionsDir, sessionId), { recursive: true, force: true });
+    await filesystem.removeSession(sessionId);
     knownSessions.delete(sessionId);
+    projections.delete(sessionId);
+    journalBytes.delete(sessionId);
     const currentId = await getCurrentSessionId(session.scope);
     if (currentId === sessionId) {
       await setCurrentSessionId(null, session.scope);
@@ -1277,14 +1437,16 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     ).slice(0, 20);
   }
 
-  async function exportSession(sessionId: string): Promise<Session> {
+  async function exportSession(sessionId: string): Promise<string> {
     const session = await loadSession(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
-    return session;
+    return filesystem.readJournal(sessionId);
   }
 
   return {
     sessionsDir,
+    journalPath: filesystem.journalPath,
+    metaPath: filesystem.metaPath,
     getCurrentSessionId,
     setCurrentSessionId,
     createSession,

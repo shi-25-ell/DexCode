@@ -47,6 +47,9 @@ export type BeginRunInput = {
   userMessage: ChatMessage;
   context: RunContext;
   clientRequestId?: string;
+  parentRunId?: string;
+  profile?: string;
+  origin?: string;
 };
 
 export type AppendRunMessageInput = {
@@ -90,6 +93,9 @@ export interface SessionRepository {
     runId: string;
     userMessage: ChatMessage;
     context: RunContext;
+    parentRunId?: string;
+    profile?: string;
+    origin?: string;
   }): Promise<{ session: Session; created: boolean }>;
   commitContext(input: {
     sessionId: string;

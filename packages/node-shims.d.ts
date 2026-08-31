@@ -7,17 +7,19 @@ declare const process: {
 declare type FsDirent = {
   name: string;
   isDirectory(): boolean;
+  isFile(): boolean;
 };
 
 declare module 'node:fs' {
   export const promises: {
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     readFile(path: string, options?: string): Promise<string>;
-    writeFile(path: string, data: string, options?: string): Promise<void>;
+    writeFile(path: string, data: string, options?: string | { encoding?: string; flag?: string; mode?: number }): Promise<void>;
+    appendFile(path: string, data: string, options?: string | { encoding?: string; mode?: number }): Promise<void>;
     rename(oldPath: string, newPath: string): Promise<void>;
     rm(path: string, options?: { recursive?: boolean; force?: boolean; maxRetries?: number; retryDelay?: number }): Promise<void>;
     cp(source: string, destination: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
-    stat(path: string): Promise<{ isDirectory(): boolean }>;
+    stat(path: string): Promise<{ isDirectory(): boolean; size: number }>;
     lstat(path: string): Promise<{ isSymbolicLink(): boolean }>;
     realpath(path: string): Promise<string>;
     readdir(path: string, options?: { withFileTypes?: boolean }): Promise<Array<string | FsDirent>>;
@@ -27,6 +29,7 @@ declare module 'node:fs' {
 declare module 'node:fs/promises' {
   export const readFile: typeof import('node:fs').promises.readFile;
   export const writeFile: typeof import('node:fs').promises.writeFile;
+  export const appendFile: typeof import('node:fs').promises.appendFile;
   export const mkdir: typeof import('node:fs').promises.mkdir;
   export const cp: typeof import('node:fs').promises.cp;
   export const rename: typeof import('node:fs').promises.rename;

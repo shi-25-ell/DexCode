@@ -237,6 +237,8 @@ export function createCodingAgent(
         runId,
         userMessage: user,
         context: runContext,
+        profile: 'main',
+        origin: 'user',
         ...(options.clientRequestId ? { clientRequestId: options.clientRequestId } : {}),
       });
     }

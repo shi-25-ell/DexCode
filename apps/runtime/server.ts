@@ -916,8 +916,16 @@ export function startRuntimeServer() {
     if (url.pathname === '/api/conversations' && req.method === 'GET') {
       const scope = conversationScope(url, requestWorkspaceScope);
       const summaries = await sessionRepository.listSessions(scope);
-      const sessions = await Promise.all(summaries.map((item) => sessionRepository.loadSession(item.sessionId)));
-      sendJson(res, 200, { conversations: sessions.filter((session): session is Session => Boolean(session)).map(projectConversationListItem) });
+      sendJson(res, 200, {
+        conversations: summaries.map((item) => ({
+          ref: item.sessionId,
+          title: item.title || '新会话',
+          ...(item.lastMessage ? { preview: item.lastMessage } : {}),
+          updatedAt: item.updatedAt,
+          state: item.state,
+          archived: item.archived,
+        })),
+      });
       return;
     }
 
@@ -1078,12 +1086,12 @@ export function startRuntimeServer() {
       const session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
       const exported = await sessionRepository.exportSession(conversationRef);
       const date = new Date().toISOString().slice(0, 10);
-      const filename = `${safeExportName(projectConversationListItem(session).title)}-${date}.json`;
+      const filename = `${safeExportName(projectConversationListItem(session).title)}-${date}.jsonl`;
       res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Disposition': `attachment; filename="dexcode-conversation-${date}.json"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Content-Disposition': `attachment; filename="dexcode-conversation-${date}.jsonl"; filename*=UTF-8''${encodeURIComponent(filename)}`,
       });
-      res.end(JSON.stringify(exported, null, 2));
+      res.end(exported);
       return;
     }
 
@@ -1435,12 +1443,12 @@ export function startRuntimeServer() {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', '').replace('/export', ''));
       try {
         await loadScopedSession(sessionId, requestWorkspaceScope);
-        const session = await sessionRepository.exportSession(sessionId);
+        const journal = await sessionRepository.exportSession(sessionId);
         res.writeHead(200, {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Content-Disposition': `attachment; filename="${sessionId}.json"`,
+          'Content-Type': 'application/x-ndjson; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${sessionId}.jsonl"`,
         });
-        res.end(JSON.stringify(session, null, 2));
+        res.end(journal);
       } catch (err) {
         sendJson(res, 404, { error: err instanceof Error ? err.message : String(err) });
       }

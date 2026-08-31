@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import type { RunContext, RunReport, SessionScope, TaskSummary } from '../shared/types.ts';
@@ -220,29 +220,6 @@ test('Session repository rejects a Run whose workspace differs from its Session 
   }
 });
 
-test('legacy Sessions without a scope migrate conservatively to general', async () => {
-  const repository = createSessionRepository({ projectId: `test-legacy-scope-${crypto.randomUUID()}` });
-  const projectDir = dirname(repository.sessionsDir);
-  const sessionId = 'session-legacy';
-  try {
-    await mkdir(repository.sessionsDir, { recursive: true });
-    await writeFile(join(repository.sessionsDir, `${sessionId}.json`), JSON.stringify({
-      sessionId,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      messages: [{ role: 'user', content: 'legacy' }],
-      taskSummaries: [],
-      activeTaskId: null,
-    }), 'utf8');
-    const loaded = await repository.loadSession(sessionId);
-    assert.deepEqual(loaded?.scope, { kind: 'general' });
-    assert.equal((await repository.listSessions({ kind: 'general' })).length, 1);
-    assert.equal((await repository.listSessions(workspaceScope('workspace-a'))).length, 0);
-  } finally {
-    await rm(projectDir, { recursive: true, force: true });
-  }
-});
-
 test('project memory is isolated by workspace identity', async () => {
   const repository = createSessionRepository({ projectId: `test-memory-scope-${crypto.randomUUID()}` });
   const projectDir = dirname(repository.sessionsDir);
@@ -408,6 +385,208 @@ test('reopening an idle Session pauses residual Queue until explicit resume', as
     assert.equal((await reopened.getQueue(session.sessionId)).paused, true);
     assert.equal(first?.ledger?.filter((record) => record.type === 'queue_chain_paused').length, 1);
     assert.equal(second?.ledger?.filter((record) => record.type === 'queue_chain_paused').length, 1);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('JSONL Session starts with one immutable header and beginRun is one multi-record commit', async () => {
+  const repository = createSessionRepository({ projectId: `test-jsonl-header-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const path = repository.journalPath(session.sessionId);
+    const headerOnly = (await readFile(path, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(headerOnly, [{
+      kind: 'header',
+      version: 1,
+      sessionId: session.sessionId,
+      scope: { kind: 'general' },
+      createdAt: session.createdAt,
+    }]);
+
+    await repository.beginRun({
+      sessionId: session.sessionId,
+      runId: 'run-atomic',
+      clientRequestId: 'request-atomic',
+      userMessage: { role: 'user', content: 'atomic start' },
+      context: generalContext,
+    });
+    const lines = (await readFile(path, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+    assert.equal(lines.length, 2);
+    assert.equal(lines[1].kind, 'commit');
+    assert.equal(lines[1].revision, 1);
+    assert.deepEqual(lines[1].records.map((record: { type: string }) => record.type), [
+      'session_meta_updated',
+      'run_started',
+      'message',
+      'client_request_registered',
+    ]);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('ordinary mutation appends one commit without rewriting the valid prefix', async () => {
+  const repository = createSessionRepository({ projectId: `test-jsonl-append-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.appendMessages(session.sessionId, [{ role: 'user', content: 'first' }]);
+    const path = repository.journalPath(session.sessionId);
+    const prefix = await readFile(path, 'utf8');
+    await repository.appendMessages(session.sessionId, [{ role: 'assistant', content: 'second' }]);
+    const appended = await readFile(path, 'utf8');
+    assert.equal(appended.startsWith(prefix), true);
+    assert.equal(appended.trimEnd().split('\n').length, 3);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('a completed Session projection is deterministic after repository restart', async () => {
+  const projectId = `test-jsonl-replay-${crypto.randomUUID()}`;
+  const repository = createSessionRepository({ projectId });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.beginRun({ sessionId: session.sessionId, runId: 'run-replay', userMessage: { role: 'user', content: 'replay' }, context: generalContext });
+    await repository.appendRunMessage({ sessionId: session.sessionId, runId: 'run-replay', message: { role: 'assistant', content: 'done' }, messageId: 'answer-1', turn: 1 });
+    await repository.finishRun({ sessionId: session.sessionId, ...terminal('run-replay') });
+    const before = await repository.loadSession(session.sessionId);
+    const reopened = createSessionRepository({ projectId });
+    const after = await reopened.loadSession(session.sessionId);
+    assert.deepEqual(after, before);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('a torn final line is discarded and the repaired journal remains appendable', async () => {
+  const projectId = `test-jsonl-torn-${crypto.randomUUID()}`;
+  const repository = createSessionRepository({ projectId });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.appendMessages(session.sessionId, [{ role: 'user', content: 'kept' }]);
+    const path = repository.journalPath(session.sessionId);
+    await appendFile(path, '{"kind":"commit","version":1');
+    const reopened = createSessionRepository({ projectId });
+    const recovered = await reopened.loadSession(session.sessionId);
+    assert.equal(recovered?.revision, 1);
+    assert.equal((await readFile(path, 'utf8')).endsWith('\n'), true);
+    const next = await reopened.appendMessages(session.sessionId, [{ role: 'assistant', content: 'after repair' }]);
+    assert.equal(next.revision, 2);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('malformed middle lines and revision gaps fail closed with file and line evidence', async () => {
+  for (const mode of ['syntax', 'revision'] as const) {
+    const projectId = `test-jsonl-corrupt-${mode}-${crypto.randomUUID()}`;
+    const repository = createSessionRepository({ projectId });
+    const projectDir = dirname(repository.sessionsDir);
+    try {
+      const session = await repository.createSession();
+      await repository.appendMessages(session.sessionId, [{ role: 'user', content: 'one' }]);
+      await repository.appendMessages(session.sessionId, [{ role: 'assistant', content: 'two' }]);
+      const path = repository.journalPath(session.sessionId);
+      const lines = (await readFile(path, 'utf8')).trimEnd().split('\n');
+      if (mode === 'syntax') lines[1] = '{broken';
+      else {
+        const commit = JSON.parse(lines[2]!);
+        commit.revision = 3;
+        lines[2] = JSON.stringify(commit);
+      }
+      await writeFile(path, `${lines.join('\n')}\n`, 'utf8');
+      const reopened = createSessionRepository({ projectId });
+      await assert.rejects(
+        () => reopened.loadSession(session.sessionId),
+        mode === 'syntax' ? /\.jsonl:2: commit is not valid JSON/ : /\.jsonl:3: revision expected 2, received 3/,
+      );
+    } finally {
+      await rm(projectDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('concurrent mutations for one Session serialize into strict revisions', async () => {
+  const repository = createSessionRepository({ projectId: `test-jsonl-concurrency-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await Promise.all(Array.from({ length: 24 }, (_, index) => (
+      repository.appendMessages(session.sessionId, [{ role: 'user', content: `message-${index}` }])
+    )));
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.equal(loaded?.messages.length, 24);
+    assert.equal(loaded?.revision, 24);
+    const commits = (await readFile(repository.journalPath(session.sessionId), 'utf8')).trimEnd().split('\n').slice(1).map((line) => JSON.parse(line));
+    assert.deepEqual(commits.map((commit) => commit.revision), Array.from({ length: 24 }, (_, index) => index + 1));
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('Session listing uses the lightweight sidecar while direct load still validates the journal', async () => {
+  const projectId = `test-jsonl-index-${crypto.randomUUID()}`;
+  const repository = createSessionRepository({ projectId });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.appendMessages(session.sessionId, [{ role: 'user', content: 'indexed' }]);
+    const path = repository.journalPath(session.sessionId);
+    const content = await readFile(path, 'utf8');
+    await writeFile(path, content.replace('"kind":"commit"', '"kind":"xxxxxx"'), 'utf8');
+    const reopened = createSessionRepository({ projectId });
+    assert.deepEqual((await reopened.listSessions()).map((item) => item.sessionId), [session.sessionId]);
+    await assert.rejects(() => reopened.loadSession(session.sessionId), /\.jsonl:2: line is not a commit/);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('canonical export returns the exact JSONL journal', async () => {
+  const repository = createSessionRepository({ projectId: `test-jsonl-export-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.appendMessages(session.sessionId, [{ role: 'user', content: 'export me' }]);
+    assert.equal(await repository.exportSession(session.sessionId), await readFile(repository.journalPath(session.sessionId), 'utf8'));
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('a 10,000-commit journal replays and accepts a true append afterward', async () => {
+  const repository = createSessionRepository({ projectId: `test-jsonl-long-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  const sessionId = `session-${crypto.randomUUID()}`;
+  const createdAt = new Date().toISOString();
+  try {
+    const path = repository.journalPath(sessionId);
+    await mkdir(dirname(path), { recursive: true });
+    const lines = [JSON.stringify({ kind: 'header', version: 1, sessionId, scope: { kind: 'general' }, createdAt })];
+    for (let revision = 1; revision <= 10_000; revision += 1) {
+      lines.push(JSON.stringify({
+        kind: 'commit',
+        version: 1,
+        commitId: `commit-${revision}`,
+        sessionId,
+        revision,
+        at: createdAt,
+        records: [{ type: 'session_message_committed', message: { role: 'user', content: `m${revision}` } }],
+      }));
+    }
+    await writeFile(path, `${lines.join('\n')}\n`, 'utf8');
+    const replayed = await repository.loadSession(sessionId);
+    assert.equal(replayed?.revision, 10_000);
+    assert.equal(replayed?.messages.length, 10_000);
+    const prefix = await readFile(path, 'utf8');
+    const appended = await repository.appendMessages(sessionId, [{ role: 'assistant', content: 'tail' }]);
+    assert.equal(appended.revision, 10_001);
+    assert.equal((await readFile(path, 'utf8')).startsWith(prefix), true);
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }

@@ -56,7 +56,7 @@ function ConversationActions({
           <DropdownMenu.Item onSelect={rename}><Pencil size={14} />重命名</DropdownMenu.Item>
           <DropdownMenu.Item onSelect={archive}><Archive size={14} />{conversation.archived ? '取消归档' : '归档'}</DropdownMenu.Item>
           <DropdownMenu.Item asChild>
-            <a href={conversationExportUrl(scope, conversation.ref)} download><Download size={14} />导出</a>
+            <a href={conversationExportUrl(scope, conversation.ref)} download={`${conversation.ref}.jsonl`}><Download size={14} />导出</a>
           </DropdownMenu.Item>
           <DropdownMenu.Separator />
           <DropdownMenu.Item className="danger" onSelect={deleteSelected}><Trash2 size={14} />删除</DropdownMenu.Item>
