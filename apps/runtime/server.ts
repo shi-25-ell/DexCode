@@ -416,6 +416,7 @@ type WorkspaceRuntime = {
   codingAgent: CodingAgent;
   managedMemory: ReturnType<typeof createManagedMemorySystem>;
   agentManager: AgentManager;
+  agentDefinitions: ReturnType<typeof createAgentDefinitionRegistry>;
 };
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -505,6 +506,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     codingAgent: nextCodingAgent,
     managedMemory: nextManagedMemory,
     agentManager: nextAgentManager,
+    agentDefinitions: definitionRegistry,
   };
   workspaceRuntimes.set(workspace.workspaceId, runtime);
   return runtime;
@@ -1618,6 +1620,13 @@ export function startRuntimeServer() {
     }
 
     // ── Skill 管理 API ──
+    if (url.pathname === '/api/agent-definitions' && req.method === 'GET') {
+      if (!multiAgentFeatureEnabled) throw new HttpError(404, 'Multi-Agent is disabled');
+      const result = await requestRuntime.agentDefinitions.reload();
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (url.pathname === '/api/skills' && req.method === 'GET') {
       sendJson(res, 200, { skills: skillRegistry.listSkills() });
       return;
