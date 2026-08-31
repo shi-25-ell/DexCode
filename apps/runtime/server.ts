@@ -431,6 +431,7 @@ const conversationRunCoordinator = createConversationRunCoordinator({
     onApproval: createToolApprovalHook(sessionId, runId, sink),
   }),
   cancelPending: (_sessionId, runId, reason) => cancelPendingRun(runId, reason),
+  observe: (observation) => console.info(JSON.stringify({ type: 'metric', ...observation })),
 });
 
 function workspaceScope(runtime: WorkspaceRuntime): SessionScope {
@@ -1741,7 +1742,7 @@ export function startRuntimeServer() {
       const status = err instanceof HttpError
         ? err.status
         : err instanceof QueueMutationError
-          ? err.code === 'NOT_FOUND' ? 404 : err.code === 'INVALID_ORDER' || err.code === 'INVALID_STATE' ? 400 : 409
+          ? err.code === 'NOT_FOUND' ? 404 : err.code === 'INVALID_ORDER' ? 400 : 409
           : 500;
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[request error] ${req.method} ${url.pathname}:`, message);

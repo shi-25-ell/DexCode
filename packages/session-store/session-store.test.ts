@@ -394,3 +394,21 @@ test('recovery requeues orphaned Steer and pauses pending Queue exactly once', a
     await rm(projectDir, { recursive: true, force: true });
   }
 });
+
+test('reopening an idle Session pauses residual Queue until explicit resume', async () => {
+  const projectId = `test-idle-queue-recovery-${crypto.randomUUID()}`;
+  const repository = createSessionRepository({ projectId });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.enqueueQueueItem({ sessionId: session.sessionId, content: 'resume later', delivery: 'next_run', operationId: 'enqueue-idle' });
+    const reopened = createSessionRepository({ projectId });
+    const first = await reopened.loadSession(session.sessionId);
+    const second = await reopened.loadSession(session.sessionId);
+    assert.equal((await reopened.getQueue(session.sessionId)).paused, true);
+    assert.equal(first?.ledger?.filter((record) => record.type === 'queue_chain_paused').length, 1);
+    assert.equal(second?.ledger?.filter((record) => record.type === 'queue_chain_paused').length, 1);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});

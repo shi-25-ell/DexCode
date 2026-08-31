@@ -43,6 +43,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
   const workspaceDataDir = join(projectDir, 'workspace-data');
   const locks = new Map<string, Promise<void>>();
   const activeRuns = new Set<string>();
+  const knownSessions = new Set<string>();
   let currentLock: Promise<void> = Promise.resolve();
   let materializationLock: Promise<void> = Promise.resolve();
 
@@ -247,7 +248,24 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
   async function loadSession(sessionId: string): Promise<Session | null> {
     return withSessionLock(sessionId, async () => {
       const session = await loadRaw(sessionId);
-      if (!session?.activeTaskId || activeRuns.has(`${sessionId}:${session.activeTaskId}`)) return session;
+      if (!session) return null;
+      const wasKnown = knownSessions.has(sessionId);
+      knownSessions.add(sessionId);
+      if (!session.activeTaskId) {
+        const queue = projectQueue(sessionId, session.ledger ?? []);
+        if (wasKnown || queue.pending.length === 0 || queue.paused) return session;
+        const revision = (session.revision ?? 0) + 1;
+        const record = {
+          seq: (session.ledger?.at(-1)?.seq ?? 0) + 1,
+          at: new Date().toISOString(),
+          type: 'queue_chain_paused' as const,
+          operationId: `recovery:idle:${session.ledger?.at(-1)?.seq ?? 0}`,
+          reason: 'recovery' as const,
+          sessionRevision: revision,
+        };
+        return saveUnlocked({ ...session, revision, ledger: [...(session.ledger ?? []), record] });
+      }
+      if (activeRuns.has(`${sessionId}:${session.activeTaskId}`)) return session;
       const runId = session.activeTaskId;
       const completedAt = new Date().toISOString();
       const started = session.ledger?.find(
@@ -334,6 +352,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         try {
           const candidate = normalized(JSON.parse(await readFile(join(sessionsDir, file), 'utf8')) as Session);
           if (sameScope(candidate.scope, scope) && candidate.clientRequestIds?.includes(input.clientRequestId)) {
+            knownSessions.add(candidate.sessionId);
             return { session: candidate, created: false };
           }
         } catch {
@@ -366,6 +385,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         clientRequestIds: [input.clientRequestId],
       };
       const saved = await withSessionLock(sessionId, () => saveUnlocked(session));
+      knownSessions.add(sessionId);
       activeRuns.add(`${sessionId}:${input.runId}`);
       await setCurrentSessionId(sessionId, scope);
       return { session: saved, created: true };
@@ -395,6 +415,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       if (await loadRaw(sessionId)) throw new Error(`Session already exists: ${sessionId}`);
       await saveUnlocked(session);
     });
+    knownSessions.add(sessionId);
     await setCurrentSessionId(sessionId, scope);
     return session;
   }
@@ -1206,6 +1227,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     if (session.activeTaskId) throw new Error(`Cannot delete Session with active Run: ${session.activeTaskId}`);
     await rm(sessionPath(sessionId), { force: true });
     await rm(join(sessionsDir, sessionId), { recursive: true, force: true });
+    knownSessions.delete(sessionId);
     const currentId = await getCurrentSessionId(session.scope);
     if (currentId === sessionId) {
       await setCurrentSessionId(null, session.scope);

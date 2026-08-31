@@ -182,3 +182,39 @@ test('promote racing with natural closing remains queued and drains without loss
     await rm(projectDir, { recursive: true, force: true });
   }
 });
+
+test('failed Queue resume releases the session chain for a later retry', async () => {
+  const repository = createSessionRepository({ projectId: `test-coordinator-resume-retry-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.enqueueQueueItem({ sessionId: session.sessionId, content: 'retry me', delivery: 'next_run', operationId: 'enqueue-retry' });
+    let failResolution = true;
+    const agent = {
+      async runTask(sessionId: string, prompt: string, _selectedFile: string | null, _onEvent: (event: AgentEvent) => void, _hooks: unknown, options: any) {
+        const decision = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 1, wouldNaturallyComplete: true });
+        assert.equal(decision.action, 'finish');
+        const value = terminal(options.runId, prompt);
+        await repository.finishRun({ sessionId, report: value.report, summary: value.summary });
+        return value.summary;
+      },
+    };
+    const coordinator = createConversationRunCoordinator({
+      repository,
+      resolveEnvironment: async () => {
+        if (failResolution) throw new Error('temporary environment failure');
+        return { agent, context };
+      },
+      createHooks: () => ({}),
+    });
+
+    await assert.rejects(coordinator.resume(session.sessionId, () => {}), /temporary environment failure/);
+    failResolution = false;
+    const retried = await coordinator.resume(session.sessionId, () => {});
+
+    assert.equal(retried.summaries.length, 1);
+    assert.equal((await repository.getQueue(session.sessionId)).pending.length, 0);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});

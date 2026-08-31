@@ -29,6 +29,7 @@ type ActiveConversationRun = {
 };
 
 type ConversationRunChain = {
+  chainId: string;
   sessionId: string;
   sink: EventSink;
   stoppedFor?: QueuePauseReason;
@@ -66,17 +67,31 @@ export type ConversationRuntimeSnapshot = {
 
 export type RunChainResult = { summaries: TaskSummary[]; paused: boolean };
 
+export type QueueObservation = {
+  metric: 'queue.enqueue.count' | 'queue.promote.count' | 'queue.cancel.count' | 'queue.pending.count' | 'queue.wait_ms' | 'steer.safe_boundary_wait_ms' | 'steer.requeued.count' | 'run_chain.length' | 'run_chain.paused.count' | 'queue.idempotent_replay.count';
+  value: number;
+  sessionId: string;
+  runId?: string;
+  itemId?: string;
+  operationId?: string;
+  delivery?: QueueDelivery;
+  outcome?: string;
+  reason?: string;
+};
+
 export function createConversationRunCoordinator(dependencies: {
   repository: SessionRepository;
   resolveEnvironment(session: Session): Promise<RunEnvironment>;
   createHooks(sessionId: string, runId: string, sink: EventSink): ExecutorHooks;
   cancelPending?(sessionId: string, runId: string, reason: QueuePauseReason): void;
+  observe?(observation: QueueObservation): void;
 }) {
   const { repository } = dependencies;
   const activeByRunId = new Map<string, ActiveConversationRun>();
   const activeBySessionId = new Map<string, ActiveConversationRun>();
   const chainsBySessionId = new Map<string, ConversationRunChain>();
   const locks = new Map<string, Promise<void>>();
+  const observe = (observation: QueueObservation) => dependencies.observe?.(observation);
 
   async function withSessionLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
     const previous = locks.get(sessionId) ?? Promise.resolve();
@@ -105,6 +120,12 @@ export function createConversationRunCoordinator(dependencies: {
     handle.phase = 'terminal';
   }
 
+  async function unregisterChain(chain: ConversationRunChain) {
+    await withSessionLock(chain.sessionId, async () => {
+      if (chainsBySessionId.get(chain.sessionId) === chain) chainsBySessionId.delete(chain.sessionId);
+    });
+  }
+
   function queueUpdated(sink: EventSink, sessionId: string, item: QueueItemView, sessionRevision: number) {
     sink({ type: 'queue_item_updated', sessionId, item, sessionRevision });
   }
@@ -124,10 +145,12 @@ export function createConversationRunCoordinator(dependencies: {
       operationId: `terminal:${handle.runId}:requeue`,
     });
     for (const item of requeued.items) queueUpdated(handle.sink, handle.sessionId, item, requeued.sessionRevision);
+    for (const item of requeued.items) observe({ metric: 'steer.requeued.count', value: 1, sessionId: handle.sessionId, runId: handle.runId, itemId: item.itemId, reason: requeueReason });
     const queue = await repository.getQueue(handle.sessionId);
     if (queue.pending.length > 0) {
       await repository.setQueuePaused({ sessionId: handle.sessionId, paused: true, reason, operationId: `terminal:${handle.runId}:pause:${reason}` });
       handle.sink({ type: 'run_chain_paused', sessionId: handle.sessionId, reason });
+      observe({ metric: 'run_chain.paused.count', value: 1, sessionId: handle.sessionId, runId: handle.runId, reason });
     }
   }
 
@@ -146,7 +169,10 @@ export function createConversationRunCoordinator(dependencies: {
               reason: 'budget_exhausted',
               operationId: `budget:${handle.runId}:${input.remainingModelTurns}`,
             });
-            for (const item of requeued.items) queueUpdated(handle.sink, handle.sessionId, item, requeued.sessionRevision);
+            for (const item of requeued.items) {
+              queueUpdated(handle.sink, handle.sessionId, item, requeued.sessionRevision);
+              observe({ metric: 'steer.requeued.count', value: 1, sessionId: handle.sessionId, runId: handle.runId, itemId: item.itemId, reason: 'budget_exhausted' });
+            }
             return { action: 'proceed' } as const;
           }
           const consumed = await repository.consumeSteer({
@@ -157,6 +183,9 @@ export function createConversationRunCoordinator(dependencies: {
           if (consumed) {
             queueUpdated(handle.sink, handle.sessionId, consumed.item, consumed.sessionRevision);
             handle.sink({ type: 'user_message_committed', sessionId: handle.sessionId, runId: handle.runId, itemId: consumed.item.itemId });
+            const waited = Math.max(0, Date.now() - Date.parse(consumed.item.createdAt));
+            observe({ metric: 'queue.wait_ms', value: waited, sessionId: handle.sessionId, runId: handle.runId, itemId: consumed.item.itemId, delivery: 'steer' });
+            observe({ metric: 'steer.safe_boundary_wait_ms', value: waited, sessionId: handle.sessionId, runId: handle.runId, itemId: consumed.item.itemId });
             return { action: 'continue', steer: consumed.message, itemId: consumed.item.itemId, directive: consumed.message.content } as const;
           }
           if (input.wouldNaturallyComplete) {
@@ -243,10 +272,12 @@ export function createConversationRunCoordinator(dependencies: {
       summaries.push(summary!);
       if (handle.stoppedFor || chain.stoppedFor) {
         if (!handle.stoppedFor) await requeueAndPause(handle, chain.stoppedFor!, summary!.status);
+        observe({ metric: 'run_chain.length', value: summaries.length, sessionId: current.sessionId, runId: current.runId, outcome: 'paused' });
         return { summaries, paused: true };
       }
       if (summary!.status !== 'completed') {
         await requeueAndPause(handle, 'failure', summary!.status);
+        observe({ metric: 'run_chain.length', value: summaries.length, sessionId: current.sessionId, runId: current.runId, outcome: summary!.status });
         return { summaries, paused: true };
       }
       const nextRunId = crypto.randomUUID();
@@ -256,15 +287,19 @@ export function createConversationRunCoordinator(dependencies: {
         context: environment.context,
         operationId: `drain:${current.runId}:${nextRunId}`,
       });
-      if (!claimed) return { summaries, paused: false };
+      if (!claimed) {
+        observe({ metric: 'run_chain.length', value: summaries.length, sessionId: current.sessionId, runId: current.runId, outcome: 'completed' });
+        return { summaries, paused: false };
+      }
       queueUpdated(sink, current.sessionId, claimed.item, claimed.session.revision ?? 0);
+      observe({ metric: 'queue.wait_ms', value: Math.max(0, Date.now() - Date.parse(claimed.item.createdAt)), sessionId: current.sessionId, runId: nextRunId, itemId: claimed.item.itemId, delivery: 'next_run' });
       sink({ type: 'user_message_committed', sessionId: current.sessionId, runId: nextRunId, itemId: claimed.item.itemId });
       current = { sessionId: current.sessionId, runId: nextRunId, prompt: claimed.message.content, prestarted: true, sourceItemId: claimed.item.itemId };
     }
   }
 
   async function start(input: StartConversationRunInput, sink: EventSink): Promise<RunChainResult> {
-    const chain: ConversationRunChain = { sessionId: input.sessionId, sink };
+    const chain: ConversationRunChain = { chainId: crypto.randomUUID(), sessionId: input.sessionId, sink };
     await withSessionLock(input.sessionId, async () => {
       if (chainsBySessionId.has(input.sessionId)) throw new Error('Session already has an active Run chain');
       chainsBySessionId.set(input.sessionId, chain);
@@ -273,34 +308,38 @@ export function createConversationRunCoordinator(dependencies: {
       await repository.setQueuePaused({ sessionId: input.sessionId, paused: false, operationId: `start:${input.runId}:resume` });
       return await executeChain(input, sink, chain);
     } finally {
-      await withSessionLock(input.sessionId, async () => {
-        if (chainsBySessionId.get(input.sessionId) === chain) chainsBySessionId.delete(input.sessionId);
-      });
+      await unregisterChain(chain);
     }
   }
 
   async function resume(sessionId: string, sink: EventSink): Promise<RunChainResult> {
-    const chain: ConversationRunChain = { sessionId, sink };
-    const next = await withSessionLock(sessionId, async () => {
-      if (chainsBySessionId.has(sessionId) || activeBySessionId.has(sessionId)) throw new Error('Session already has an active Run');
-      chainsBySessionId.set(sessionId, chain);
-      const session = await repository.loadSession(sessionId);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-      const environment = await dependencies.resolveEnvironment(session);
-      const runId = crypto.randomUUID();
-      const claimed = await repository.beginRunFromQueue({ sessionId, runId, context: environment.context, operationId: `resume:${runId}` });
-      if (!claimed) return null;
-      queueUpdated(sink, sessionId, claimed.item, claimed.session.revision ?? 0);
-      return { runId, prompt: claimed.message.content, sourceItemId: claimed.item.itemId };
-    });
+    const chain: ConversationRunChain = { chainId: crypto.randomUUID(), sessionId, sink };
+    let next: { runId: string; prompt: string; sourceItemId: string } | null;
+    try {
+      next = await withSessionLock(sessionId, async () => {
+        if (chainsBySessionId.has(sessionId) || activeBySessionId.has(sessionId)) throw new Error('Session already has an active Run');
+        chainsBySessionId.set(sessionId, chain);
+        const session = await repository.loadSession(sessionId);
+        if (!session) throw new Error(`Session not found: ${sessionId}`);
+        const environment = await dependencies.resolveEnvironment(session);
+        const runId = crypto.randomUUID();
+        const claimed = await repository.beginRunFromQueue({ sessionId, runId, context: environment.context, operationId: `resume:${runId}` });
+        if (!claimed) return null;
+        queueUpdated(sink, sessionId, claimed.item, claimed.session.revision ?? 0);
+        return { runId, prompt: claimed.message.content, sourceItemId: claimed.item.itemId };
+      });
+    } catch (error) {
+      await unregisterChain(chain);
+      throw error;
+    }
     if (!next) {
-      await withSessionLock(sessionId, async () => { if (chainsBySessionId.get(sessionId) === chain) chainsBySessionId.delete(sessionId); });
+      await unregisterChain(chain);
       return { summaries: [], paused: false };
     }
     try {
       return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, sourceItemId: next.sourceItemId }, sink, chain);
     } finally {
-      await withSessionLock(sessionId, async () => { if (chainsBySessionId.get(sessionId) === chain) chainsBySessionId.delete(sessionId); });
+      await unregisterChain(chain);
     }
   }
 
@@ -318,6 +357,9 @@ export function createConversationRunCoordinator(dependencies: {
         ...(canSteer ? { targetRunId: handle.runId } : {}),
         ...(input.expectedSessionRevision !== undefined ? { expectedSessionRevision: input.expectedSessionRevision } : {}),
       });
+      observe({ metric: 'queue.enqueue.count', value: 1, sessionId: input.sessionId, runId: handle?.runId, itemId: queued.item.itemId, operationId: input.operationId, delivery: queued.item.delivery, outcome: canSteer ? 'steered' : 'queued' });
+      if (queued.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: input.sessionId, runId: handle?.runId, itemId: queued.item.itemId, operationId: input.operationId });
+      observe({ metric: 'queue.pending.count', value: (await repository.getQueue(input.sessionId)).pending.length, sessionId: input.sessionId, runId: handle?.runId });
       handle?.sink({ type: 'queue_item_added', sessionId: input.sessionId, item: queued.item, sessionRevision: queued.sessionRevision });
       if (input.delivery !== 'steer' || canSteer) {
         return canSteer
@@ -339,14 +381,18 @@ export function createConversationRunCoordinator(dependencies: {
           if (!item) throw new Error(`Queue item not found: ${command.itemId}`);
           if (item.status === 'consumed') return { outcome: 'already_consumed', itemId: item.itemId, runId: item.consumedRunId!, sessionRevision: queue.sessionRevision } as const;
           const reason = handle?.phase === 'waiting_confirm' ? 'waiting_confirm' : handle ? 'run_closing' : 'run_changed';
+          observe({ metric: 'queue.promote.count', value: 1, sessionId: command.sessionId, runId: handle?.runId, itemId: command.itemId, operationId: command.operationId, outcome: `remained_queued:${reason}` });
           return { outcome: 'remained_queued', item, reason, sessionRevision: queue.sessionRevision } as const;
         }
         const result = await repository.promoteQueueItem(command);
+        observe({ metric: 'queue.promote.count', value: 1, sessionId: command.sessionId, runId: handle.runId, itemId: command.itemId, operationId: command.operationId, outcome: result.outcome });
+        if ('replayed' in result && result.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: command.sessionId, runId: handle.runId, itemId: command.itemId, operationId: command.operationId });
         if (result.outcome === 'steered') queueUpdated(handle.sink, command.sessionId, result.item, result.sessionRevision);
         return result;
       }
       if (command.type === 'cancel') {
         const result = await repository.cancelQueueItem(command);
+        observe({ metric: 'queue.cancel.count', value: 1, sessionId: command.sessionId, runId: handle?.runId, itemId: command.itemId, operationId: command.operationId, outcome: result.outcome });
         if (result.outcome === 'cancelled') handle?.sink({ type: 'queue_item_removed', sessionId: command.sessionId, itemId: command.itemId, reason: 'user_deleted', sessionRevision: result.sessionRevision });
         return result;
       }
@@ -366,7 +412,7 @@ export function createConversationRunCoordinator(dependencies: {
     if (!handle) {
       const queue = await repository.getQueue(sessionId!);
       if (queue.pending.length > 0) {
-        await repository.setQueuePaused({ sessionId: sessionId!, paused: true, reason, operationId: `chain:${sessionId}:pause:${reason}` });
+        await repository.setQueuePaused({ sessionId: sessionId!, paused: true, reason, operationId: `chain:${chain!.chainId}:pause:${reason}` });
         chain?.sink({ type: 'run_chain_paused', sessionId: sessionId!, reason });
       }
       return { stopped: true, sessionId };
