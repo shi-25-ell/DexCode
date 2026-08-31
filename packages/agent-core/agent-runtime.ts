@@ -97,6 +97,7 @@ export interface AgentLifecycleHooks {
   onTurnEnd?(event: AgentTurnEndedEvent): Promise<void> | void;
   beforeToolCall?(event: AgentToolCallEvent): Promise<void> | void;
   afterToolCall?(event: AgentToolFinishedEvent): Promise<void> | void;
+  /** Post-run extension hook. Internal Runs emit agent_end events but do not invoke this hook. */
   onAgentEnd?(event: AgentEndedEvent): Promise<void> | void;
 }
 
@@ -371,7 +372,9 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
     };
     const endedEvent: AgentEndedEvent = { type: 'agent_end', identity, result };
     await emit(endedEvent);
-    await safe('agent_end', () => spec.lifecycle?.onAgentEnd?.(endedEvent));
+    if (identity.origin === 'user') {
+      await safe('agent_end', () => spec.lifecycle?.onAgentEnd?.(endedEvent));
+    }
     return result;
   }
 

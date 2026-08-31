@@ -194,6 +194,7 @@ test('a user Agent end hook can run one internal child and failures stay isolate
   ]);
   const runtime = createAgentRuntime({ toolHost: item.toolHost, modelClient: mainModel });
   let hookCalls = 0;
+  let internalEndHookCalls = 0;
   let childResult = '';
 
   const main = await runtime.runAgent({
@@ -209,6 +210,9 @@ test('a user Agent end hook can run one internal child and failures stay isolate
           parentRunId: event.identity.runId,
           messages: [{ role: 'user', content: 'post-run work' }],
           modelClient: childModel,
+          lifecycle: {
+            onAgentEnd: () => { internalEndHookCalls += 1; },
+          },
         });
         childResult = child.finalContent;
         throw new Error('extension failed after child completion');
@@ -219,6 +223,7 @@ test('a user Agent end hook can run one internal child and failures stay isolate
   assert.equal(main.status, 'completed');
   assert.equal(main.finalContent, 'main complete');
   assert.equal(hookCalls, 1);
+  assert.equal(internalEndHookCalls, 0);
   assert.equal(childResult, 'child complete');
   assert.deepEqual(main.runtimeWarnings, [{ stage: 'agent_end', message: 'extension failed after child completion' }]);
 });
