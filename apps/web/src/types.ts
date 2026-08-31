@@ -86,10 +86,39 @@ export type ConversationSnapshot = {
   ref: string;
   title: string;
   state: 'idle' | 'running' | 'waiting' | 'failed';
+  activeRun?: { runId: string; phase: 'running' | 'waiting_confirm' | 'closing' | 'stopping' };
+  queuedItems: QueueItem[];
+  queuePaused: boolean;
+  revision: number;
   updatedAt: string;
   items: ConversationItem[];
   contextUsage: ContextUsage;
 };
+
+export type QueueDelivery = 'next_run' | 'steer';
+export type FollowUpBehavior = 'queue' | 'steer';
+
+export type QueueItem = {
+  itemId: string;
+  sessionId: string;
+  content: string;
+  delivery: QueueDelivery;
+  status: 'queued' | 'consumed' | 'cancelled';
+  targetRunId?: string;
+  createdAt: string;
+  updatedAt: string;
+  position: number;
+  revision: number;
+  consumedRunId?: string;
+};
+
+export type QueueMutationOutcome =
+  | { outcome: 'queued'; item: QueueItem; sessionRevision: number; replayed?: boolean }
+  | { outcome: 'steered'; item: QueueItem; targetRunId: string; sessionRevision: number; replayed?: boolean }
+  | { outcome: 'remained_queued'; item: QueueItem; reason: 'run_changed' | 'run_closing' | 'waiting_confirm'; sessionRevision: number }
+  | { outcome: 'cancelled'; itemId: string; sessionRevision: number; replayed?: boolean }
+  | { outcome: 'already_cancelled'; itemId: string; sessionRevision: number }
+  | { outcome: 'already_consumed'; itemId: string; runId: string; sessionRevision: number };
 
 export type ModelDescriptor = {
   displayName: string;
@@ -111,4 +140,13 @@ export type StreamEvent =
   | { type: 'result'; result: unknown }
   | { type: 'reasoning_chunk'; chunk: string }
   | { type: 'skill'; skill: string; action: string }
-  | { type: 'tool_status'; callId: string; tool: string; status: string };
+  | { type: 'tool_status'; callId: string; tool: string; status: string }
+  | { type: 'queue_item_added'; sessionId: string; item: QueueItem; sessionRevision: number }
+  | { type: 'queue_item_updated'; sessionId: string; item: QueueItem; sessionRevision: number }
+  | { type: 'queue_item_removed'; sessionId: string; itemId: string; reason: string; sessionRevision: number }
+  | { type: 'queue_reordered'; sessionId: string; orderedItemIds: string[]; sessionRevision: number }
+  | { type: 'run_started'; sessionId: string; runId: string; sourceItemId?: string }
+  | { type: 'user_message_committed'; sessionId: string; runId: string; itemId: string }
+  | { type: 'context_refresh_started' | 'context_refresh_completed'; sessionId: string; runId: string; itemId: string }
+  | { type: 'context_refresh_failed'; sessionId: string; runId: string; itemId: string; message: string }
+  | { type: 'run_chain_paused'; sessionId: string; reason: 'user_stop' | 'disconnect' | 'failure' | 'recovery' };

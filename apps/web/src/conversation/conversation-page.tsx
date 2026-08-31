@@ -2,15 +2,18 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Square } from 'lucide-react';
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiJson, getConversation, scopeWorkspaceRef, streamConversation } from '../api';
+import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopConversationRun, streamConversation, streamQueueResume } from '../api';
 import { AppShell } from '../shell/app-shell';
-import type { ContextPresentation, ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, StreamEvent, ToolPresentation } from '../types';
+import type { ContextPresentation, ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueMutationOutcome, StreamEvent, ToolPresentation } from '../types';
 import { AssistantMessage } from './assistant-message';
 import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
 import { isTimelineNearBottom } from './scroll-follow';
 import { UserMessage } from './user-message';
+import { initialQueueState, queueReducer } from './queue-reducer';
+import { QueuedMessageCard } from './queued-message-card';
+import { readFollowUpBehavior, writeFollowUpBehavior } from '../settings/follow-up-behavior';
 
 type LiveState = {
   items: ConversationItem[];
@@ -134,13 +137,19 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [state, dispatch] = useReducer(conversationReducer, initialState);
+  const [queueState, queueDispatch] = useReducer(queueReducer, initialQueueState);
   const [prompt, setPrompt] = useState('');
+  const [followUpBehavior, setFollowUpBehavior] = useState<FollowUpBehavior>(() => readFollowUpBehavior());
+  const [queueBusy, setQueueBusy] = useState<Set<string>>(() => new Set());
+  const [queueNotice, setQueueNotice] = useState('');
   const controllerRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
   const streamingRef = useRef(false);
+  const draggedQueueItem = useRef<string | null>(null);
+  const queueBusyRef = useRef<Set<string>>(new Set());
   const workspaceRef = scopeWorkspaceRef(scope);
   const snapshot = useQuery({
     queryKey: ['conversation', scope, conversationRef],
@@ -156,13 +165,23 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   useEffect(() => {
     if (snapshot.data && !streamingRef.current) {
       dispatch({ type: 'hydrate', snapshot: snapshot.data });
+      queueDispatch({
+        type: 'queue_snapshot',
+        items: snapshot.data.queuedItems,
+        revision: snapshot.data.revision,
+        paused: snapshot.data.queuePaused,
+        ...(snapshot.data.activeRun ? { activeRunId: snapshot.data.activeRun.runId } : {}),
+      });
     }
   }, [snapshot.data]);
 
   useEffect(() => {
     stickToBottom.current = true;
     setAtBottom(true);
-    if (!conversationRef) dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], contextUsage: { source: 'unknown', timing: 'next_request' } } });
+    if (!conversationRef) {
+      dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], queuedItems: [], queuePaused: false, revision: 0, contextUsage: { source: 'unknown', timing: 'next_request' } } });
+      queueDispatch({ type: 'queue_snapshot', items: [], revision: 0, paused: false });
+    }
   }, [conversationRef, scope.kind, scope.kind === 'workspace' ? scope.workspaceRef : 'general']);
 
   useLayoutEffect(() => {
@@ -202,17 +221,68 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       dispatch({ type: 'usage', usage });
     }
     else if (event.type === 'context_activity') dispatch({ type: 'context', context: event.presentation });
-    else if (event.type === 'task_status') dispatch({ type: 'status', status: event.status === 'waiting_confirm' ? 'waiting' : event.status === 'error' ? 'failed' : event.status === 'done' || event.status === 'aborted' ? 'idle' : 'running' });
+    else if (event.type === 'task_status') {
+      dispatch({ type: 'status', status: event.status === 'waiting_confirm' ? 'waiting' : event.status === 'error' ? 'failed' : event.status === 'done' || event.status === 'aborted' ? 'idle' : 'running' });
+      if (event.status === 'done' || event.status === 'aborted' || event.status === 'error') queueDispatch({ type: 'run_terminal' });
+    }
     else if (event.type === 'confirm_request') dispatch({ type: 'approval', item: { id: `approval-${event.confirmId}`, kind: 'approval', approvalRef: event.confirmId, approvalKind: 'question', title: event.question, options: event.options?.length ? event.options : ['确认', '取消'] } });
     else if (event.type === 'command_confirm_request') dispatch({ type: 'approval', item: { id: `approval-${event.confirmId}`, kind: 'approval', approvalRef: event.confirmId, approvalKind: 'command', title: event.reason || '需要确认命令', target: event.command, options: ['allow_once', 'allow_whitelist', 'deny'] } });
     else if (event.type === 'approval_request') dispatch({ type: 'approval', item: { id: `approval-${event.approvalId}`, kind: 'approval', approvalRef: event.approvalId, approvalKind: 'tool', toolName: event.toolName, effect: event.effect, title: event.title, target: event.target, reason: event.reason, fingerprint: event.fingerprint, options: event.options } });
     else if (event.type === 'error') dispatch({ type: 'error', message: event.message });
+    else if (event.type === 'queue_item_added' || event.type === 'queue_item_updated') queueDispatch({ type: 'queue_upsert', item: event.item, revision: event.sessionRevision });
+    else if (event.type === 'queue_item_removed') queueDispatch({ type: 'queue_remove', itemId: event.itemId, revision: event.sessionRevision });
+    else if (event.type === 'queue_reordered') queueDispatch({ type: 'queue_reorder', orderedItemIds: event.orderedItemIds, revision: event.sessionRevision });
+    else if (event.type === 'run_started') queueDispatch({ type: 'run_started', runId: event.runId, ...(event.sourceItemId ? { sourceItemId: event.sourceItemId } : {}) });
+    else if (event.type === 'run_chain_paused') queueDispatch({ type: 'run_chain_paused' });
+    else if (event.type === 'context_refresh_failed') setQueueNotice(`方向已更新，但上下文刷新失败：${event.message}`);
+  };
+
+  const applyQueueOutcome = (outcome: QueueMutationOutcome) => {
+    if (outcome.outcome === 'queued' || outcome.outcome === 'steered' || outcome.outcome === 'remained_queued') {
+      queueDispatch({ type: 'queue_upsert', item: outcome.item, revision: outcome.sessionRevision });
+      if (outcome.outcome === 'remained_queued') {
+        setQueueNotice(outcome.reason === 'waiting_confirm' ? '当前正在等待批准，这条消息会在下一轮处理。' : '当前运行已进入结束阶段，这条消息会在下一轮处理。');
+      }
+      return;
+    }
+    queueDispatch({ type: 'queue_remove', itemId: outcome.itemId, revision: outcome.sessionRevision });
+    if (outcome.outcome === 'already_consumed') setQueueNotice('这条消息已经进入对话。');
+  };
+
+  const markQueueBusy = (itemId: string, busy: boolean) => {
+    const next = new Set(queueBusyRef.current);
+    if (busy) next.add(itemId);
+    else next.delete(itemId);
+    queueBusyRef.current = next;
+    setQueueBusy(next);
   };
 
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const content = prompt.trim();
-    if (!content || state.status === 'running' || state.status === 'waiting') return;
+    if (!content || queueBusyRef.current.has('enqueue')) return;
+    if ((state.status === 'running' || state.status === 'waiting') && conversationRef) {
+      setPrompt('');
+      setQueueNotice('');
+      markQueueBusy('enqueue', true);
+      try {
+        const outcome = await enqueueQueuedMessage({
+          scope,
+          sessionId: conversationRef,
+          content,
+          delivery: state.status === 'waiting' || followUpBehavior === 'queue' ? 'next_run' : 'steer',
+          ...(queueState.activeRunId ? { expectedRunId: queueState.activeRunId } : {}),
+        });
+        applyQueueOutcome(outcome);
+      } catch (error) {
+        setPrompt(content);
+        setQueueNotice(error instanceof Error ? error.message : '队列提交失败');
+      } finally {
+        markQueueBusy('enqueue', false);
+      }
+      return;
+    }
+    if (state.status === 'running' || state.status === 'waiting') return;
     setPrompt('');
     streamingRef.current = true;
     dispatch({ type: 'submit', content });
@@ -238,7 +308,97 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     }
   };
 
-  const stop = () => controllerRef.current?.abort();
+  const stop = async () => {
+    if (!queueState.activeRunId) {
+      controllerRef.current?.abort();
+      return;
+    }
+    try {
+      await stopConversationRun(scope, queueState.activeRunId);
+    } catch (error) {
+      setQueueNotice(error instanceof Error ? error.message : '停止失败');
+      controllerRef.current?.abort();
+    }
+  };
+
+  const promote = async (itemId: string) => {
+    if (!conversationRef || !queueState.activeRunId || queueBusyRef.current.has(itemId)) return;
+    markQueueBusy(itemId, true);
+    setQueueNotice('');
+    try {
+      applyQueueOutcome(await promoteQueuedMessage({ scope, sessionId: conversationRef, itemId, expectedRunId: queueState.activeRunId }));
+    } catch (error) {
+      setQueueNotice(error instanceof Error ? error.message : '调整方向失败');
+    } finally {
+      markQueueBusy(itemId, false);
+    }
+  };
+
+  const removeQueued = async (itemId: string) => {
+    if (!conversationRef || queueBusyRef.current.has(itemId)) return;
+    markQueueBusy(itemId, true);
+    setQueueNotice('');
+    try {
+      applyQueueOutcome(await cancelQueuedMessage({ scope, sessionId: conversationRef, itemId }));
+    } catch (error) {
+      setQueueNotice(error instanceof Error ? error.message : '删除失败');
+    } finally {
+      markQueueBusy(itemId, false);
+    }
+  };
+
+  const reorder = async (orderedItemIds: string[]) => {
+    if (!conversationRef || queueBusyRef.current.has('reorder') || orderedItemIds.every((id, index) => queueState.items[index]?.itemId === id)) return;
+    markQueueBusy('reorder', true);
+    setQueueNotice('');
+    try {
+      const result = await reorderQueuedMessages({ scope, sessionId: conversationRef, orderedItemIds, expectedSessionRevision: queueState.revision });
+      queueDispatch({ type: 'queue_reorder', orderedItemIds: result.orderedItemIds, revision: result.sessionRevision });
+    } catch (error) {
+      setQueueNotice(`${error instanceof Error ? error.message : '排序失败'}，已重新读取队列。`);
+      await queryClient.invalidateQueries({ queryKey: ['conversation'] });
+    } finally {
+      markQueueBusy('reorder', false);
+    }
+  };
+
+  const moveQueued = (itemId: string, direction: -1 | 1) => {
+    const ids = queueState.items.map((item) => item.itemId);
+    const index = ids.indexOf(itemId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= ids.length) return;
+    [ids[index], ids[target]] = [ids[target]!, ids[index]!];
+    void reorder(ids);
+  };
+
+  const dropQueued = (targetId: string) => {
+    const sourceId = draggedQueueItem.current;
+    draggedQueueItem.current = null;
+    if (!sourceId || sourceId === targetId) return;
+    const ids = queueState.items.map((item) => item.itemId).filter((id) => id !== sourceId);
+    const target = ids.indexOf(targetId);
+    ids.splice(target, 0, sourceId);
+    void reorder(ids);
+  };
+
+  const resumeQueue = async () => {
+    if (!conversationRef || streamingRef.current) return;
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    streamingRef.current = true;
+    dispatch({ type: 'status', status: 'running' });
+    try {
+      await streamQueueResume({ scope, sessionId: conversationRef, signal: controller.signal, onEvent: handleStreamEvent });
+    } catch (error) {
+      if (!controller.signal.aborted) setQueueNotice(error instanceof Error ? error.message : '恢复队列失败');
+    } finally {
+      controllerRef.current = null;
+      streamingRef.current = false;
+      dispatch({ type: 'status', status: 'idle' });
+      await queryClient.invalidateQueries({ queryKey: ['conversations', scope] });
+      await queryClient.invalidateQueries({ queryKey: ['conversation'] });
+    }
+  };
   const timeline = useMemo(() => state.items, [state.items]);
   const effectiveUsage = useMemo<ContextUsage>(() => {
     const contextWindowTokens = state.contextUsage.contextWindowTokens ?? meta.data?.model.contextWindow;
@@ -301,6 +461,32 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           </div>
           {!atBottom ? <button className="back-to-bottom" onClick={scrollToBottom}><ArrowDown size={15} />回到底部</button> : null}
         </div>
+        {queueState.items.length > 0 || queueState.paused ? (
+          <section className="queue-region" aria-label="等待处理的消息">
+            <div className="queue-region-heading">
+              <div><strong>后续消息</strong><span>{queueState.paused ? '已暂停' : `共 ${queueState.items.length} 条`}</span></div>
+              {queueState.paused && queueState.items.length > 0 ? <button type="button" onClick={() => void resumeQueue()}>继续处理</button> : null}
+            </div>
+            {queueNotice ? <p className="queue-notice" role="status">{queueNotice}</p> : null}
+            <div className="queue-list">
+              {queueState.items.map((item, index) => (
+                <QueuedMessageCard
+                  key={item.itemId}
+                  item={item}
+                  busy={queueBusy.has(item.itemId) || queueBusy.has('reorder')}
+                  canPromote={state.status === 'running' && Boolean(queueState.activeRunId)}
+                  canMoveUp={index > 0}
+                  canMoveDown={index < queueState.items.length - 1}
+                  onPromote={() => void promote(item.itemId)}
+                  onDelete={() => void removeQueued(item.itemId)}
+                  onMove={(direction) => moveQueued(item.itemId, direction)}
+                  onDragStart={() => { draggedQueueItem.current = item.itemId; }}
+                  onDrop={() => dropQueued(item.itemId)}
+                />
+              ))}
+            </div>
+          </section>
+        ) : queueNotice ? <p className="queue-notice standalone" role="status">{queueNotice}</p> : null}
         <form className="composer-wrap" onSubmit={(event) => void submit(event)}>
           <div className="composer">
           <textarea
@@ -318,11 +504,28 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           />
           <div className="composer-actions">
             {state.status === 'running' || state.status === 'waiting'
-              ? <button type="button" className="send-button stop" onClick={stop} aria-label="停止"><Square size={14} fill="currentColor" /></button>
+              ? <>
+                  <button type="button" className="send-button stop" onClick={() => void stop()} aria-label="停止"><Square size={14} fill="currentColor" /></button>
+                  <button type="submit" className="send-button" disabled={!prompt.trim() || queueBusy.has('enqueue')} aria-label="发送后续消息"><ArrowUp size={18} /></button>
+                </>
               : <button type="submit" className="send-button" disabled={!prompt.trim()} aria-label="发送"><ArrowUp size={18} /></button>}
           </div>
           <div className="composer-footer">
             <span className="model-name"><i />{meta.data?.model.displayName ?? '模型信息加载中'}</span>
+            <label className="follow-up-setting">
+              后续消息
+              <select
+                value={followUpBehavior}
+                onChange={(event) => {
+                  const value = event.target.value as FollowUpBehavior;
+                  setFollowUpBehavior(value);
+                  writeFollowUpBehavior(value);
+                }}
+              >
+                <option value="queue">下一轮处理</option>
+                <option value="steer">调整当前方向</option>
+              </select>
+            </label>
             <span className={`context-usage ${contextLevel}`}>
               <i><b style={{ width: `${Math.min(100, Math.max(0, effectiveUsage.percentage ?? 0))}%` }} /></i>
               <ContextLabel usage={effectiveUsage} running={state.status === 'running'} />
