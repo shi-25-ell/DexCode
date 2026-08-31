@@ -37,7 +37,7 @@ export function WhitelistPanel({ workspaceRef, inactive = false }: { workspaceRe
 
   if (!workspaceRef) {
     return <section className="approval-section">
-      <PanelHeader title="命令白名单" description="白名单按项目隔离，不会把一个项目的命令信任扩散到其他项目。" />
+      <PanelHeader title="为项目配置 命令白名单" description="白名单按项目隔离，不会把一个项目的命令信任扩散到其他项目。" />
       <SettingsFeedback empty="选择项目后管理命令白名单" />
     </section>;
   }
@@ -49,8 +49,8 @@ export function WhitelistPanel({ workspaceRef, inactive = false }: { workspaceRe
   };
 
   return <section className="approval-section">
-    <PanelHeader title="命令白名单" description="管理当前项目无需重复确认的可信命令范围；规则越宽，风险越高。" onRefresh={() => void query.refetch()} />
-    {inactive ? <p className="approval-notice">完全访问模式当前不使用白名单；切回只读或白名单模式后这些规则继续生效。</p> : null}
+    <PanelHeader title="为项目配置 命令白名单" description="管理当前项目无需重复确认的可信命令范围；规则越宽，风险越高。" onRefresh={() => void query.refetch()} />
+    {inactive ? <p className="approval-notice">完全访问模式当前不使用白名单；切回逐次批准或自动文件修改后这些规则继续生效。</p> : null}
     <form className="inline-settings-form whitelist-form" onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <input value={pattern} onChange={(event) => setPattern(event.target.value)} placeholder="例如 npm test" />
       <select aria-label="白名单匹配范围" value={matchType} onChange={(event) => setMatchType(event.target.value as WhitelistEntry['matchType'])}>

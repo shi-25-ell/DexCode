@@ -58,7 +58,7 @@ export async function createApprovalModeStore(options: {
       await persist(state);
     } else {
       state = { version: 1, mode: 'read_only', revision: 0, updatedAt: now().toISOString() };
-      diagnostic = `批准模式配置损坏，已按只读模式启动：${error instanceof Error ? error.message : String(error)}`;
+      diagnostic = `批准模式配置损坏，已按逐次批准启动：${error instanceof Error ? error.message : String(error)}`;
     }
   }
 

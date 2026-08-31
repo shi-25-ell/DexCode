@@ -110,7 +110,7 @@ describe('conversationReducer', () => {
         effect: 'write',
         title: '批准文件修改',
         target: 'src/app.ts',
-        reason: '只读模式需要批准此副作用',
+        reason: '逐次批准需要批准此副作用',
         fingerprint: 'fingerprint-1',
         options: ['allow_once', 'deny'],
       },

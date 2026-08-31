@@ -49,7 +49,7 @@ export function authorizeApproval(subject: ApprovalSubject, mode: ApprovalMode):
     return { outcome: 'allow', reason: '完全访问模式跳过普通批准' };
   }
   if (mode === 'allowlist' && subject.effect === 'write') {
-    return { outcome: 'allow', reason: '白名单模式允许工作区文件修改' };
+    return { outcome: 'allow', reason: '自动文件修改允许工作区文件修改' };
   }
   const options = subject.effect === 'execute'
     ? ['allow_once', 'allow_whitelist', 'deny'] as const
@@ -57,7 +57,7 @@ export function authorizeApproval(subject: ApprovalSubject, mode: ApprovalMode):
   return {
     outcome: 'ask',
     reason: mode === 'read_only'
-      ? '只读模式需要批准此副作用'
+      ? '逐次批准需要批准此副作用'
       : '当前操作需要用户批准',
     options: [...options],
   };

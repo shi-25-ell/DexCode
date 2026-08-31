@@ -25,10 +25,13 @@ describe('Approval mode settings', () => {
     });
     renderPanel();
 
-    expect(await screen.findByRole('radio', { name: /白名单模式/ })).toBeChecked();
-    expect(screen.getByText('当前模式：白名单模式')).toBeInTheDocument();
+    expect(await screen.findByRole('radio', { name: /自动文件修改/ })).toBeChecked();
+    expect(screen.getByText('当前模式：自动文件修改')).toBeInTheDocument();
     expect(screen.queryByText(/revision/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '为项目配置 命令白名单' })).toBeInTheDocument();
     expect(screen.getByText('选择项目后管理命令白名单')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /刷新/ }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => !init?.method || init.method === 'GET')).toHaveLength(2));
     fireEvent.click(screen.getByRole('radio', { name: /完全访问/ }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/approval-mode', expect.objectContaining({ method: 'PUT' })));
@@ -48,9 +51,9 @@ describe('Approval mode settings', () => {
     });
     renderPanel();
 
-    await screen.findByRole('radio', { name: /白名单模式/ });
-    fireEvent.click(screen.getByRole('radio', { name: /只读模式/ }));
+    await screen.findByRole('radio', { name: /自动文件修改/ });
+    fireEvent.click(screen.getByRole('radio', { name: /逐次批准/ }));
     expect(await screen.findByText('无法保存')).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /白名单模式/ })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /自动文件修改/ })).toBeChecked();
   });
 });

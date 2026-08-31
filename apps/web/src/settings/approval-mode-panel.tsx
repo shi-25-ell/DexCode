@@ -5,8 +5,8 @@ import { PanelHeader, SettingsFeedback } from './settings-shared';
 import { WhitelistPanel } from './whitelist-panel';
 
 const MODE_OPTIONS: Array<{ mode: ApprovalMode; title: string; description: string }> = [
-  { mode: 'read_only', title: '只读模式', description: '读取和可信只读命令自动执行；写入及其他命令需要批准。' },
-  { mode: 'allowlist', title: '白名单模式', description: '文件修改自动执行；未在白名单中的命令需要批准。' },
+  { mode: 'read_only', title: '逐次批准', description: '读取和可信只读命令自动执行；写入及其他命令需要批准。' },
+  { mode: 'allowlist', title: '自动文件修改', description: '文件修改自动执行；未在白名单中的命令需要批准。' },
   { mode: 'full_access', title: '完全访问', description: '所有 Agent 操作自动执行；仅保留系统硬性保护。' },
 ];
 
