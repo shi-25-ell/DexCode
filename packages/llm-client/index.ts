@@ -15,6 +15,7 @@ export type {
   ModelToolCall,
   ModelTurnResult,
   ModelUsage,
+  ReasoningCapability,
 } from './types.ts';
 export { collectModelTurn, ModelProtocolError, ModelTurnAccumulator } from './turn-accumulator.ts';
 export { createOpenAiCompatibleModelClient } from './openai.ts';
@@ -31,6 +32,16 @@ function getEnvNumber(name: string): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function reasoningCapability(defaultValue: import('./types.ts').ReasoningCapability): import('./types.ts').ReasoningCapability {
+  const supportedValue = getEnv('LLM_REASONING_SUPPORTED').toLowerCase();
+  const modeValue = getEnv('LLM_REASONING_MODE').toLowerCase();
+  const supported = supportedValue === 'true' ? true : supportedValue === 'false' ? false : defaultValue.supported;
+  const requestMode = modeValue === 'enabled' || modeValue === 'disabled' || modeValue === 'provider_default'
+    ? modeValue
+    : defaultValue.requestMode;
+  return { supported, requestMode };
 }
 
 export function createModelClient(): ModelClient {
@@ -55,6 +66,7 @@ export function createModelClient(): ModelClient {
     displayName: getEnv('LLM_DISPLAY_NAME') || descriptor.displayName,
     contextWindow: getEnvNumber('LLM_CONTEXT_WINDOW') ?? descriptor.contextWindow,
     providerDisplayName: getEnv('LLM_PROVIDER_DISPLAY_NAME') || undefined,
+    reasoning: reasoningCapability(descriptor.reasoning),
     doubaoCompat: provider === 'doubao',
     defaults: {
       temperature: getEnvNumber('LLM_TEMPERATURE'),

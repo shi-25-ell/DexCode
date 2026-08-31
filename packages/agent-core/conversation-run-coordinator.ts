@@ -2,6 +2,7 @@ import type { AgentEvent, QueueDelivery, QueueItemView, QueuePauseReason, RunCon
 import type { ExecutorHooks } from './executor.ts';
 import type { QueueMutationOutcome, SessionRepository } from './session-contracts.ts';
 import type { RunCommandSource } from './run-commands.ts';
+import type { RunEventEnvelope, RunEventPayload } from '../run-protocol/contracts.ts';
 
 export type ActiveRunPhase = 'accepting_commands' | 'waiting_confirm' | 'closing' | 'stopping' | 'terminal';
 
@@ -12,12 +13,28 @@ type AgentRunner = {
     selectedFile: string | null,
     onEvent: (event: AgentEvent) => void,
     hooks: ExecutorHooks,
-    options: { runId: string; signal: AbortSignal; prestarted: boolean; clientRequestId?: string; commandSource: RunCommandSource },
+    options: {
+      runId: string;
+      signal: AbortSignal;
+      prestarted: boolean;
+      isNew?: boolean;
+      clientRequestId?: string;
+      sourceItemId?: string;
+      commandSource: RunCommandSource;
+      beforeFinish?: (result: { status: TaskSummary['status'] }) => Promise<void>;
+      onRunEvent?: (event: RunEventEnvelope) => void;
+      legacyEvents?: boolean;
+      presentationHooks?: (emit: (event: RunEventPayload) => void) => ExecutorHooks;
+    },
   ): Promise<TaskSummary>;
 };
 
 type RunEnvironment = { agent: AgentRunner; context: RunContext };
 type EventSink = (event: AgentEvent) => void;
+export type CoordinatorStreamOptions = {
+  onRunEvent?: (event: RunEventEnvelope) => void;
+  legacyEvents?: boolean;
+};
 
 type ActiveConversationRun = {
   sessionId: string;
@@ -40,6 +57,7 @@ export type StartConversationRunInput = {
   runId: string;
   prompt: string;
   prestarted: boolean;
+  isNew?: boolean;
   clientRequestId?: string;
   sourceItemId?: string;
 };
@@ -82,7 +100,7 @@ export type QueueObservation = {
 export function createConversationRunCoordinator(dependencies: {
   repository: SessionRepository;
   resolveEnvironment(session: Session): Promise<RunEnvironment>;
-  createHooks(sessionId: string, runId: string, sink: EventSink): ExecutorHooks;
+  createHooks(sessionId: string, runId: string, sink: EventSink, emit?: (event: RunEventPayload) => void): ExecutorHooks;
   cancelPending?(sessionId: string, runId: string, reason: QueuePauseReason): void;
   observe?(observation: QueueObservation): void;
 }) {
@@ -215,8 +233,8 @@ export function createConversationRunCoordinator(dependencies: {
     };
   }
 
-  function runHooks(handle: ActiveConversationRun, sink: EventSink): ExecutorHooks {
-    const hooks = dependencies.createHooks(handle.sessionId, handle.runId, sink);
+  function runHooks(handle: ActiveConversationRun, sink: EventSink, emit?: (event: RunEventPayload) => void): ExecutorHooks {
+    const hooks = dependencies.createHooks(handle.sessionId, handle.runId, sink, emit);
     const restore = () => {
       if (handle.phase === 'waiting_confirm') handle.phase = 'accepting_commands';
     };
@@ -233,7 +251,7 @@ export function createConversationRunCoordinator(dependencies: {
     };
   }
 
-  async function executeChain(first: StartConversationRunInput, sink: EventSink, chain: ConversationRunChain): Promise<RunChainResult> {
+  async function executeChain(first: StartConversationRunInput, sink: EventSink, chain: ConversationRunChain, stream: CoordinatorStreamOptions = {}): Promise<RunChainResult> {
     const summaries: TaskSummary[] = [];
     let current = first;
     while (true) {
@@ -254,6 +272,12 @@ export function createConversationRunCoordinator(dependencies: {
       }
       await withSessionLock(current.sessionId, async () => register(handle));
       sink({ type: 'run_started', sessionId: current.sessionId, runId: current.runId, ...(current.sourceItemId ? { sourceItemId: current.sourceItemId } : {}) });
+      if (current.sourceItemId) {
+        const queue = await repository.getQueue(current.sessionId);
+        const item = queue.items.find((candidate) => candidate.itemId === current.sourceItemId);
+        if (item) queueUpdated(sink, current.sessionId, item, queue.sessionRevision);
+        sink({ type: 'user_message_committed', sessionId: current.sessionId, runId: current.runId, itemId: current.sourceItemId });
+      }
       const onEvent = observedSink(handle);
       let summary: TaskSummary;
       try {
@@ -267,8 +291,18 @@ export function createConversationRunCoordinator(dependencies: {
             runId: current.runId,
             signal: handle.abortController.signal,
             prestarted: current.prestarted,
+            ...(current.isNew !== undefined ? { isNew: current.isNew } : {}),
             ...(current.clientRequestId ? { clientRequestId: current.clientRequestId } : {}),
+            ...(current.sourceItemId ? { sourceItemId: current.sourceItemId } : {}),
             commandSource: commandSource(handle),
+            beforeFinish: async ({ status }) => {
+              if (status !== 'completed' && !handle.stoppedFor) await requeueAndPause(handle, 'failure', status);
+            },
+            ...(stream.onRunEvent ? {
+              onRunEvent: stream.onRunEvent,
+              legacyEvents: stream.legacyEvents ?? false,
+              presentationHooks: (emit) => runHooks(handle, onEvent, emit),
+            } : {}),
           },
         );
       } finally {
@@ -281,7 +315,6 @@ export function createConversationRunCoordinator(dependencies: {
         return { summaries, paused: true };
       }
       if (summary!.status !== 'completed') {
-        await requeueAndPause(handle, 'failure', summary!.status);
         observe({ metric: 'run_chain.length', value: summaries.length, sessionId: current.sessionId, runId: current.runId, outcome: summary!.status });
         return { summaries, paused: true };
       }
@@ -296,14 +329,12 @@ export function createConversationRunCoordinator(dependencies: {
         observe({ metric: 'run_chain.length', value: summaries.length, sessionId: current.sessionId, runId: current.runId, outcome: 'completed' });
         return { summaries, paused: false };
       }
-      queueUpdated(sink, current.sessionId, claimed.item, claimed.session.revision ?? 0);
       observe({ metric: 'queue.wait_ms', value: Math.max(0, Date.now() - Date.parse(claimed.item.createdAt)), sessionId: current.sessionId, runId: nextRunId, itemId: claimed.item.itemId, delivery: 'next_run' });
-      sink({ type: 'user_message_committed', sessionId: current.sessionId, runId: nextRunId, itemId: claimed.item.itemId });
       current = { sessionId: current.sessionId, runId: nextRunId, prompt: claimed.message.content, prestarted: true, sourceItemId: claimed.item.itemId };
     }
   }
 
-  async function start(input: StartConversationRunInput, sink: EventSink): Promise<RunChainResult> {
+  async function start(input: StartConversationRunInput, sink: EventSink, stream: CoordinatorStreamOptions = {}): Promise<RunChainResult> {
     const chain: ConversationRunChain = { chainId: crypto.randomUUID(), sessionId: input.sessionId, sink };
     await withSessionLock(input.sessionId, async () => {
       if (chainsBySessionId.has(input.sessionId)) throw new Error('Session already has an active Run chain');
@@ -311,13 +342,13 @@ export function createConversationRunCoordinator(dependencies: {
     });
     try {
       await repository.setQueuePaused({ sessionId: input.sessionId, paused: false, operationId: `start:${input.runId}:resume` });
-      return await executeChain(input, sink, chain);
+      return await executeChain(input, sink, chain, stream);
     } finally {
       await unregisterChain(chain);
     }
   }
 
-  async function resume(sessionId: string, sink: EventSink): Promise<RunChainResult> {
+  async function resume(sessionId: string, sink: EventSink, stream: CoordinatorStreamOptions = {}): Promise<RunChainResult> {
     const chain: ConversationRunChain = { chainId: crypto.randomUUID(), sessionId, sink };
     let next: { runId: string; prompt: string; sourceItemId: string } | null;
     try {
@@ -342,7 +373,7 @@ export function createConversationRunCoordinator(dependencies: {
       return { summaries: [], paused: false };
     }
     try {
-      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, sourceItemId: next.sourceItemId }, sink, chain);
+      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, sourceItemId: next.sourceItemId }, sink, chain, stream);
     } finally {
       await unregisterChain(chain);
     }

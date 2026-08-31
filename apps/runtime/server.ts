@@ -21,6 +21,13 @@ import { createTemplateGenerator } from '../../packages/template-generator/index
 import { createSuccessResponse } from '../../packages/shared/index.ts';
 import { createCapabilityRegistry } from '../../packages/capability-registry/index.ts';
 import { presentTool, projectConversation, projectConversationListItem } from '../../packages/conversation-view/index.ts';
+import {
+  createRunReplayBuffer,
+  isDroppableRunEvent,
+  safeRunNote,
+  type RunEventEnvelope,
+  type RunEventPayload,
+} from '../../packages/run-protocol/index.ts';
 
 type RequestContext = {
   path?: string;
@@ -146,11 +153,39 @@ async function parseBody<T>(req: IncomingMessage): Promise<T> {
 const pendingConfirms = new Map<string, PendingConfirm>();
 const pendingCommandConfirms = new Map<string, PendingCommandConfirm>();
 const pendingToolApprovals = new Map<string, PendingToolApproval>();
+const runReplayBuffer = createRunReplayBuffer();
+const V2_RECONNECT_GRACE_MS = 3_000;
+
+type V2Subscriber = {
+  writer: ReturnType<typeof createBoundedRunSseWriter>;
+  response: ServerResponse;
+  closed: boolean;
+};
+
+type ActiveV2Chain = {
+  sessionId: string;
+  initialRunId?: string;
+  clientRequestId?: string;
+  subscribers: Set<V2Subscriber>;
+  runOrder: string[];
+  currentRunId?: string;
+  startedRuns: Set<string>;
+  lastSeqByRun: Map<string, number>;
+  pendingByRun: Map<string, RunEventPayload[]>;
+  finished: boolean;
+  done: Promise<void>;
+  disconnectTimer?: ReturnType<typeof setTimeout>;
+};
+
+const activeV2Runs = new Map<string, ActiveV2Chain>();
+const activeV2Requests = new Map<string, ActiveV2Chain>();
+const completedV2Chains = new Map<string, ActiveV2Chain>();
 
 function createToolApprovalHook(
   sessionId: string,
   taskId: string,
   onEvent: (event: AgentEvent) => void,
+  emit?: (event: RunEventPayload) => void,
 ): ToolApprovalHook {
   return async (request) => {
     const approvalId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -174,6 +209,21 @@ function createToolApprovalHook(
       });
       onEvent({ type: 'task_status', taskId, status: 'waiting_confirm', note: '等待工具批准' });
       onEvent({ ...durableRequest, type: 'approval_request', taskId, approvalId });
+      emit?.({ type: 'run_phase_changed', phase: 'waiting_approval' });
+      emit?.({
+        type: 'approval_requested',
+        request: {
+          kind: 'tool',
+          approvalId,
+          toolName: durableRequest.toolName,
+          effect: durableRequest.effect,
+          title: durableRequest.title,
+          ...(durableRequest.target ? { target: durableRequest.target } : {}),
+          reason: durableRequest.reason,
+          fingerprint: durableRequest.fingerprint,
+          options: durableRequest.options,
+        },
+      });
 
       setTimeout(() => {
         if (pendingToolApprovals.has(approvalId)) {
@@ -183,6 +233,7 @@ function createToolApprovalHook(
       }, CONFIRM_TIMEOUT_MS);
     });
     onEvent({ type: 'task_status', taskId, status: 'executing', note: '工具批准已处理' });
+    emit?.({ type: 'approval_resolved', approvalId, decision: response.decision });
     return response;
   };
 }
@@ -191,6 +242,7 @@ function createCommandConfirmHook(
   sessionId: string,
   taskId: string,
   onEvent: (event: AgentEvent) => void,
+  emit?: (event: RunEventPayload) => void,
 ): CommandConfirmHook {
   return (request) => {
     const confirmId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -220,6 +272,18 @@ function createCommandConfirmHook(
         risk: request.validation.risk,
         reason: request.validation.reason,
       });
+      emit?.({ type: 'run_phase_changed', phase: 'waiting_approval' });
+      emit?.({
+        type: 'approval_requested',
+        request: {
+          kind: 'command',
+          approvalId: confirmId,
+          title: '批准命令执行',
+          target: request.command,
+          reason: request.validation.reason,
+          options: ['allow_once', 'allow_whitelist', 'deny'],
+        },
+      });
 
       setTimeout(() => {
         if (pendingCommandConfirms.has(confirmId)) {
@@ -227,6 +291,9 @@ function createCommandConfirmHook(
           reject(new Error(`命令确认超时：${confirmId}`));
         }
       }, CONFIRM_TIMEOUT_MS);
+    }).then((decision) => {
+      emit?.({ type: 'approval_resolved', approvalId: confirmId, decision });
+      return decision;
     });
   };
 }
@@ -235,6 +302,7 @@ function createConfirmHook(
   sessionId: string,
   taskId: string,
   onEvent: (event: AgentEvent) => void,
+  emit?: (event: RunEventPayload) => void,
 ) {
   return async (question: string, options?: string[]): Promise<string> => {
     const confirmId = `confirm-${Date.now()}`;
@@ -253,6 +321,11 @@ function createConfirmHook(
       pendingConfirms.set(confirmId, pending);
 
       onEvent({ type: 'confirm_request', taskId, confirmId, question, options });
+      emit?.({ type: 'run_phase_changed', phase: 'waiting_approval' });
+      emit?.({
+        type: 'approval_requested',
+        request: { kind: 'question', approvalId: confirmId, title: question, options: options?.length ? options : ['确认', '取消'] },
+      });
 
       setTimeout(() => {
         if (pendingConfirms.has(confirmId)) {
@@ -260,6 +333,9 @@ function createConfirmHook(
           reject(new Error(`确认请求超时：${confirmId}`));
         }
       }, CONFIRM_TIMEOUT_MS);
+    }).then((answer) => {
+      emit?.({ type: 'approval_resolved', approvalId: confirmId, decision: answer });
+      return answer;
     });
   };
 }
@@ -329,6 +405,7 @@ type ConversationRunPayload = {
   prompt?: string;
   conversationRef?: string;
   clientRequestId?: string;
+  afterSeq?: number;
   scope?: { kind?: 'general' | 'workspace'; workspaceRef?: string };
 };
 
@@ -425,10 +502,10 @@ const conversationRunCoordinator = createConversationRunCoordinator({
       },
     };
   },
-  createHooks: (sessionId, runId, sink) => ({
-    onConfirm: createConfirmHook(sessionId, runId, sink),
-    onCommandConfirm: createCommandConfirmHook(sessionId, runId, sink),
-    onApproval: createToolApprovalHook(sessionId, runId, sink),
+  createHooks: (sessionId, runId, sink, emit) => ({
+    onConfirm: createConfirmHook(sessionId, runId, sink, emit),
+    onCommandConfirm: createCommandConfirmHook(sessionId, runId, sink, emit),
+    onApproval: createToolApprovalHook(sessionId, runId, sink, emit),
   }),
   cancelPending: (_sessionId, runId, reason) => cancelPendingRun(runId, reason),
   observe: (observation) => console.info(JSON.stringify({ type: 'metric', ...observation })),
@@ -547,6 +624,235 @@ function createBoundedSseWriter(
   };
 }
 
+function createBoundedRunSseWriter(
+  res: ServerResponse,
+  onOverflow: () => void,
+  capacity = 256,
+) {
+  const queue: RunEventEnvelope[] = [];
+  let scheduled = false;
+  let active = Promise.resolve();
+  const waitForDrain = () => new Promise<void>((resolve) => res.once('drain', resolve));
+  const pump = async () => {
+    while (queue.length > 0) {
+      const event = queue.shift();
+      if (event && !res.write(`data: ${JSON.stringify(event)}\n\n`)) await waitForDrain();
+    }
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    active = (async () => {
+      await Promise.resolve();
+      try {
+        await pump();
+      } finally {
+        scheduled = false;
+        if (queue.length > 0) schedule();
+      }
+    })();
+  };
+
+  return {
+    write(event: RunEventEnvelope) {
+      if (queue.length >= capacity) {
+        const discardIndex = queue.findIndex(isDroppableRunEvent);
+        if (discardIndex >= 0) queue.splice(discardIndex, 1);
+        else if (isDroppableRunEvent(event)) return;
+        else {
+          onOverflow();
+          return;
+        }
+      }
+      queue.push(event);
+      schedule();
+    },
+    async drain() {
+      while (scheduled || queue.length > 0) {
+        await active;
+        if (!scheduled && queue.length > 0) schedule();
+      }
+    },
+  };
+}
+
+function runIdForClientRequest(session: Session, clientRequestId: string): string | undefined {
+  const started = [...(session.ledger ?? [])].reverse().find((record) => (
+    record.type === 'run_started' && record.clientRequestId === clientRequestId
+  ));
+  if (started?.type === 'run_started') return started.runId;
+  if (!session.clientRequestIds?.includes(clientRequestId)) return undefined;
+  return session.activeTaskId ?? session.runReports?.at(-1)?.runId;
+}
+
+function registerV2Run(chain: ActiveV2Chain, runId: string): void {
+  chain.currentRunId = runId;
+  if (!chain.initialRunId) chain.initialRunId = runId;
+  if (!chain.runOrder.includes(runId)) chain.runOrder.push(runId);
+  activeV2Runs.set(runId, chain);
+}
+
+function publishV2Payload(chain: ActiveV2Chain, runId: string, event: RunEventPayload, at = new Date().toISOString()): void {
+  registerV2Run(chain, runId);
+  const envelope: RunEventEnvelope = {
+    version: 2,
+    runId,
+    seq: (chain.lastSeqByRun.get(runId) ?? 0) + 1,
+    at,
+    event,
+  };
+  chain.lastSeqByRun.set(runId, envelope.seq);
+  runReplayBuffer.append(envelope);
+  for (const subscriber of chain.subscribers) {
+    if (!subscriber.closed) subscriber.writer.write(envelope);
+  }
+}
+
+function publishActiveV2(chain: ActiveV2Chain, incoming: RunEventEnvelope): void {
+  publishV2Payload(chain, incoming.runId, incoming.event, incoming.at);
+  if (incoming.event.type === 'run_started') {
+    chain.startedRuns.add(incoming.runId);
+    const pending = chain.pendingByRun.get(incoming.runId) ?? [];
+    chain.pendingByRun.delete(incoming.runId);
+    for (const event of pending) publishV2Payload(chain, incoming.runId, event);
+  }
+}
+
+function coordinatorEventToV2(chain: ActiveV2Chain, event: AgentEvent): void {
+  if (event.type === 'run_started') {
+    registerV2Run(chain, event.runId);
+    return;
+  }
+  let runId = chain.currentRunId;
+  let payload: RunEventPayload | undefined;
+  if (event.type === 'queue_item_added' || event.type === 'queue_item_updated' || event.type === 'queue_item_removed' || event.type === 'queue_reordered' || event.type === 'run_chain_paused') {
+    payload = event;
+  } else if (event.type === 'user_message_committed') {
+    runId = event.runId;
+    payload = { type: event.type, sessionId: event.sessionId, itemId: event.itemId };
+  } else if (event.type === 'context_refresh_started' || event.type === 'context_refresh_completed') {
+    runId = event.runId;
+    payload = { type: event.type, sessionId: event.sessionId, itemId: event.itemId };
+  } else if (event.type === 'context_refresh_failed') {
+    runId = event.runId;
+    payload = { type: event.type, sessionId: event.sessionId, itemId: event.itemId, message: event.message };
+  }
+  if (!payload || !runId) return;
+  if (chain.startedRuns.has(runId)) publishV2Payload(chain, runId, payload);
+  else chain.pendingByRun.set(runId, [...(chain.pendingByRun.get(runId) ?? []), payload]);
+}
+
+function scheduleV2Disconnect(chain: ActiveV2Chain): void {
+  if (chain.finished || chain.subscribers.size > 0 || chain.disconnectTimer) return;
+  chain.disconnectTimer = setTimeout(() => {
+    chain.disconnectTimer = undefined;
+    if (!chain.finished && chain.subscribers.size === 0) {
+      void conversationRunCoordinator.stop({ sessionId: chain.sessionId, reason: 'disconnect' });
+    }
+  }, V2_RECONNECT_GRACE_MS);
+}
+
+async function attachActiveV2Run(chain: ActiveV2Chain, res: ServerResponse, afterSeq: number, resumeRunId?: string): Promise<void> {
+  res.writeHead(200, sseHeaders());
+  if (chain.disconnectTimer) {
+    clearTimeout(chain.disconnectTimer);
+    chain.disconnectTimer = undefined;
+  }
+  const subscriber: V2Subscriber = {
+    writer: createBoundedRunSseWriter(res, () => { void conversationRunCoordinator.stop({ sessionId: chain.sessionId, reason: 'failure' }); }),
+    response: res,
+    closed: false,
+  };
+  const firstRun = resumeRunId ?? chain.initialRunId;
+  const startIndex = firstRun ? Math.max(0, chain.runOrder.indexOf(firstRun)) : chain.runOrder.length;
+  for (const [index, runId] of chain.runOrder.slice(startIndex).entries()) {
+    const replay = runReplayBuffer.read(runId, index === 0 ? afterSeq : 0);
+    if (replay.status === 'available') for (const event of replay.events) subscriber.writer.write(event);
+  }
+  if (!chain.finished) chain.subscribers.add(subscriber);
+  res.on('close', () => {
+    subscriber.closed = true;
+    chain.subscribers.delete(subscriber);
+    scheduleV2Disconnect(chain);
+  });
+  await chain.done;
+  chain.subscribers.delete(subscriber);
+  if (subscriber.closed) return;
+  await subscriber.writer.drain();
+  res.end();
+}
+
+function createV2Chain(sessionId: string, initialRunId?: string, clientRequestId?: string): ActiveV2Chain {
+  const chain: ActiveV2Chain = {
+    sessionId,
+    ...(initialRunId ? { initialRunId } : {}),
+    ...(clientRequestId ? { clientRequestId } : {}),
+    subscribers: new Set(),
+    runOrder: [],
+    startedRuns: new Set(),
+    lastSeqByRun: new Map(),
+    pendingByRun: new Map(),
+    finished: false,
+    done: Promise.resolve(),
+  };
+  if (initialRunId) registerV2Run(chain, initialRunId);
+  if (clientRequestId) activeV2Requests.set(clientRequestId, chain);
+  return chain;
+}
+
+function completeV2Chain(chain: ActiveV2Chain): void {
+  chain.finished = true;
+  if (chain.disconnectTimer) clearTimeout(chain.disconnectTimer);
+  for (const runId of chain.runOrder) if (activeV2Runs.get(runId) === chain) activeV2Runs.delete(runId);
+  if (chain.clientRequestId && activeV2Requests.get(chain.clientRequestId) === chain) activeV2Requests.delete(chain.clientRequestId);
+  if (chain.initialRunId) {
+    completedV2Chains.delete(chain.initialRunId);
+    completedV2Chains.set(chain.initialRunId, chain);
+    while (completedV2Chains.size > 64) completedV2Chains.delete(completedV2Chains.keys().next().value!);
+  }
+}
+
+async function writeCompletedV2Replay(res: ServerResponse, session: Session, runId: string, afterSeq: number): Promise<void> {
+  res.writeHead(200, sseHeaders());
+  const writer = createBoundedRunSseWriter(res, () => undefined);
+  const replay = runReplayBuffer.read(runId, afterSeq);
+  if (replay.status === 'available') {
+    for (const event of replay.events) writer.write(event);
+  } else {
+    const report = session.runReports?.find((candidate) => candidate.runId === runId);
+    const conversation = projectConversation(session, { contextWindow: modelClient.contextWindow });
+    const reconstructed: RunEventEnvelope[] = [
+      ...(afterSeq === 0 ? [{
+        version: 2,
+        runId,
+        seq: 1,
+        at: report?.startedAt ?? session.updatedAt,
+        event: { type: 'run_started', sessionId: session.sessionId, isNew: false },
+      } as RunEventEnvelope] : []),
+      ...(report ? [{
+        version: 2 as const,
+        runId,
+        seq: Math.max(2, afterSeq + 1),
+        at: report.completedAt,
+        event: {
+          type: 'run_finished' as const,
+          terminal: {
+            status: report.status,
+            reason: report.terminationReason,
+            ...(report.error ? { error: { code: report.error.code, message: safeRunNote(report.error.message) ?? '运行失败' } } : {}),
+          },
+          conversationRevision: session.revision ?? 0,
+          ...(report.finalMessageId ? { finalMessageId: report.finalMessageId } : {}),
+          conversation,
+        },
+      }] : []),
+    ];
+    for (const event of reconstructed) writer.write(event);
+  }
+  await writer.drain();
+  res.end();
+}
+
 export function startRuntimeServer() {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -638,6 +944,32 @@ export function startRuntimeServer() {
       await loadScopedSession(sessionId, scope);
       const { action } = await parseBody<{ action?: 'resume' }>(req);
       if (action !== 'resume') throw new HttpError(400, '不支持的队列命令');
+      if (req.headers['x-dexcode-stream-version'] === '2') {
+        const chain = createV2Chain(sessionId);
+        chain.done = (async () => {
+          try {
+            await conversationRunCoordinator.resume(
+              sessionId,
+              (event) => coordinatorEventToV2(chain, event),
+              { onRunEvent: (event) => publishActiveV2(chain, event), legacyEvents: false },
+            );
+          } catch (error) {
+            const runId = chain.currentRunId ?? `resume-${crypto.randomUUID()}`;
+            if (!chain.startedRuns.has(runId)) publishActiveV2(chain, {
+              version: 2,
+              runId,
+              seq: 1,
+              at: new Date().toISOString(),
+              event: { type: 'run_started', sessionId, isNew: false },
+            });
+            publishV2Payload(chain, runId, { type: 'stream_error', message: safeRunNote(error instanceof Error ? error.message : String(error)) ?? '恢复队列失败' });
+          } finally {
+            completeV2Chain(chain);
+          }
+        })();
+        await attachActiveV2Run(chain, res, 0);
+        return;
+      }
       res.writeHead(200, sseHeaders());
       const writer = createBoundedSseWriter(res, () => { void conversationRunCoordinator.stop({ sessionId, reason: 'disconnect' }); });
       writer.write({ type: 'session', sessionId, isNew: false });
@@ -780,7 +1112,10 @@ export function startRuntimeServer() {
       const runRef = decodeURIComponent(runCommandMatch[1]);
       const { action } = await parseBody<{ action?: 'stop' }>(req);
       if (action !== 'stop') throw new HttpError(400, '不支持的运行命令');
-      const result = await conversationRunCoordinator.stop({ runId: runRef, reason: 'user_stop' });
+      const activeChain = activeV2Runs.get(runRef) ?? activeV2Requests.get(runRef);
+      const result = activeChain
+        ? await conversationRunCoordinator.stop({ sessionId: activeChain.sessionId, reason: 'user_stop' })
+        : await conversationRunCoordinator.stop({ runId: runRef, reason: 'user_stop' });
       sendJson(res, 200, { ok: true, ...result });
       return;
     }
@@ -789,6 +1124,8 @@ export function startRuntimeServer() {
       const payload = await parseBody<ConversationRunPayload>(req);
       const prompt = payload.prompt?.trim() ?? '';
       const clientRequestId = payload.clientRequestId?.trim() ?? '';
+      const streamVersion = req.headers['x-dexcode-stream-version'] === '2' ? 2 : 1;
+      const afterSeq = Number.isSafeInteger(payload.afterSeq) && Number(payload.afterSeq) >= 0 ? Number(payload.afterSeq) : 0;
       if (!prompt) throw new HttpError(400, '消息不能为空');
       if (!clientRequestId) throw new HttpError(400, 'clientRequestId required');
 
@@ -819,6 +1156,14 @@ export function startRuntimeServer() {
       if (payload.conversationRef) {
         session = await loadScopedSession(payload.conversationRef, scope);
         if (session.clientRequestIds?.includes(clientRequestId)) {
+          if (streamVersion === 2) {
+            const existingRunId = runIdForClientRequest(session, clientRequestId);
+            if (!existingRunId) throw new HttpError(409, '无法定位幂等请求对应的 Run');
+            const active = activeV2Runs.get(existingRunId) ?? completedV2Chains.get(existingRunId);
+            if (active) await attachActiveV2Run(active, res, afterSeq, existingRunId);
+            else await writeCompletedV2Replay(res, session, existingRunId, afterSeq);
+            return;
+          }
           res.writeHead(200, sseHeaders());
           res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.sessionId, isNew: false })}\n\n`);
           res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }), idempotentReplay: true } })}\n\n`);
@@ -837,12 +1182,46 @@ export function startRuntimeServer() {
         isNew = materialized.created;
         prestarted = materialized.created;
         if (!materialized.created) {
+          if (streamVersion === 2) {
+            const existingRunId = runIdForClientRequest(session, clientRequestId);
+            if (!existingRunId) throw new HttpError(409, '无法定位幂等请求对应的 Run');
+            const active = activeV2Runs.get(existingRunId) ?? completedV2Chains.get(existingRunId);
+            if (active) await attachActiveV2Run(active, res, afterSeq, existingRunId);
+            else await writeCompletedV2Replay(res, session, existingRunId, afterSeq);
+            return;
+          }
           res.writeHead(200, sseHeaders());
           res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.sessionId, isNew: false })}\n\n`);
           res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }), idempotentReplay: true } })}\n\n`);
           res.end();
           return;
         }
+      }
+
+      if (streamVersion === 2) {
+        const chain = createV2Chain(session.sessionId, runId, clientRequestId);
+        chain.done = (async () => {
+          try {
+            await conversationRunCoordinator.start(
+              { sessionId: session.sessionId, prompt, runId, prestarted, clientRequestId, isNew },
+              (event) => coordinatorEventToV2(chain, event),
+              { onRunEvent: (event) => publishActiveV2(chain, event), legacyEvents: false },
+            );
+          } catch (error) {
+            if (!chain.startedRuns.has(runId)) publishActiveV2(chain, {
+              version: 2,
+              runId,
+              seq: 1,
+              at: new Date().toISOString(),
+              event: { type: 'run_started', sessionId: session.sessionId, isNew },
+            });
+            publishV2Payload(chain, runId, { type: 'stream_error', message: safeRunNote(error instanceof Error ? error.message : String(error)) ?? '运行失败' });
+          } finally {
+            completeV2Chain(chain);
+          }
+        })();
+        await attachActiveV2Run(chain, res, afterSeq, runId);
+        return;
       }
 
       res.writeHead(200, sseHeaders());
@@ -957,6 +1336,7 @@ export function startRuntimeServer() {
         llmEnabled: modelClient.model !== 'mock',
         model: {
           displayName: modelClient.displayName ?? modelClient.model,
+          reasoning: modelClient.reasoning,
           ...(modelClient.contextWindow ? { contextWindow: modelClient.contextWindow } : {}),
           ...(modelClient.providerDisplayName ? { providerDisplayName: modelClient.providerDisplayName } : {}),
         },

@@ -143,6 +143,7 @@ export type RunReport = {
   status: RunStatus;
   terminationReason: string;
   finalAnswer?: string;
+  finalMessageId?: string;
   startedAt: string;
   completedAt: string;
   modelTurnCount: number;
@@ -237,7 +238,7 @@ export type ContextSummaryRecord = {
   artifactRefs: ContextArtifactRef[];
 };
 
-export type ToolViewStatus = 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
+export type ToolViewStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
 
 export type ToolPresentation = {
   callRef: string;
@@ -286,8 +287,8 @@ export type QueueLedgerRecord =
   | { seq: number; at: string; type: 'queue_chain_resumed'; operationId: string; sessionRevision: number };
 
 export type SessionLedgerRecord =
-  | { seq: number; at: string; runId: string; type: 'run_started'; context?: RunContext }
-  | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage }
+  | { seq: number; at: string; runId: string; type: 'run_started'; context?: RunContext; clientRequestId?: string }
+  | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage; messageId?: string; turn?: number }
   | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string; input?: Record<string, unknown> }
   | { seq: number; at: string; runId: string; type: 'tool_completed'; callId: string; presentation: ToolPresentation }
   | { seq: number; at: string; runId: string; type: 'approval_requested'; approvalId: string; request: ToolApprovalRequest }

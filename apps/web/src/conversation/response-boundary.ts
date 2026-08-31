@@ -2,11 +2,8 @@ import type { ConversationItem } from '../types';
 
 type ConversationStatus = 'idle' | 'running' | 'waiting' | 'failed';
 
-export function isCompleteAssistantResponse(items: ConversationItem[], index: number, status: ConversationStatus): boolean {
-  if (items[index]?.kind !== 'assistant') return false;
-  const next = items[index + 1];
-  if (next?.kind === 'user') return true;
-  return next === undefined && status === 'idle';
+export function isCompleteAssistantResponse(item: ConversationItem, status: ConversationStatus): boolean {
+  return item.kind === 'assistant' && item.final === true && status === 'idle';
 }
 
 export function assistantResponseCopyText(items: ConversationItem[], index: number): string {

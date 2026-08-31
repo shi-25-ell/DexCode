@@ -23,7 +23,7 @@ export function ToolCard({ tool }: { tool: ToolPresentation }) {
           </span>
           <span className="tool-summary">{tool.summary}</span>
         </span>
-        <span className={`tool-status ${tool.status}`}><StatusIcon size={14} />{tool.status === 'succeeded' ? '成功' : tool.status === 'running' ? '运行中' : tool.status === 'failed' ? '失败' : tool.status === 'denied' ? '已拒绝' : '已取消'}</span>
+        <span className={`tool-status ${tool.status}`}><StatusIcon size={14} />{tool.status === 'succeeded' ? '成功' : tool.status === 'queued' ? '准备中' : tool.status === 'running' ? '运行中' : tool.status === 'failed' ? '失败' : tool.status === 'denied' ? '已拒绝' : '已取消'}</span>
         {hasDetails ? <ChevronDown className={open ? 'chevron open' : 'chevron'} size={16} /> : null}
       </Collapsible.Trigger>
       {hasDetails ? (

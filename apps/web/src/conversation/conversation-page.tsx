@@ -3,83 +3,57 @@ import { ArrowDown, ArrowUp, Square } from 'lucide-react';
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopConversationRun, streamConversation, streamQueueResume } from '../api';
+import type { RunEventEnvelope } from '../../../../packages/run-protocol/contracts';
 import { AppShell } from '../shell/app-shell';
-import type { ContextPresentation, ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueMutationOutcome, StreamEvent, ToolPresentation } from '../types';
+import type { ContextUsage, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueMutationOutcome } from '../types';
+import { ApprovalCard } from './approval-card';
 import { AssistantMessage } from './assistant-message';
 import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
+import { RunActivity } from './run-activity';
+import {
+  beginRunPresentation,
+  failRunPresentation,
+  hydrateRunPresentation,
+  reduceRunEvent,
+  type RunPresentation,
+} from './run-presentation';
 import { isTimelineNearBottom } from './scroll-follow';
 import { UserMessage } from './user-message';
 import { initialQueueState, queueReducer } from './queue-reducer';
 import { QueuedMessageCard } from './queued-message-card';
 import { deliveryForFollowUp, readFollowUpBehavior, writeFollowUpBehavior } from '../settings/follow-up-behavior';
 
-type LiveState = {
-  items: ConversationItem[];
-  contextUsage: ContextUsage;
-  status: 'idle' | 'running' | 'waiting' | 'failed';
-  title: string;
-};
-
-type Action =
+type PageAction =
   | { type: 'hydrate'; snapshot: ConversationSnapshot }
-  | { type: 'submit'; content: string }
-  | { type: 'chunk'; content: string }
-  | { type: 'tool'; tool: ToolPresentation }
-  | { type: 'context'; context: ContextPresentation }
-  | { type: 'usage'; usage: ContextUsage }
-  | { type: 'status'; status: LiveState['status'] }
-  | { type: 'approval'; item: Extract<ConversationItem, { kind: 'approval' }> }
-  | { type: 'resolve'; approvalRef: string; answer: string }
+  | { type: 'begin'; content: string; clientRequestId: string }
+  | { type: 'commit_queued_user'; itemId: string; content: string }
+  | { type: 'run_event'; event: RunEventEnvelope }
   | { type: 'error'; message: string };
 
-const initialState: LiveState = { items: [], contextUsage: { source: 'unknown', timing: 'next_request' }, status: 'idle', title: '新会话' };
+const emptySnapshot: ConversationSnapshot = {
+  ref: 'draft',
+  title: '新会话',
+  state: 'idle',
+  updatedAt: '',
+  revision: 0,
+  queuedItems: [],
+  queuePaused: false,
+  items: [],
+  contextUsage: { source: 'unknown', timing: 'next_request' },
+};
 
-function shortTitle(content: string): string {
-  const normalized = content.trim().replace(/\s+/g, ' ');
-  return Array.from(normalized).length > 36 ? `${Array.from(normalized).slice(0, 36).join('')}…` : normalized;
-}
-
-export function conversationReducer(state: LiveState, action: Action): LiveState {
-  if (action.type === 'hydrate') return { items: action.snapshot.items, contextUsage: action.snapshot.contextUsage, status: action.snapshot.state, title: action.snapshot.title };
-  if (action.type === 'submit') return {
-    ...state,
-    title: state.items.length === 0 ? shortTitle(action.content) : state.title,
-    status: 'running',
-    items: [...state.items, { id: `local-user-${crypto.randomUUID()}`, kind: 'user', content: action.content }],
-  };
-  if (action.type === 'chunk') {
-    const items = [...state.items];
-    const last = items.at(-1);
-    if (last?.kind === 'assistant' && last.id.startsWith('live-assistant-')) items[items.length - 1] = { ...last, content: last.content + action.content };
-    else items.push({ id: `live-assistant-${crypto.randomUUID()}`, kind: 'assistant', content: action.content });
-    return { ...state, items };
+function pageReducer(state: RunPresentation, action: PageAction): RunPresentation {
+  if (action.type === 'hydrate') return hydrateRunPresentation(action.snapshot);
+  if (action.type === 'begin') return beginRunPresentation(state, action);
+  if (action.type === 'commit_queued_user') {
+    const id = `queued-user-${action.itemId}`;
+    if (state.committedItems.some((item) => item.id === id)) return state;
+    return { ...state, committedItems: [...state.committedItems, { id, kind: 'user', content: action.content }] };
   }
-  if (action.type === 'tool') {
-    const existing = state.items.findIndex((item) => item.kind === 'tool' && item.tool.callRef === action.tool.callRef);
-    if (existing < 0) return { ...state, items: [...state.items, { id: `tool-${action.tool.callRef}`, kind: 'tool', tool: action.tool }] };
-    const items = [...state.items];
-    items[existing] = { id: `tool-${action.tool.callRef}`, kind: 'tool', tool: action.tool };
-    return { ...state, items };
-  }
-  if (action.type === 'context') {
-    const existing = state.items.findIndex((item) => item.kind === 'context' && item.context.operationRef === action.context.operationRef);
-    const next = { id: `context-${action.context.operationRef}`, kind: 'context' as const, context: action.context };
-    if (existing < 0) return { ...state, items: [...state.items, next] };
-    const items = [...state.items];
-    items[existing] = next;
-    return { ...state, items };
-  }
-  if (action.type === 'usage') return { ...state, contextUsage: action.usage };
-  if (action.type === 'status') return { ...state, status: action.status };
-  if (action.type === 'approval') return { ...state, status: 'waiting', items: [...state.items, action.item] };
-  if (action.type === 'resolve') return {
-    ...state,
-    status: 'running',
-    items: state.items.map((item) => item.kind === 'approval' && item.approvalRef === action.approvalRef ? { ...item, resolved: action.answer } : item),
-  };
-  return { ...state, status: 'failed', items: [...state.items, { id: `error-${crypto.randomUUID()}`, kind: 'error', title: '连接未完成', message: action.message }] };
+  if (action.type === 'run_event') return reduceRunEvent(state, action.event);
+  return failRunPresentation(state, action.message);
 }
 
 function formatTokens(value: number): string {
@@ -97,52 +71,18 @@ function ContextLabel({ usage, running }: { usage: ContextUsage; running: boolea
   return <span title={`${detail} · ${timing} · ${source}${usage.breakdownEstimated ? ' · 构成估算' : ''}`}>上下文 {usage.percentage}%{estimated ? ' · 估算' : ''}</span>;
 }
 
-function approvalLabel(value: string): string {
-  if (value === 'deny') return '已拒绝';
-  if (value === 'allow_whitelist') return '已加入白名单';
-  if (value === 'allow_once' || value === 'allow') return '允许一次';
-  return value;
-}
-
-export function ApprovalCard({ item, workspaceRef, onResolve }: {
-  item: Extract<ConversationItem, { kind: 'approval' }>;
-  workspaceRef?: string;
-  onResolve: (answer: string) => void;
-}) {
-  const decide = async (answer: string) => {
-    if (item.resolved) return;
-    const tool = item.approvalKind === 'tool';
-    const command = item.approvalKind === 'command';
-    await apiJson(tool ? '/api/agent/approval' : command ? '/api/agent/command-confirm' : '/api/agent/confirm', {
-      method: 'POST',
-      workspaceRef,
-      body: JSON.stringify(tool
-        ? { approvalId: item.approvalRef, decision: answer, fingerprint: item.fingerprint }
-        : command ? { confirmId: item.approvalRef, decision: answer } : { confirmId: item.approvalRef, answer }),
-    });
-    onResolve(answer);
-  };
-  return (
-    <section className="approval-card">
-      <div><strong>{item.title}</strong>{item.target ? <code>{item.target}</code> : null}</div>
-      {item.reason ? <p>{item.reason}</p> : null}
-      <div className="approval-actions">
-        {item.resolved ? <span>{approvalLabel(item.resolved)}</span> : item.options.map((option) => <button key={option} onClick={() => void decide(option)}>{option === 'deny' ? '拒绝' : option === 'allow_whitelist' ? '允许并加入白名单' : option === 'allow_once' || option === 'allow' ? '允许一次' : option}</button>)}
-      </div>
-    </section>
-  );
-}
-
 export function ConversationPage({ scope, conversationRef }: { scope: ConversationScope; conversationRef?: string }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const [state, dispatch] = useReducer(conversationReducer, initialState);
+  const [state, dispatch] = useReducer(pageReducer, emptySnapshot, hydrateRunPresentation);
   const [queueState, queueDispatch] = useReducer(queueReducer, initialQueueState);
   const [prompt, setPrompt] = useState('');
   const [followUpBehavior, setFollowUpBehavior] = useState<FollowUpBehavior>(() => readFollowUpBehavior());
   const [queueBusy, setQueueBusy] = useState<Set<string>>(() => new Set());
   const [queueNotice, setQueueNotice] = useState('');
   const controllerRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
+  const clientRequestIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -150,6 +90,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const streamingRef = useRef(false);
   const draggedQueueItem = useRef<string | null>(null);
   const queueBusyRef = useRef<Set<string>>(new Set());
+  const queuedContentRef = useRef<Map<string, string>>(new Map());
   const workspaceRef = scopeWorkspaceRef(scope);
   const snapshot = useQuery({
     queryKey: ['conversation', scope, conversationRef],
@@ -161,9 +102,11 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     queryFn: () => apiJson<{ model: { displayName: string; contextWindow?: number } }>('/api/meta', { workspaceRef }),
     staleTime: 60_000,
   });
+  const loadingConversation = Boolean(conversationRef && !snapshot.data && snapshot.isPending);
 
   useEffect(() => {
     if (snapshot.data && !streamingRef.current) {
+      queuedContentRef.current = new Map(snapshot.data.queuedItems.map((item) => [item.itemId, item.content]));
       dispatch({ type: 'hydrate', snapshot: snapshot.data });
       queueDispatch({
         type: 'queue_snapshot',
@@ -181,6 +124,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     if (!conversationRef) {
       dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], queuedItems: [], queuePaused: false, revision: 0, contextUsage: { source: 'unknown', timing: 'next_request' } } });
       queueDispatch({ type: 'queue_snapshot', items: [], revision: 0, paused: false });
+      queuedContentRef.current.clear();
     }
   }, [conversationRef, scope.kind, scope.kind === 'workspace' ? scope.workspaceRef : 'general']);
 
@@ -193,7 +137,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       setAtBottom(true);
     });
     return () => cancelAnimationFrame(frame);
-  }, [state.items]);
+  }, [state.committedItems, state.lastSeq]);
 
   useEffect(() => {
     const timelineElement = timelineRef.current;
@@ -208,37 +152,47 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     return () => observer.disconnect();
   }, []);
 
-  const handleStreamEvent = (event: StreamEvent) => {
-    if (event.type === 'session' && event.isNew) {
+  const handleStreamEvent = (envelope: RunEventEnvelope) => {
+    runIdRef.current = envelope.runId;
+    const event = envelope.event;
+    if (event.type === 'run_started' && event.isNew) {
       const next = scope.kind === 'general'
         ? `/c/${encodeURIComponent(event.sessionId)}`
         : `/w/${encodeURIComponent(scope.workspaceRef)}/c/${encodeURIComponent(event.sessionId)}`;
       navigate(next, { replace: true });
-    } else if (event.type === 'chunk') dispatch({ type: 'chunk', content: event.chunk });
-    else if (event.type === 'tool_view') dispatch({ type: 'tool', tool: event.presentation });
-    else if (event.type === 'context_usage') {
-      const { type: _type, ...usage } = event;
-      dispatch({ type: 'usage', usage });
     }
-    else if (event.type === 'context_activity') dispatch({ type: 'context', context: event.presentation });
-    else if (event.type === 'task_status') {
-      dispatch({ type: 'status', status: event.status === 'waiting_confirm' ? 'waiting' : event.status === 'error' ? 'failed' : event.status === 'done' || event.status === 'aborted' ? 'idle' : 'running' });
-      if (event.status === 'done' || event.status === 'aborted' || event.status === 'error') queueDispatch({ type: 'run_terminal' });
+    if (event.type === 'queue_item_added' || event.type === 'queue_item_updated') {
+      queuedContentRef.current.set(event.item.itemId, event.item.content);
+      queueDispatch({ type: 'queue_upsert', item: event.item, revision: event.sessionRevision });
+    } else if (event.type === 'queue_item_removed') {
+      queueDispatch({ type: 'queue_remove', itemId: event.itemId, revision: event.sessionRevision });
+    } else if (event.type === 'queue_reordered') {
+      queueDispatch({ type: 'queue_reorder', orderedItemIds: event.orderedItemIds, revision: event.sessionRevision });
+    } else if (event.type === 'user_message_committed') {
+      const content = queuedContentRef.current.get(event.itemId);
+      if (content) dispatch({ type: 'commit_queued_user', itemId: event.itemId, content });
+    } else if (event.type === 'run_started') {
+      queueDispatch({ type: 'run_started', runId: envelope.runId, ...(event.sourceItemId ? { sourceItemId: event.sourceItemId } : {}) });
+    } else if (event.type === 'run_chain_paused') {
+      queueDispatch({ type: 'run_chain_paused' });
+    } else if (event.type === 'context_refresh_failed') {
+      setQueueNotice(`方向已更新，但上下文刷新失败：${event.message}`);
+    } else if (event.type === 'run_finished') {
+      queueDispatch({
+        type: 'queue_snapshot',
+        items: event.conversation.queuedItems,
+        revision: event.conversation.revision,
+        paused: event.conversation.queuePaused,
+        ...(event.conversation.activeRun ? { activeRunId: event.conversation.activeRun.runId } : {}),
+      });
+      queryClient.setQueryData<ConversationSnapshot>(['conversation', scope, event.conversation.ref], event.conversation as ConversationSnapshot);
     }
-    else if (event.type === 'confirm_request') dispatch({ type: 'approval', item: { id: `approval-${event.confirmId}`, kind: 'approval', approvalRef: event.confirmId, approvalKind: 'question', title: event.question, options: event.options?.length ? event.options : ['确认', '取消'] } });
-    else if (event.type === 'command_confirm_request') dispatch({ type: 'approval', item: { id: `approval-${event.confirmId}`, kind: 'approval', approvalRef: event.confirmId, approvalKind: 'command', title: event.reason || '需要确认命令', target: event.command, options: ['allow_once', 'allow_whitelist', 'deny'] } });
-    else if (event.type === 'approval_request') dispatch({ type: 'approval', item: { id: `approval-${event.approvalId}`, kind: 'approval', approvalRef: event.approvalId, approvalKind: 'tool', toolName: event.toolName, effect: event.effect, title: event.title, target: event.target, reason: event.reason, fingerprint: event.fingerprint, options: event.options } });
-    else if (event.type === 'error') dispatch({ type: 'error', message: event.message });
-    else if (event.type === 'queue_item_added' || event.type === 'queue_item_updated') queueDispatch({ type: 'queue_upsert', item: event.item, revision: event.sessionRevision });
-    else if (event.type === 'queue_item_removed') queueDispatch({ type: 'queue_remove', itemId: event.itemId, revision: event.sessionRevision });
-    else if (event.type === 'queue_reordered') queueDispatch({ type: 'queue_reorder', orderedItemIds: event.orderedItemIds, revision: event.sessionRevision });
-    else if (event.type === 'run_started') queueDispatch({ type: 'run_started', runId: event.runId, ...(event.sourceItemId ? { sourceItemId: event.sourceItemId } : {}) });
-    else if (event.type === 'run_chain_paused') queueDispatch({ type: 'run_chain_paused' });
-    else if (event.type === 'context_refresh_failed') setQueueNotice(`方向已更新，但上下文刷新失败：${event.message}`);
+    dispatch({ type: 'run_event', event: envelope });
   };
 
   const applyQueueOutcome = (outcome: QueueMutationOutcome) => {
     if (outcome.outcome === 'queued' || outcome.outcome === 'steered' || outcome.outcome === 'remained_queued') {
+      queuedContentRef.current.set(outcome.item.itemId, outcome.item.content);
       queueDispatch({ type: 'queue_upsert', item: outcome.item, revision: outcome.sessionRevision });
       if (outcome.outcome === 'remained_queued') {
         setQueueNotice('当前运行已进入结束阶段，这条消息会在下一轮处理。');
@@ -263,7 +217,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     event?.preventDefault();
     const content = prompt.trim();
     if (!content || queueBusyRef.current.has('enqueue')) return;
-    if ((state.status === 'running' || state.status === 'waiting') && conversationRef) {
+    if ((state.activeRun || streamingRef.current) && conversationRef) {
       setPrompt('');
       setQueueNotice('');
       markQueueBusy('enqueue', true);
@@ -284,35 +238,49 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       }
       return;
     }
-    if (state.status === 'running' || state.status === 'waiting') return;
+    const clientRequestId = crypto.randomUUID();
     setPrompt('');
     streamingRef.current = true;
-    dispatch({ type: 'submit', content });
+    clientRequestIdRef.current = clientRequestId;
+    runIdRef.current = null;
+    dispatch({ type: 'begin', content, clientRequestId });
     const controller = new AbortController();
     controllerRef.current = controller;
+    let settled = false;
     try {
       await streamConversation({
         scope,
         conversationRef,
-        clientRequestId: crypto.randomUUID(),
+        clientRequestId,
         prompt: content,
         signal: controller.signal,
         onEvent: handleStreamEvent,
       });
+      settled = true;
     } catch (error) {
       if (!controller.signal.aborted) dispatch({ type: 'error', message: error instanceof Error ? error.message : '连接失败' });
     } finally {
       controllerRef.current = null;
+      if (settled) {
+        clientRequestIdRef.current = null;
+        runIdRef.current = null;
+      }
       streamingRef.current = false;
-      dispatch({ type: 'status', status: 'idle' });
       await queryClient.invalidateQueries({ queryKey: ['conversations', scope] });
-      await queryClient.invalidateQueries({ queryKey: ['conversation'] });
+      await queryClient.invalidateQueries({ queryKey: ['conversation', scope] });
     }
   };
 
   const stop = async () => {
     if (!queueState.activeRunId) {
-      controllerRef.current?.abort();
+      const runRef = runIdRef.current ?? clientRequestIdRef.current;
+      if (!runRef) return;
+      try {
+        await stopConversationRun(scope, runRef);
+      } catch (error) {
+        setQueueNotice(error instanceof Error ? error.message : '停止失败');
+        controllerRef.current?.abort();
+      }
       return;
     }
     try {
@@ -388,7 +356,6 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     const controller = new AbortController();
     controllerRef.current = controller;
     streamingRef.current = true;
-    dispatch({ type: 'status', status: 'running' });
     try {
       await streamQueueResume({ scope, sessionId: conversationRef, signal: controller.signal, onEvent: handleStreamEvent });
     } catch (error) {
@@ -396,15 +363,14 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     } finally {
       controllerRef.current = null;
       streamingRef.current = false;
-      dispatch({ type: 'status', status: 'idle' });
       await queryClient.invalidateQueries({ queryKey: ['conversations', scope] });
       await queryClient.invalidateQueries({ queryKey: ['conversation'] });
     }
   };
-  const timeline = useMemo(() => state.items, [state.items]);
+  const timeline = useMemo(() => state.committedItems, [state.committedItems]);
   const effectiveUsage = useMemo<ContextUsage>(() => {
     const contextWindowTokens = state.contextUsage.contextWindowTokens ?? meta.data?.model.contextWindow;
-    const usedTokens = state.contextUsage.usedTokens ?? (state.items.length === 0 ? 0 : undefined);
+    const usedTokens = state.contextUsage.usedTokens ?? (state.committedItems.length === 0 ? 0 : undefined);
     return {
       ...state.contextUsage,
       ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
@@ -412,7 +378,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       ...(usedTokens !== undefined && contextWindowTokens ? { percentage: Number((usedTokens / contextWindowTokens * 100).toFixed(1)) } : {}),
       ...(state.contextUsage.source === 'unknown' && usedTokens === 0 ? { source: 'estimated' as const } : {}),
     };
-  }, [meta.data?.model.contextWindow, state.contextUsage, state.items.length]);
+  }, [meta.data?.model.contextWindow, state.contextUsage, state.committedItems.length]);
   const contextLevel = effectiveUsage.usedTokens !== undefined && effectiveUsage.hardLimitTokens !== undefined
     ? effectiveUsage.usedTokens >= effectiveUsage.hardLimitTokens
       ? 'danger'
@@ -427,7 +393,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     setAtBottom(true);
   };
   return (
-    <AppShell scope={scope} conversationRef={conversationRef} title={state.title} status={state.status}>
+    <AppShell scope={scope} conversationRef={conversationRef} title={loadingConversation ? '加载会话…' : state.title} status={state.status}>
       <div className="conversation-layout">
         <div
           className="conversation-scroll"
@@ -443,7 +409,9 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           }}
         >
           <div className="timeline" ref={timelineRef}>
-          {timeline.length === 0 ? (
+          {loadingConversation ? (
+            <div className="empty-conversation" role="status"><p>正在加载会话…</p></div>
+          ) : timeline.length === 0 ? (
             <div className="empty-conversation">
               <h2>{scope.kind === 'general' ? '从一个问题开始' : '开始处理当前项目'}</h2>
               <p>{scope.kind === 'general' ? '这里不会启用项目文件与命令工具。加载项目后可以让 Agent 阅读和修改代码。' : '描述你的目标，DexCode 会在对话中展示每一步工具调用。'}</p>
@@ -452,14 +420,22 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           {timeline.map((item, index) => {
             if (item.kind === 'user') return <UserMessage key={item.id} content={item.content} />;
             if (item.kind === 'assistant') {
-              const showCopy = isCompleteAssistantResponse(timeline, index, state.status);
+              const showCopy = isCompleteAssistantResponse(item, state.status);
               return <AssistantMessage key={item.id} content={item.content} copyContent={showCopy ? assistantResponseCopyText(timeline, index) : item.content} showCopy={showCopy} />;
             }
             if (item.kind === 'tool') return <ToolCard key={item.id} tool={item.tool} />;
             if (item.kind === 'context') return <ContextCard key={item.id} context={item.context} />;
-            if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} onResolve={(answer) => dispatch({ type: 'resolve', approvalRef: item.approvalRef, answer })} />;
+            if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} workspaceRef={workspaceRef} />;
             return <div key={item.id} className="error-card"><strong>{item.title}</strong><span>{item.message}</span></div>;
           })}
+          {state.activeRun ? <RunActivity run={state.activeRun} workspaceRef={workspaceRef} needsResync={state.needsResync} /> : null}
+          {state.streamError ? <div className="error-card"><strong>连接未完成</strong><span>{state.streamError}</span></div> : null}
+          {state.terminal && state.terminal.status !== 'completed' ? (
+            <div className="run-terminal-notice" role="status">
+              <strong>{state.terminal.status === 'aborted' ? '运行已取消' : state.terminal.status === 'limited' ? '运行达到限制' : '运行未完成'}</strong>
+              <span>{state.terminal.error?.message ?? state.terminal.reason}</span>
+            </div>
+          ) : null}
           </div>
           {!atBottom ? <button className="back-to-bottom" onClick={scrollToBottom}><ArrowDown size={15} />回到底部</button> : null}
         </div>
@@ -502,10 +478,11 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             }}
             placeholder="继续输入…"
             aria-label="发送消息"
+            disabled={loadingConversation}
             rows={3}
           />
           <div className="composer-actions">
-            {state.status === 'running' || state.status === 'waiting'
+            {state.activeRun || streamingRef.current
               ? <>
                   <button type="button" className="send-button stop" onClick={() => void stop()} aria-label="停止"><Square size={14} fill="currentColor" /></button>
                   <button type="submit" className="send-button" disabled={!prompt.trim() || queueBusy.has('enqueue')} aria-label="发送后续消息"><ArrowUp size={18} /></button>
@@ -530,7 +507,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             </label>
             <span className={`context-usage ${contextLevel}`}>
               <i><b style={{ width: `${Math.min(100, Math.max(0, effectiveUsage.percentage ?? 0))}%` }} /></i>
-              <ContextLabel usage={effectiveUsage} running={state.status === 'running'} />
+              <ContextLabel usage={effectiveUsage} running={state.status === 'running' || state.status === 'waiting'} />
             </span>
           </div>
           </div>

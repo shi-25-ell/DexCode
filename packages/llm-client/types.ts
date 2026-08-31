@@ -12,6 +12,11 @@ export type ModelUsage = {
   reasoningTokens?: number;
 };
 
+export type ReasoningCapability = {
+  supported: boolean | 'unknown';
+  requestMode: 'provider_default' | 'enabled' | 'disabled';
+};
+
 export type ModelToolCall = {
   id: string;
   name: string;
@@ -89,5 +94,6 @@ export type ModelClient = {
   readonly contextWindow?: number;
   readonly maxOutputTokens?: number;
   readonly providerDisplayName?: string;
+  readonly reasoning: ReasoningCapability;
   streamMessage(messages: unknown[], options?: ChatOptions): AsyncIterable<ModelEvent>;
 };

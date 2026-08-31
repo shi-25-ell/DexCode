@@ -85,3 +85,38 @@ test('OpenAI-compatible errors normalize structured context length failures', as
     globalThis.fetch = originalFetch;
   }
 });
+
+test('reasoning request mode is explicit and never silently enables an unsupported model', async () => {
+  assert.throws(() => createOpenAiCompatibleModelClient({
+    baseUrl: 'https://example.invalid/v1',
+    apiKey: 'test-key',
+    model: 'no-reasoning',
+    reasoning: { supported: false, requestMode: 'enabled' },
+  }), /declared unsupported/);
+
+  const originalFetch = globalThis.fetch;
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return responseFromChunks([
+      'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ]);
+  }) as typeof fetch;
+  try {
+    for (const requestMode of ['enabled', 'disabled'] as const) {
+      const model = createOpenAiCompatibleModelClient({
+        baseUrl: 'https://example.invalid/v1',
+        apiKey: 'test-key',
+        model: 'reasoning-config',
+        reasoning: { supported: 'unknown', requestMode },
+      });
+      const result = await collectModelTurn(model.streamMessage([]));
+      assert.equal(result.status, 'completed');
+    }
+    assert.equal(bodies[0]?.reasoning_effort, 'medium');
+    assert.equal('reasoning_effort' in (bodies[1] ?? {}), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -27,7 +27,7 @@ export type ToolPresentation = {
   category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'other';
   name: string;
   target?: string;
-  status: 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
   summary: string;
   rawOutput?: string;
   truncated?: boolean;
@@ -36,7 +36,7 @@ export type ToolPresentation = {
 
 export type ConversationItem =
   | { id: string; kind: 'user'; content: string }
-  | { id: string; kind: 'assistant'; content: string }
+  | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command' | 'tool'; title: string; target?: string; reason?: string; toolName?: string; effect?: ApprovalEffect; fingerprint?: string; options: string[]; resolved?: string }
@@ -79,7 +79,7 @@ export type ContextPresentation = {
   summarizedMessages?: number;
   retainedConversationSegments?: number;
   retainedMessageCount?: number;
-  reason?: string;
+  reason?: 'summary_failed' | 'cancelled' | 'invalid_summary' | 'interrupted' | 'persistence_failed';
 };
 
 export type ConversationSnapshot = {
@@ -89,8 +89,8 @@ export type ConversationSnapshot = {
   activeRun?: { runId: string; phase: 'running' | 'waiting_confirm' | 'closing' | 'stopping' };
   queuedItems: QueueItem[];
   queuePaused: boolean;
-  revision: number;
   updatedAt: string;
+  revision: number;
   items: ConversationItem[];
   contextUsage: ContextUsage;
 };
@@ -125,28 +125,3 @@ export type ModelDescriptor = {
   contextWindow?: number;
   providerDisplayName?: string;
 };
-
-export type StreamEvent =
-  | { type: 'session'; sessionId: string; isNew: boolean }
-  | { type: 'chunk'; chunk: string }
-  | { type: 'tool_view'; presentation: ToolPresentation }
-  | ({ type: 'context_usage' } & ContextUsage)
-  | { type: 'context_activity'; presentation: ContextPresentation }
-  | { type: 'task_status'; status: string; taskId: string; note?: string }
-  | { type: 'confirm_request'; confirmId: string; question: string; options?: string[] }
-  | { type: 'command_confirm_request'; confirmId: string; command: string; cwd: string; risk: string; reason: string }
-  | { type: 'approval_request'; taskId: string; approvalId: string; toolName: string; effect: ApprovalEffect; title: string; target?: string; reason: string; fingerprint: string; options: ApprovalOption[] }
-  | { type: 'error'; message: string }
-  | { type: 'result'; result: unknown }
-  | { type: 'reasoning_chunk'; chunk: string }
-  | { type: 'skill'; skill: string; action: string }
-  | { type: 'tool_status'; callId: string; tool: string; status: string }
-  | { type: 'queue_item_added'; sessionId: string; item: QueueItem; sessionRevision: number }
-  | { type: 'queue_item_updated'; sessionId: string; item: QueueItem; sessionRevision: number }
-  | { type: 'queue_item_removed'; sessionId: string; itemId: string; reason: string; sessionRevision: number }
-  | { type: 'queue_reordered'; sessionId: string; orderedItemIds: string[]; sessionRevision: number }
-  | { type: 'run_started'; sessionId: string; runId: string; sourceItemId?: string }
-  | { type: 'user_message_committed'; sessionId: string; runId: string; itemId: string }
-  | { type: 'context_refresh_started' | 'context_refresh_completed'; sessionId: string; runId: string; itemId: string }
-  | { type: 'context_refresh_failed'; sessionId: string; runId: string; itemId: string; message: string }
-  | { type: 'run_chain_paused'; sessionId: string; reason: 'user_stop' | 'disconnect' | 'failure' | 'recovery' };

@@ -68,12 +68,35 @@ function readableStoredPresentation(presentation: Extract<SessionLedgerRecord, {
 
 function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
   const items: ConversationItem[] = [];
+  const finalMessageIds = new Set(records.flatMap((record) => (
+    record.type === 'run_terminal' && record.report.finalMessageId ? [record.report.finalMessageId] : []
+  )));
+  const legacyFinalAssistantSeqs = new Set<number>();
+  for (const terminal of records) {
+    if (terminal.type !== 'run_terminal' || terminal.report.status !== 'completed' || terminal.report.finalMessageId) continue;
+    const candidate = [...records].reverse().find((record) => (
+      record.type === 'message'
+      && record.runId === terminal.runId
+      && record.message.role === 'assistant'
+      && Boolean(record.message.content?.trim())
+      && (!terminal.report.finalAnswer || record.message.content === terminal.report.finalAnswer)
+    ));
+    if (candidate?.type === 'message') legacyFinalAssistantSeqs.add(candidate.seq);
+  }
   const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && record.tool === 'compact_context' ? [record.callId] : []));
   for (const record of records) {
     if (record.type === 'message') {
       const message = record.message;
       if (message.role === 'user') items.push({ id: `message-${record.seq}`, kind: 'user', content: message.content });
-      if (message.role === 'assistant' && message.content?.trim()) items.push({ id: `message-${record.seq}`, kind: 'assistant', content: message.content });
+      if (message.role === 'assistant' && message.content?.trim()) items.push({
+        id: record.messageId ?? `message-${record.seq}`,
+        kind: 'assistant',
+        content: message.content,
+        ...(record.messageId ? { messageId: record.messageId } : {}),
+        runId: record.runId,
+        ...(record.turn !== undefined ? { turn: record.turn } : {}),
+        ...((record.messageId && finalMessageIds.has(record.messageId)) || legacyFinalAssistantSeqs.has(record.seq) ? { final: true } : {}),
+      });
     } else if (record.type === 'tool_completed') {
       if (internalContextCalls.has(record.callId)) continue;
       items.push({ id: `tool-${record.presentation.callRef}`, kind: 'tool', tool: readableStoredPresentation(record.presentation) });
@@ -131,8 +154,8 @@ export function projectConversation(session: Session, options: { contextWindow?:
     ...(session.activeTaskId ? { activeRun: { runId: session.activeTaskId, phase: options.activePhase ?? (item.state === 'waiting' ? 'waiting_confirm' : 'running') } } : {}),
     queuedItems: queue.pending,
     queuePaused: queue.paused,
-    revision: session.revision ?? 0,
     updatedAt: item.updatedAt,
+    revision: session.revision ?? 0,
     items,
     contextUsage: contextUsage(session, options.contextWindow),
   };

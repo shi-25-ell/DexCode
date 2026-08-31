@@ -4,12 +4,14 @@ import { createExecutor } from './executor.ts';
 import type { ModelClient, ModelEvent, ModelResponse } from '../llm-client/index.ts';
 import type { ContextEngine, PrepareContextInput, PreparedContext } from '../context-engine/index.ts';
 import type { AgentEvent, ChatMessage } from '../shared/types.ts';
+import type { RunEventPayload } from '../run-protocol/index.ts';
 
 function scriptedModel(responses: ModelResponse[]): ModelClient {
   let index = 0;
   return {
     model: 'scripted',
     baseUrl: 'scripted://local',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
     async *streamMessage(): AsyncIterable<ModelEvent> {
       const response = responses[index++];
       if (!response) throw new Error('unexpected model call');
@@ -202,6 +204,122 @@ test('does not consume Steer after the model turn budget is exhausted', async ()
   assert.equal(consumed, false);
 });
 
+test('settles an in-flight model request as aborted without inventing a final answer', async () => {
+  const { host } = toolHost();
+  const controller = new AbortController();
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const model: ModelClient = {
+    model: 'abort-script',
+    baseUrl: 'memory://abort-script',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+    async *streamMessage(_messages, options): AsyncIterable<ModelEvent> {
+      yield { version: 1, type: 'turn_started', attemptId: 'attempt-abort' };
+      markStarted();
+      if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener('abort', () => resolve(), { once: true }));
+      throw new DOMException('Aborted', 'AbortError');
+    },
+  };
+  const run = createExecutor(host).runReActLoop(model, [], () => {}, undefined, { signal: controller.signal });
+  await started;
+  controller.abort();
+  const result = await run;
+
+  assert.equal(result.status, 'aborted');
+  assert.equal(result.terminationReason, 'user_abort');
+  assert.equal(result.finalContent, '');
+  assert.equal(result.finalMessageId, undefined);
+});
+
+test('keeps legacy reasoning and text streams separate while committing the complete assistant turn', async () => {
+  const { host } = toolHost();
+  const events: AgentEvent[] = [];
+  const committed: string[] = [];
+  const model: ModelClient = {
+    model: 'reasoning-script',
+    baseUrl: 'memory://reasoning-script',
+    reasoning: { supported: true, requestMode: 'enabled' },
+    async *streamMessage(): AsyncIterable<ModelEvent> {
+      yield { version: 1, type: 'turn_started', attemptId: 'attempt-reasoning' };
+      yield { version: 1, type: 'reasoning_delta', delta: 'private reasoning' };
+      yield { version: 1, type: 'text_delta', delta: 'public answer' };
+      yield {
+        version: 1,
+        type: 'turn_completed',
+        response: {
+          content: 'public answer',
+          reasoning: 'private reasoning',
+          toolCalls: [],
+          finishReason: 'stop',
+        },
+      };
+    },
+  };
+
+  const result = await createExecutor(host).runReActLoop(model, [], (event) => events.push(event), undefined, {
+    semantic: {
+      assistantCommitted: async (message) => { committed.push(message.content ?? ''); },
+      toolStarted: async () => {},
+      toolOutcome: async () => {},
+    },
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(events.filter((event) => event.type === 'reasoning_chunk' || event.type === 'chunk'), [
+    { type: 'reasoning_chunk', chunk: 'private reasoning' },
+    { type: 'chunk', chunk: 'public answer' },
+  ]);
+  assert.deepEqual(committed, ['public answer']);
+});
+
+test('emits stable V2 message blocks and phase transitions without mixing reasoning into text', async () => {
+  const { host } = toolHost();
+  const events: RunEventPayload[] = [];
+  const model: ModelClient = {
+    model: 'presentation-script',
+    baseUrl: 'memory://presentation-script',
+    reasoning: { supported: true, requestMode: 'enabled' },
+    async *streamMessage(): AsyncIterable<ModelEvent> {
+      yield { version: 1, type: 'turn_started', attemptId: 'attempt-presentation' };
+      yield { version: 1, type: 'reasoning_delta', delta: 'reasoning' };
+      yield { version: 1, type: 'text_delta', delta: 'answer' };
+      yield {
+        version: 1,
+        type: 'turn_completed',
+        response: { content: 'answer', reasoning: 'reasoning', toolCalls: [], finishReason: 'stop' },
+      };
+    },
+  };
+  const result = await createExecutor(host).runReActLoop(model, [], () => {}, undefined, {
+    runId: 'run-presentation',
+    presentation: { emit: (event) => events.push(event) },
+    semantic: {
+      assistantCommitted: async () => {},
+      toolStarted: async () => {},
+      toolOutcome: async () => {},
+    },
+  });
+
+  assert.equal(result.finalMessageId, 'run-presentation:message:1');
+  assert.deepEqual(events.filter((event) => event.type === 'run_phase_changed').map((event) => event.phase), [
+    'requesting_model',
+    'thinking',
+    'answering',
+  ]);
+  const deltas = events.filter((event) => event.type === 'assistant_content_delta');
+  assert.deepEqual(deltas.map((event) => [event.contentIndex, event.kind, event.delta]), [
+    [0, 'reasoning', 'reasoning'],
+    [1, 'text', 'answer'],
+  ]);
+  const committedEvent = events.find((event) => event.type === 'assistant_message_committed');
+  assert.equal(committedEvent?.type, 'assistant_message_committed');
+  if (committedEvent?.type === 'assistant_message_committed') {
+    assert.equal(committedEvent.message.messageId, 'run-presentation:message:1');
+    assert.equal(committedEvent.message.content, 'answer');
+    assert.equal(committedEvent.message.contentBlocks[0]?.kind, 'reasoning');
+  }
+});
+
 test('commits assistant and tool start before effect, then commits outcome', async () => {
   const timeline: string[] = [];
   const { host, read } = toolHost(timeline);
@@ -297,6 +415,7 @@ test('context overflow performs one recovery retry without repeating completed t
   const model: ModelClient = {
     model: 'overflow-test',
     baseUrl: 'memory://overflow',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
     async *streamMessage(): AsyncIterable<ModelEvent> {
       const item = script[index++];
       yield { version: 1, type: 'turn_started', attemptId: `attempt-${index}` };
