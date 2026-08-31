@@ -2,7 +2,8 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { lstat } from 'node:fs/promises';
 import { ManagedMemoryValidationError } from './format.ts';
 
-const TOPIC_PATTERN = /^[a-z0-9][a-z0-9_-]{0,79}\.md$/;
+export const TOPIC_FILENAME_PATTERN_SOURCE = '^[a-z0-9][a-z0-9_-]{0,79}\\.md$';
+const TOPIC_PATTERN = new RegExp(TOPIC_FILENAME_PATTERN_SOURCE);
 const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 
 export type ManagedMemoryPaths = {
@@ -37,7 +38,7 @@ export function validateTopicPath(pathInput: string): string {
     throw new ManagedMemoryValidationError('Memory path must be a safe relative topic filename');
   }
   if (path.includes('/') || path === '.' || path === '..' || path.includes('..') || WINDOWS_DEVICE.test(path)) {
-    throw new ManagedMemoryValidationError('Memory topic path is not allowed');
+    throw new ManagedMemoryValidationError('Memory topic path must be a bare filename such as coding-agent-project.md; directory prefixes such as topics/ are not allowed');
   }
   if (path.toLowerCase() === 'memory.md' || !TOPIC_PATTERN.test(path)) {
     throw new ManagedMemoryValidationError('Topic filename must match [a-z0-9][a-z0-9_-]{0,79}.md');

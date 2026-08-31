@@ -6,6 +6,9 @@ import test from 'node:test';
 import { createMockModelClient } from '../llm-client/index.ts';
 import { createManagedMemorySystem, truncateIndexForRead } from './index.ts';
 import type { AgentRunResult } from '../agent-core/agent-runtime.ts';
+import { buildMemoryPolicyPrompt } from './prompt.ts';
+import { MEMORY_TOOL_DEFINITIONS } from './tools.ts';
+import { validateTopicPath } from './paths.ts';
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'dexcode-memory-'));
@@ -27,6 +30,19 @@ function upsertInput(operationId: string, expectedDigest: string | null = null) 
     indexTitle: '真实数据库测试', indexHook: '迁移与事务测试使用真实数据库。', expectedDigest, operationId,
   };
 }
+
+test('memory_upsert contract makes the bare topic filename rule explicit to the model', () => {
+  const definition = MEMORY_TOOL_DEFINITIONS.find((item) => item.function.name === 'memory_upsert');
+  assert.ok(definition);
+  const pathSchema = definition.function.parameters.properties.path as { description?: string; pattern?: string };
+  assert.equal(pathSchema.pattern, '^[a-z0-9][a-z0-9_-]{0,79}\\.md$');
+  assert.match(pathSchema.description ?? '', /bare filename|裸文件名/i);
+  assert.match(buildMemoryPolicyPrompt(true), /bare filename|裸文件名/i);
+  assert.throws(
+    () => validateTopicPath('topics/coding-agent-project.md'),
+    /bare filename.*directory prefixes.*topics\//i,
+  );
+});
 
 test('store atomically upserts topic and index, replays operationId, and detects digest conflicts', async () => {
   const value = await fixture();

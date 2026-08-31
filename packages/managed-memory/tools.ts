@@ -6,6 +6,10 @@ import {
 } from './contracts.ts';
 import type { ManagedMemoryStore } from './store.ts';
 import { ManagedMemoryValidationError } from './format.ts';
+import { TOPIC_FILENAME_PATTERN_SOURCE } from './paths.ts';
+
+const TOPIC_PATH_DESCRIPTION = '记忆根目录中的裸文件名，例如 coding-agent-project.md；不要添加 topics/、projects/ 或其他目录前缀。';
+const READ_PATH_PATTERN = `^(?:MEMORY\\.md|${TOPIC_FILENAME_PATTERN_SOURCE.slice(1, -1)})$`;
 
 export const MEMORY_TOOL_NAMES = [
   'memory_list',
@@ -37,7 +41,10 @@ export const MEMORY_TOOL_DEFINITIONS = [
       description: '分页读取 MEMORY.md 或一个自动记忆 topic，返回 digest 供安全更新。',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string' }, offset: { type: 'number' }, limit: { type: 'number' } },
+        properties: {
+          path: { type: 'string', description: `读取 MEMORY.md，或${TOPIC_PATH_DESCRIPTION}`, pattern: READ_PATH_PATTERN },
+          offset: { type: 'number' }, limit: { type: 'number' },
+        },
         required: ['path'], additionalProperties: false,
       },
     },
@@ -62,11 +69,12 @@ export const MEMORY_TOOL_DEFINITIONS = [
     type: 'function' as const,
     function: {
       name: 'memory_upsert',
-      description: '原子创建或更新一个语义 topic，并同步 MEMORY.md 索引。新建传 expectedDigest:null；更新传最新 digest。',
+      description: '原子创建或更新一个语义 topic，并同步 MEMORY.md 索引。path 只能是根目录中的裸 .md 文件名；新建传 expectedDigest:null，更新传最新 digest。',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' },
+          path: { type: 'string', description: TOPIC_PATH_DESCRIPTION, pattern: TOPIC_FILENAME_PATTERN_SOURCE },
+          name: { type: 'string' }, description: { type: 'string' },
           type: { type: 'string', enum: [...MANAGED_MEMORY_TYPES] }, body: { type: 'string' },
           indexTitle: { type: 'string' }, indexHook: { type: 'string' },
           expectedDigest: { type: ['string', 'null'] }, operationId: { type: 'string' },
@@ -83,7 +91,10 @@ export const MEMORY_TOOL_DEFINITIONS = [
       description: '按最新 digest 删除一个自动记忆 topic 并同步移除索引指针。',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string' }, expectedDigest: { type: 'string' }, reason: { type: 'string' }, operationId: { type: 'string' } },
+        properties: {
+          path: { type: 'string', description: TOPIC_PATH_DESCRIPTION, pattern: TOPIC_FILENAME_PATTERN_SOURCE },
+          expectedDigest: { type: 'string' }, reason: { type: 'string' }, operationId: { type: 'string' },
+        },
         required: ['path', 'expectedDigest', 'reason', 'operationId'], additionalProperties: false,
       },
     },

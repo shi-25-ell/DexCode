@@ -27,6 +27,7 @@ ${FORBIDDEN}
 
 用户明确要求记住时立即保存；明确要求忘记时先查找再删除。保存前先查重，按语义主题组织，优先更新已有 topic。feedback/project 正文保留 Why 与 How to apply，相对日期改为绝对日期。
 MEMORY.md 只是索引；详细内容只能放在带严格 frontmatter 的 topic 文件里。memory_upsert 会原子同步 topic 与索引。
+memory_* 的 topic path 只能填写记忆根目录中的裸文件名，例如 coding-agent-project.md；不要添加 topics/、projects/ 或任何目录前缀。
 记忆可能过期。行动前核验其中的文件、函数、配置和当前状态；冲突时信任当前证据并修正旧记忆。
 用户要求本轮忽略记忆时，不使用、引用、比较或暗示任何已存记忆。${indexEmpty ? '\n当前索引为空。' : ''}`;
 }
@@ -46,7 +47,7 @@ export function buildExtractionPrompt(input: {
 你是记忆提取 Agent。只分析提供的最近消息，更新当前 Workspace 的自动记忆。当前轮完成时间：${input.completedAt}。
 增量范围：${input.checkpointDescription}
 
-你只能使用 memory_list、memory_read、memory_search、memory_upsert、memory_remove。现有 manifest 已提供，先判断是否真的需要保存；没有长期价值时不要调用写工具。
+你只能使用 memory_list、memory_read、memory_search、memory_upsert、memory_remove。现有 manifest 已提供，先判断是否真的需要保存；没有长期价值时不要调用写工具。topic path 只能填写记忆根目录中的裸文件名，例如 coding-agent-project.md，不要添加目录前缀。
 
 允许的四类：
 ${TAXONOMY}
@@ -63,7 +64,7 @@ ${formatManifest(input.manifest)}`;
 export function buildConsolidationPrompt(input: { manifest: MemoryHeader[]; index: string; sessionIds: string[] }): string {
   return `# Memory Consolidation
 
-整理当前 Workspace 的长期自动记忆。合并近重复主题，删除被新证据否定或已经没有召回价值的条目，修正相对日期，改进 description 和索引 hook。没有实质变化时不要写。
+整理当前 Workspace 的长期自动记忆。合并近重复主题，删除被新证据否定或已经没有召回价值的条目，修正相对日期，改进 description 和索引 hook。没有实质变化时不要写。topic path 只能填写记忆根目录中的裸文件名，例如 coding-agent-project.md，不要添加目录前缀。
 
 必须继续遵守四类 taxonomy：
 ${TAXONOMY}
