@@ -207,10 +207,12 @@ test('orchestration tools receive immutable caller context and stay out of ordin
       { name: 'researcher', description: 'Read-only investigation agent.' },
     ],
     spawn: async (input: unknown, caller: unknown) => { calls.push({ input, caller }); return { agent_id: 'agent-a', status: 'running' }; },
-    wait: async () => ({}), followup: async () => ({}), stop: async () => ({}),
+    wait: async (input: unknown, caller: unknown) => { calls.push({ input, caller }); return { completed: [] }; },
+    followup: async () => ({}), stop: async () => ({}),
   };
   const scripted = scriptedModel([
     { content: '', reasoning: '', toolCalls: [{ id: 'spawn-1', name: 'spawn_agent', arguments: { task: 'inspect', context_mode: 'fork' } }], finishReason: 'tool_calls' },
+    { content: '', reasoning: '', toolCalls: [{ id: 'wait-1', name: 'wait_agent', arguments: { agent_ids: ['agent-a'], mode: 'all', timeout_ms: 30_000 } }], finishReason: 'tool_calls' },
     { content: 'delegated', reasoning: '', toolCalls: [], finishReason: 'stop' },
   ]);
   const model: ModelClient = {
@@ -222,9 +224,10 @@ test('orchestration tools receive immutable caller context and stay out of ordin
   };
   const result = await createExecutor(host, undefined, undefined, orchestration).runReActLoop(model, [{ role: 'user', content: 'delegate this' }], (event) => events.push(event), undefined, { runId: 'main-1', sessionId: 'session-1' });
   assert.equal(result.status, 'completed');
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.deepEqual((calls[0] as { input: unknown }).input, { task: 'inspect', contextMode: 'fork' });
   assert.equal((calls[0] as { caller: { forkSnapshot: ChatMessage[] } }).caller.forkSnapshot.at(-1)?.role, 'user');
+  assert.deepEqual((calls[1] as { input: unknown }).input, { agentIds: ['agent-a'], mode: 'all', timeoutMs: 30_000 });
   assert.equal(events.some((event) => event.type === 'tool' || event.type === 'tool_view' || event.type === 'tool_status'), false);
   const spawn = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'spawn_agent') as { function: { parameters: { required: string[]; properties: { agent: { enum?: string[]; default?: string; description?: string } } } } };
   assert.deepEqual(spawn.function.parameters.required, ['task']);

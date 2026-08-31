@@ -266,7 +266,10 @@ function validationError(
     const expected = properties[key]?.type;
     if (typeof expected !== 'string') continue;
     const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
-    if (actual !== expected) return `tool argument ${key} must be ${expected}`;
+    const matches = expected === 'integer'
+      ? typeof value === 'number' && Number.isInteger(value)
+      : actual === expected;
+    if (!matches) return `tool argument ${key} must be ${expected}`;
   }
   return undefined;
 }
