@@ -1,12 +1,12 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { Bot, ChevronRight, Square, X } from 'lucide-react';
+import * as Collapsible from '@radix-ui/react-collapsible';
+import { Bot, ChevronDown, ChevronRight, Square, X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { getAgentDetail } from '../api';
 import type { AgentDetail, AgentRecordView, AgentRunView, AgentToolView, AgentTreeSnapshot, ConversationScope, ToolPresentation } from '../types';
 import { AssistantMessage } from './assistant-message';
 import { ToolCard } from './tool-card';
-import { UserMessage } from './user-message';
 
 function runFor(tree: AgentTreeSnapshot, agent: AgentRecordView) {
   return tree.runs.find((run) => run.agentRunId === (agent.currentRunId ?? agent.lastRunId));
@@ -94,7 +94,12 @@ export function AgentTranscript({ detail }: { detail: AgentDetail }) {
 
   detail.messages.forEach((message, index) => {
     if (message.role === 'user') {
-      entries.push(<UserMessage key={`user-${index}`} content={message.content} />);
+      entries.push(
+        <Collapsible.Root key={`parent-prompt-${index}`} className="agent-parent-prompt">
+          <Collapsible.Trigger><span>父 Agent 指令</span><ChevronDown className="chevron" size={15} /></Collapsible.Trigger>
+          <Collapsible.Content><pre>{message.content}</pre></Collapsible.Content>
+        </Collapsible.Root>,
+      );
       return;
     }
     if (message.role === 'assistant') {
@@ -132,7 +137,6 @@ export function AgentDrawer({ open, onOpenChange, tree, scope, sessionId, select
           {selectedAgentId ? (
             <div className="agent-transcript">
               <h3>{detail.data?.agent.name ?? 'Agent 对话'}</h3>
-              <p>{detail.data?.agent.task}</p>
               {detail.isPending ? <span>加载中…</span> : detail.data ? <AgentTranscript detail={detail.data} /> : <span>无法加载 Agent 对话</span>}
             </div>
           ) : (

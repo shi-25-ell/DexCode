@@ -149,11 +149,12 @@ body.resizing { cursor: col-resize; user-select: none; }
 .agent-tree-root { display: flex; align-items: center; gap: 9px; padding: 10px 12px; color: #3a473f; font-weight: 700; font-size: 13px; }
 .agent-tree-root > i { width: 9px; height: 9px; background: #29372f; border-radius: 50%; }
 .agent-tree-row { margin-left: 16px; border-left: 1px solid #d8ded9; }
-.agent-transcript h3 { margin: 4px 4px 2px; font-size: 16px; }
-.agent-transcript > p { margin: 0 4px 16px; color: #6f7973; font-size: 12px; }
+.agent-transcript h3 { margin: 4px 4px 14px; font-size: 16px; }
 .agent-transcript-stream { min-width: 0; padding: 4px; }
-.agent-transcript-stream .user-message-group { margin: 8px 0 18px; }
-.agent-transcript-stream .user-message { max-width: 88%; padding: 10px 12px; font-size: 13px; }
+.agent-parent-prompt { margin: 0 0 14px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f8fafc; overflow: hidden; }
+.agent-parent-prompt > button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 36px; padding: 0 10px; border: 0; background: transparent; color: #64748b; font-size: 12px; cursor: pointer; }
+.agent-parent-prompt > button[data-state="open"] .chevron { transform: rotate(180deg); }
+.agent-parent-prompt pre { max-height: 220px; margin: 0; padding: 10px; overflow: auto; border-top: 1px solid #e5e7eb; color: #475569; font: 12px/1.55 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-transcript-stream .assistant-message { margin-bottom: 18px; font-size: 13px; line-height: 1.75; }
 .agent-transcript-stream .assistant-message pre { max-width: 100%; padding: 10px; font-size: 12px; }
 .agent-transcript-stream .assistant-content table { min-width: 520px; }

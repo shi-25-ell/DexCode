@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentDetail } from '../types';
 import { AgentTranscript } from './agent-activity';
@@ -32,11 +32,12 @@ describe('AgentTranscript', () => {
 
     render(<AgentTranscript detail={detail} />);
 
-    const task = screen.getByText('检查项目');
     const tool = screen.getByText('读取文件');
     const heading = screen.getByRole('heading', { level: 2, name: '发现' });
-    expect(task.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(tool.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.queryByText('检查项目')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '父 Agent 指令' }));
+    expect(screen.getByText('检查项目')).toBeInTheDocument();
     expect(screen.queryByText('## 发现')).not.toBeInTheDocument();
     expect(screen.getAllByText('读取文件')).toHaveLength(1);
   });
