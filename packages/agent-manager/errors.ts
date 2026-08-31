@@ -11,9 +11,12 @@ export type AgentErrorCode =
   | 'invalid_input';
 
 export class AgentManagerError extends Error {
-  constructor(readonly code: AgentErrorCode, message: string) {
+  readonly code: AgentErrorCode;
+
+  constructor(code: AgentErrorCode, message: string) {
     super(message);
     this.name = 'AgentManagerError';
+    this.code = code;
   }
 }
 

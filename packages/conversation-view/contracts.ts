@@ -1,5 +1,13 @@
 import type { ApprovalEffect, ApprovalOption, ContextBreakdown, ContextPresentation, ContextUsageSource, ContextUsageTiming, QueueItemView, ToolPresentation } from '../shared/types.ts';
 
+export type AgentTreeSnapshotView = {
+  version: 1;
+  sessionId: string;
+  rootAgentId: string;
+  revision: number;
+  agents: Array<{ agentId: string; createdByRunId: string; delegationGroupId?: string }>;
+};
+
 export type ConversationState = 'idle' | 'running' | 'waiting' | 'failed';
 
 export type ConversationListItem = {
@@ -30,6 +38,7 @@ export type ConversationItem =
   | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
+  | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentIds: string[] }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'tool'; toolName: string; effect: ApprovalEffect; title: string; target?: string; reason: string; fingerprint: string; options: ApprovalOption[]; resolved?: ApprovalOption }
   | { id: string; kind: 'error'; title: string; message: string };
 
@@ -44,6 +53,7 @@ export type ConversationViewSnapshot = {
   revision: number;
   items: ConversationItem[];
   contextUsage: ContextUsageView;
+  agents?: AgentTreeSnapshotView | null;
 };
 
 export type ModelDisplayDescriptor = {

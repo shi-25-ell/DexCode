@@ -196,3 +196,24 @@ export function createSkillRegistry(options: RegistryOptions) {
     clearUsages,
   };
 }
+
+export function createAgentScopedSkillRegistry(base: ReturnType<typeof createSkillRegistry>) {
+  const active = new Set<string>();
+  return {
+    listSkills: () => base.listSkills().map((skill) => ({ ...skill })),
+    readSkill: (name: string) => base.readSkill(name),
+    activateSkill(name: string, trigger: SkillTrigger, reason?: string): SkillActivationResult {
+      const skill = base.listSkills().find((item) => item.name === name);
+      if (!skill) return { ok: false, error: `Skill not found: ${name}` };
+      if (!skill.enabled) return { ok: false, error: `Skill is disabled: ${name}` };
+      active.add(name);
+      return { ok: true, skill: name, trigger, reason };
+    },
+    deactivateSkill(name: string, reason?: string): SkillActivationResult {
+      if (!base.listSkills().some((item) => item.name === name)) return { ok: false, error: `Skill not found: ${name}` };
+      active.delete(name);
+      return { ok: true, skill: name, trigger: 'explicit', reason };
+    },
+    activeSkills: () => [...active],
+  };
+}

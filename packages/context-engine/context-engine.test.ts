@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ModelClient, ModelEvent } from '../llm-client/index.ts';
 import type { ContextArtifactRef, ContextManifestV2, ContextPolicy, Session } from '../shared/types.ts';
-import { createContextEngine, type PutContextArtifact } from './index.ts';
+import { createContextEngine, projectAgentFork, type PutContextArtifact } from './index.ts';
 
 const now = new Date().toISOString();
 
@@ -228,4 +228,19 @@ test('structured summary is cached with a retained tail and reused for later mes
   assert.equal(counter.calls, 1);
   assert.match(JSON.stringify(second.messages), /对话摘要/);
   assert.match(JSON.stringify(second.messages), /new request/);
+});
+
+test('Agent fork keeps recent complete segments and never emits orphan tool results', () => {
+  const projection = projectAgentFork([
+    { role: 'system', content: 'parent-only system' },
+    { role: 'user', content: 'old' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'closed', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'closed', name: 'read_file', content: 'ok' },
+    { role: 'user', content: 'recent' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'open', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+  ], { maxSegments: 4, maxTokens: 10_000 });
+  assert.equal(projection.messages.some((message) => message.role === 'system'), false);
+  assert.equal(projection.messages.some((message) => message.role === 'assistant' && message.tool_calls?.some((call) => call.id === 'open')), false);
+  const calls = new Set(projection.messages.flatMap((message) => message.role === 'assistant' ? (message.tool_calls ?? []).map((call) => call.id) : []));
+  assert.equal(projection.messages.filter((message) => message.role === 'tool').every((message) => calls.has(message.tool_call_id)), true);
 });

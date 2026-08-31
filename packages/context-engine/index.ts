@@ -21,6 +21,17 @@ export type ContextSection = {
   content: string;
 };
 
+export type ContextOwner =
+  | { kind: 'session'; sessionId: string }
+  | { kind: 'agent'; sessionId: string; agentId: string };
+
+export type AgentForkProjection = {
+  messages: ChatMessage[];
+  sourceMessageCount: number;
+  retainedSegments: number;
+  estimatedTokens: number;
+};
+
 export type ModelToolDefinition = {
   type: 'function';
   function: { name: string; description?: string; parameters?: unknown };
@@ -225,6 +236,43 @@ function conversationSegments(messages: ChatMessage[]): Segment[] {
   if (starts.length === 0) return messages.length > 0 ? [{ start: 0, end: messages.length }] : [];
   if (starts[0] !== 0) starts.unshift(0);
   return starts.map((start, index) => ({ start, end: starts[index + 1] ?? messages.length }));
+}
+
+function completeToolPairs(messages: ChatMessage[]): ChatMessage[] {
+  const calls = new Set<string>();
+  const results = new Set<string>();
+  for (const message of messages) {
+    if (message.role === 'assistant') for (const call of message.tool_calls ?? []) calls.add(call.id);
+    if (message.role === 'tool') results.add(message.tool_call_id);
+  }
+  const incomplete = new Set([...calls].filter((id) => !results.has(id)));
+  return messages.filter((message) => {
+    if (message.role === 'tool') return calls.has(message.tool_call_id) && !incomplete.has(message.tool_call_id);
+    if (message.role === 'assistant' && message.tool_calls?.some((call) => incomplete.has(call.id))) return false;
+    return true;
+  });
+}
+
+export function projectAgentFork(
+  source: readonly ChatMessage[],
+  options: { maxSegments?: number; maxTokens?: number; charsPerToken?: number } = {},
+): AgentForkProjection {
+  const maxSegments = options.maxSegments ?? 4;
+  const maxTokens = options.maxTokens ?? 8_000;
+  const charsPerToken = options.charsPerToken ?? 3.5;
+  const canonical = completeToolPairs(cloneMessages(source.filter((message) => message.role !== 'system')));
+  let segments = conversationSegments(canonical).slice(-maxSegments);
+  let messages = segments.flatMap((segment) => canonical.slice(segment.start, segment.end));
+  const estimate = () => Math.ceil(JSON.stringify(messages).length / charsPerToken);
+  while (segments.length > 1 && estimate() > maxTokens) {
+    segments = segments.slice(1);
+    messages = segments.flatMap((segment) => canonical.slice(segment.start, segment.end));
+  }
+  if (estimate() > maxTokens) {
+    const latest = messages.at(-1);
+    messages = latest?.role === 'user' ? [latest] : [];
+  }
+  return { messages: cloneMessages(messages), sourceMessageCount: source.length, retainedSegments: segments.length, estimatedTokens: estimate() };
 }
 
 function closedToolBatch(messages: ChatMessage[]): Array<{ index: number; message: ToolResultMessage }> {

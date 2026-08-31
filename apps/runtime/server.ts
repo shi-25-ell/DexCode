@@ -23,6 +23,17 @@ import { createCapabilityRegistry } from '../../packages/capability-registry/ind
 import { presentTool, projectConversation, projectConversationListItem } from '../../packages/conversation-view/index.ts';
 import { createManagedMemorySystem } from '../../packages/managed-memory/index.ts';
 import {
+  activityEventsFromStore,
+  createAgentActivityStream,
+} from '../../packages/run-protocol/agent-activity.ts';
+import {
+  createAgentDefinitionRegistry,
+  createAgentManager,
+  createAgentStore,
+  multiAgentEnabled,
+  type AgentManager,
+} from '../../packages/agent-manager/index.ts';
+import {
   createRunReplayBuffer,
   isDroppableRunEvent,
   safeRunNote,
@@ -363,6 +374,14 @@ function cancelPendingRun(runId: string, reason: string) {
 // ── 模块级初始化 ──
 const modelClient = createModelClient();
 const sessionRepository: SessionRepository = createSessionRepository();
+const multiAgentFeatureEnabled = multiAgentEnabled();
+const agentActivityStream = createAgentActivityStream();
+const agentStore = createAgentStore({
+  sessionsDir: sessionRepository.sessionsDir,
+  observe(sessionId, events, snapshot) {
+    for (const event of activityEventsFromStore(events, snapshot)) agentActivityStream.publish(sessionId, event);
+  },
+});
 const approvalModeStore = await createApprovalModeStore({
   file: join(process.cwd(), 'workspaces', 'approval-settings.json'),
 });
@@ -396,6 +415,7 @@ type WorkspaceRuntime = {
   skillRegistry: SkillRegistry;
   codingAgent: CodingAgent;
   managedMemory: ReturnType<typeof createManagedMemorySystem>;
+  agentManager: AgentManager;
 };
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -454,7 +474,19 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     modelClient,
     observe: (event) => console.info(JSON.stringify({ type: 'metric', ...event })),
   });
-  const nextCodingAgent = createCodingAgent(
+  const definitionRegistry = createAgentDefinitionRegistry({
+    userRoot: join(process.env.USERPROFILE ?? process.cwd(), '.dexcode', 'agents'),
+    workspaceRoot: join(workspace.canonicalRootPath, '.dexcode', 'agents'),
+  });
+  await definitionRegistry.reload();
+  let nextCodingAgent!: CodingAgent;
+  const nextAgentManager = createAgentManager({
+    enabled: multiAgentFeatureEnabled,
+    store: agentStore,
+    definitions: definitionRegistry,
+    runChild: (input) => nextCodingAgent.runChild(input),
+  });
+  nextCodingAgent = createCodingAgent(
     nextContextManager,
     nextCodingToolHost,
     modelClient,
@@ -463,6 +495,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     nextSkillRegistry,
     { scope: { kind: 'workspace', workspaceId: workspace.workspaceId }, rootPath: workspace.canonicalRootPath },
     nextManagedMemory,
+    { orchestration: multiAgentFeatureEnabled ? nextAgentManager : undefined },
   );
   const runtime = {
     workspace,
@@ -471,6 +504,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     skillRegistry: nextSkillRegistry,
     codingAgent: nextCodingAgent,
     managedMemory: nextManagedMemory,
+    agentManager: nextAgentManager,
   };
   workspaceRuntimes.set(workspace.workspaceId, runtime);
   return runtime;
@@ -1012,7 +1046,10 @@ export function startRuntimeServer() {
         : runtimeSnapshot.activeRun?.phase === 'terminal'
           ? undefined
           : runtimeSnapshot.activeRun?.phase;
-      sendJson(res, 200, { conversation: projectConversation(latestSession, { contextWindow: modelClient.contextWindow, ...(activePhase ? { activePhase } : {}) }) });
+      const agents = multiAgentFeatureEnabled && latestSession.scope.kind === 'workspace'
+        ? await (await runtimeForSession(latestSession)).agentManager.list(latestSession.sessionId)
+        : null;
+      sendJson(res, 200, { conversation: projectConversation(latestSession, { contextWindow: modelClient.contextWindow, ...(activePhase ? { activePhase } : {}), agents }) });
       return;
     }
 
@@ -1172,6 +1209,7 @@ export function startRuntimeServer() {
       const session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
       if (req.method === 'DELETE') {
         if (session.activeTaskId) throw new HttpError(409, '正在运行的会话不能删除，请先停止运行');
+        if (session.scope.kind === 'workspace') await (await runtimeForSession(session)).agentManager.stopSession(conversationRef, 'Session deleted');
         await sessionRepository.deleteSession(conversationRef);
         sendJson(res, 200, { ok: true });
         return;
@@ -1419,6 +1457,7 @@ export function startRuntimeServer() {
           ...(modelClient.contextWindow ? { contextWindow: modelClient.contextWindow } : {}),
           ...(modelClient.providerDisplayName ? { providerDisplayName: modelClient.providerDisplayName } : {}),
         },
+        multiAgentEnabled: multiAgentFeatureEnabled,
         workspace: {
           ref: requestRuntime.workspace.workspaceId,
           displayName: requestRuntime.workspace.canonicalRootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? '项目',
@@ -1485,11 +1524,55 @@ export function startRuntimeServer() {
       return;
     }
 
+    // ── Session-scoped child Agent state and activity ──
+    const agentRoute = url.pathname.match(/^\/api\/session\/([^/]+)\/agents(?:\/(events)|\/([^/]+)(?:\/(stop))?)?$/);
+    if (agentRoute) {
+      if (!multiAgentFeatureEnabled) throw new HttpError(404, 'Multi-Agent is disabled');
+      const sessionId = decodeURIComponent(agentRoute[1]!);
+      const eventsRoute = agentRoute[2] === 'events';
+      const agentId = agentRoute[3] ? decodeURIComponent(agentRoute[3]) : undefined;
+      const action = agentRoute[4];
+      const session = await loadScopedSession(sessionId, requestWorkspaceScope);
+      const runtime = await runtimeForSession(session);
+      if (!agentId && !action && !eventsRoute && req.method === 'GET') {
+        sendJson(res, 200, { agents: await runtime.agentManager.list(sessionId) });
+        return;
+      }
+      if (agentId && !action && req.method === 'GET') {
+        const detail = await runtime.agentManager.detail(sessionId, agentId);
+        sendJson(res, detail ? 200 : 404, detail ?? { error: 'Agent not found' });
+        return;
+      }
+      if (agentId && action === 'stop' && req.method === 'POST') {
+        const body = await parseBody<{ reason?: string }>(req);
+        const result = await runtime.agentManager.stop({ agentId, ...(body.reason ? { reason: body.reason } : {}) }, {
+          sessionId, callerRunId: 'web-control', toolCallId: crypto.randomUUID(), delegationGroupId: 'web-control', forkSnapshot: [],
+        });
+        sendJson(res, 200, result);
+        return;
+      }
+      if (!agentId && eventsRoute && req.method === 'GET') {
+        res.writeHead(200, sseHeaders());
+        const afterSeq = Number(url.searchParams.get('afterSeq') ?? '0');
+        const replay = agentActivityStream.replay(sessionId, Number.isSafeInteger(afterSeq) && afterSeq >= 0 ? afterSeq : 0);
+        if (replay.resyncRequired) {
+          res.write(`data: ${JSON.stringify({ version: 1, sessionId, seq: replay.latestSeq + 1, at: new Date().toISOString(), event: { type: 'agent_resync_required', revision: (await runtime.agentManager.list(sessionId))?.revision ?? 0 } })}\n\n`);
+        } else {
+          for (const event of replay.events) res.write(`data: ${JSON.stringify(event)}\n\n`);
+        }
+        const unsubscribe = agentActivityStream.subscribe(sessionId, (event) => res.write(`data: ${JSON.stringify(event)}\n\n`));
+        res.on('close', unsubscribe);
+        return;
+      }
+      throw new HttpError(404, 'Agent route not found');
+    }
+
     // ── DELETE /api/session/:id ──
     if (url.pathname.startsWith('/api/session/') && !url.pathname.includes('/export') && req.method === 'DELETE') {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', ''));
       const session = await loadScopedSession(sessionId, requestWorkspaceScope);
       if (session.activeTaskId) throw new HttpError(409, 'Cannot delete a Session with an active Run');
+      if (session.scope.kind === 'workspace') await (await runtimeForSession(session)).agentManager.stopSession(sessionId, 'Session deleted');
       const ok = await sessionRepository.deleteSession(sessionId);
       sendJson(res, ok ? 200 : 404, ok ? { ok: true, sessionId } : { error: 'Session not found' });
       return;
@@ -2221,7 +2304,10 @@ export function startRuntimeServer() {
     if (shuttingDown) return;
     shuttingDown = true;
     (server as unknown as { close(callback?: () => void): void }).close();
-    await Promise.allSettled([...workspaceRuntimes.values()].map((runtime) => runtime.managedMemory.drain({ timeoutMs: 60_000 })));
+    await Promise.allSettled([...workspaceRuntimes.values()].flatMap((runtime) => [
+      runtime.agentManager.shutdown(),
+      runtime.managedMemory.drain({ timeoutMs: 60_000 }),
+    ]));
   };
   const runtimeProcess = process as unknown as { once(event: 'SIGINT' | 'SIGTERM', listener: () => void): void };
   runtimeProcess.once('SIGINT', () => { void shutdown(); });

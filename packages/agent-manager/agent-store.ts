@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { applyAgentStoreEvent, createAgentTreeSnapshot } from './agent-journal-reducer.ts';
+import { createHash } from 'node:crypto';
 import type { AgentRecord, AgentRunRecord, AgentStoreEvent, AgentTreeSnapshot } from './contracts.ts';
 
 type Header = { version: 1; type: 'agent_tree_header'; sessionId: string; rootAgentId: string; createdAt: string };
@@ -23,9 +24,10 @@ export function createAgentStore(options: { sessionsDir: string; observe?: (sess
     const previous = locks.get(sessionId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
-    locks.set(sessionId, previous.then(() => current));
+    const queued = previous.then(() => current);
+    locks.set(sessionId, queued);
     await previous;
-    try { return await action(); } finally { release(); if (locks.get(sessionId) === current) locks.delete(sessionId); }
+    try { return await action(); } finally { release(); if (locks.get(sessionId) === queued) locks.delete(sessionId); }
   };
   const publish = async (path: string, content: string) => {
     const temporary = `${path}.${crypto.randomUUID()}.tmp`;
@@ -123,6 +125,12 @@ export function createAgentStore(options: { sessionsDir: string; observe?: (sess
   const createAgentRun = (sessionId: string, agent: AgentRecord, run: AgentRunRecord, operationId: string) => append(sessionId, [
     { type: 'agent_created', agent, operationId },
     { type: 'agent_run_started', run, operationId },
+    { type: 'agent_context_committed', context: {
+      owner: { kind: 'agent', sessionId, agentId: agent.agentId }, agentRunId: run.agentRunId, mode: agent.contextMode,
+      seedMessageCount: agent.contextSeed.length,
+      seedDigest: `sha256-${createHash('sha256').update(JSON.stringify(agent.contextSeed)).digest('hex')}`,
+      committedAt: run.startedAt,
+    } },
     { type: 'agent_message_committed', agentId: agent.agentId, agentRunId: run.agentRunId, message: { role: 'user', content: run.input } },
   ], { create: true });
 

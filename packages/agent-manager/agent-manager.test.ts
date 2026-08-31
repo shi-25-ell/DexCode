@@ -6,6 +6,8 @@ import test from 'node:test';
 import { BUILTIN_AGENT_DEFINITIONS, createAgentDefinitionRegistry, parseAgentDefinitionMarkdown } from './agent-definitions.ts';
 import { createAgentStore } from './agent-store.ts';
 import type { AgentRecord, AgentRunRecord } from './contracts.ts';
+import { createAgentManager } from './agent-manager.ts';
+import type { AgentRunResult } from '../agent-core/agent-runtime.ts';
 
 function records(sessionId: string) {
   const now = new Date().toISOString();
@@ -68,4 +70,50 @@ test('Definition parser rejects unknown fields and workspace definitions overrid
     assert.equal(registry.resolve('scout')?.definition.description, 'workspace');
     assert.deepEqual(registry.diagnostics(), []);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('AgentManager runs parallel children, waits, follows up and stops without deleting identity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dexcode-agent-manager-'));
+  const sessionId = 'session-manager';
+  const store = createAgentStore({ sessionsDir: root });
+  const definitions = createAgentDefinitionRegistry();
+  const completedInputs: string[] = [];
+  const runChild = async ({ run, persistenceHooks, signal }: Parameters<Parameters<typeof createAgentManager>[0]['runChild']>[0]): Promise<AgentRunResult> => {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, run.input === 'slow' ? 500 : 15);
+      signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+    if (!signal.aborted) {
+      completedInputs.push(run.input);
+      await persistenceHooks.assistantCommitted({ role: 'assistant', content: `done:${run.input}` }, { messageId: crypto.randomUUID(), turn: 1 });
+    }
+    const now = new Date().toISOString();
+    return {
+      runId: run.agentRunId, parentRunId: run.invokedByRunId, profile: 'child', origin: 'orchestrated',
+      status: signal.aborted ? 'aborted' : 'completed', terminationReason: signal.aborted ? 'user_abort' : 'natural_completion',
+      finalContent: signal.aborted ? '' : `done:${run.input}`, messages: [], modelTurnCount: 1, modelAttemptCount: 1,
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, unknown: 0 }, toolsUsed: [], filesModified: [], fileChanges: [], skillsUsed: [],
+      contextSummaryUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, contextRefreshWarnings: [], runtimeWarnings: [],
+      startedAt: now, completedAt: now, durationMs: 1,
+    };
+  };
+  const manager = createAgentManager({ enabled: true, store, definitions, runChild });
+  const caller = (toolCallId: string) => ({ sessionId, callerRunId: 'main-run', toolCallId, delegationGroupId: 'group-1', forkSnapshot: [] });
+  try {
+    const first = await manager.spawn({ task: 'one', agent: 'researcher' }, caller('spawn-1')) as { agent_id: string };
+    const second = await manager.spawn({ task: 'two', agent: 'reviewer' }, caller('spawn-2')) as { agent_id: string };
+    const waited = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all', timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[]; timed_out: boolean };
+    assert.equal(waited.timed_out, false);
+    assert.equal(waited.completed.length, 2);
+    const followup = await manager.followup({ agentId: first.agent_id, task: 'three' }, caller('followup-1')) as { agent_run_id: string };
+    assert.match(followup.agent_run_id, /^agent-run-/);
+    await manager.wait({ agentIds: [first.agent_id], timeoutMs: 1_000 }, caller('wait-2'));
+    const slow = await manager.spawn({ task: 'slow', agent: 'researcher' }, caller('spawn-3')) as { agent_id: string };
+    assert.equal((await manager.stop({ agentId: slow.agent_id }, caller('stop-1')) as { status: string }).status, 'stopped');
+    await manager.wait({ agentIds: [slow.agent_id], timeoutMs: 1_000 }, caller('wait-3'));
+    assert.match((await manager.followup({ agentId: slow.agent_id, task: 'after-stop' }, caller('followup-2')) as { agent_run_id: string }).agent_run_id, /^agent-run-/);
+    await manager.wait({ agentIds: [slow.agent_id], timeoutMs: 1_000 }, caller('wait-4'));
+    assert.deepEqual(completedInputs.sort(), ['after-stop', 'one', 'three', 'two'].sort());
+    assert.equal((await manager.detail(sessionId, first.agent_id))?.runs.length, 2);
+  } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }); }
 });

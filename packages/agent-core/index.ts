@@ -29,12 +29,15 @@ import { createExternalMcpRegistry } from '../mcp-client/index.ts';
 import {
   buildAvailableSkillsBlock,
   createSkillRegistry,
+  createAgentScopedSkillRegistry,
   parseExplicitInvocations,
 } from '../skill-system/index.ts';
 import type { RunCommandSource } from './run-commands.ts';
 import type { ManagedMemoryCoordinator } from '../managed-memory/coordinator.ts';
 import { MEMORY_TOOL_NAMES, isMemoryTool } from '../managed-memory/tools.ts';
 import type { ManagedMemoryActor } from '../managed-memory/contracts.ts';
+import type { AgentOrchestrationPort, AgentRecord, AgentRunRecord } from '../agent-manager/contracts.ts';
+import type { AgentPersistenceHooks } from './agent-runtime.ts';
 
 function composeLifecycleHooks(...hooks: Array<AgentLifecycleHooks | undefined>): AgentLifecycleHooks {
   const active = hooks.filter((hook): hook is AgentLifecycleHooks => Boolean(hook));
@@ -158,6 +161,7 @@ export function createCodingAgent(
   skillRegistry?: SkillRegistry,
   environment?: { scope: SessionScope; rootPath?: string },
   managedMemory?: ManagedMemoryCoordinator,
+  extensions?: { orchestration?: AgentOrchestrationPort },
 ) {
   if (!environment) throw new Error('CodingAgent environment is required');
   const agentEnvironment = environment;
@@ -170,7 +174,9 @@ export function createCodingAgent(
     modelClient,
     externalMcpRegistry,
     skillRegistry: effectiveSkillRegistry,
+    orchestration: extensions?.orchestration,
   });
+  const childSkillRegistries = new Map<string, ReturnType<typeof createAgentScopedSkillRegistry>>();
   function withManagedMemoryTools(base: CodingToolHost, generation: number, actor: ManagedMemoryActor): CodingToolHost {
     if (!managedMemory) return base;
     return {
@@ -567,8 +573,58 @@ export function createCodingAgent(
     });
   }
 
+  async function runChild(input: {
+    sessionId: string;
+    agent: AgentRecord;
+    run: AgentRunRecord;
+    messages: ChatMessage[];
+    persistenceHooks: AgentPersistenceHooks;
+    signal: AbortSignal;
+  }): Promise<AgentRunResult> {
+    if (agentEnvironment.scope.kind !== 'workspace') throw new Error('Child Agents require a workspace');
+    if (!sessionRepository) throw new Error('Child Agent persistence requires a Session repository');
+    const projectMemory = input.agent.definitionSnapshot.memoryPolicy.read
+      ? await sessionRepository.readProjectMemory(agentEnvironment.scope.workspaceId)
+      : '';
+    const context = await contextManager.buildForPrompt(input.run.input, null, { projectMemory });
+    const session = await sessionRepository.loadSession(input.sessionId);
+    if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+    const sections: ContextSection[] = [
+      { source: 'systemPrompt', content: `You are a DexCode child Agent named ${input.agent.name}.\n${input.agent.definitionSnapshot.systemPrompt}\nDo not ask for interactive approval. If an operation is blocked, report it and continue safely.` },
+      ...buildSystemSections(context, projectMemory, [], '', agentEnvironment.scope).slice(1),
+    ];
+    const preparedMemory = managedMemory && input.agent.definitionSnapshot.memoryPolicy.read
+      ? await managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId: input.sessionId, contextOwnerId: `agent:${input.agent.agentId}`, runId: input.run.agentRunId, query: input.run.input, signal: input.signal })
+      : { enabled: false, generation: 0, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none' as const, durationMs: 0 } };
+    sections.push(...preparedMemory.sections);
+    const childToolHost = withManagedMemoryTools(effectiveToolHost, preparedMemory.generation, 'child-agent');
+    const childSkillRegistry = effectiveSkillRegistry && input.agent.definitionSnapshot.toolPolicy.allowSkills
+      ? (childSkillRegistries.get(input.agent.agentId) ?? (() => {
+          const registry = createAgentScopedSkillRegistry(effectiveSkillRegistry);
+          childSkillRegistries.set(input.agent.agentId, registry);
+          return registry;
+        })())
+      : undefined;
+    return runtime.runAgent({
+      identity: { runId: input.run.agentRunId, parentRunId: input.run.invokedByRunId, profile: 'child', origin: 'orchestrated' },
+      messages: pairedMessages(input.messages),
+      systemSections: sections,
+      persistence: 'child',
+      persistenceHooks: input.persistenceHooks,
+      budget: input.agent.definitionSnapshot.budget,
+      signal: input.signal,
+      productSessionId: input.sessionId,
+      toolPolicy: { ...input.agent.definitionSnapshot.toolPolicy, allowOrchestration: false },
+      toolHost: childToolHost,
+      skillRegistry: childSkillRegistry,
+      contextPolicy: { mode: 'isolated' },
+      metadata: { sessionId: input.sessionId, agentId: input.agent.agentId },
+    });
+  }
+
   return {
     runTask,
+    runChild,
     preview,
   };
 }

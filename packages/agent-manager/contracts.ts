@@ -86,6 +86,15 @@ export type AgentConversation = {
   tools: AgentToolRecord[];
 };
 
+export type AgentContextRecord = {
+  owner: { kind: 'agent'; sessionId: string; agentId: string };
+  agentRunId: string;
+  mode: AgentContextMode;
+  seedMessageCount: number;
+  seedDigest: string;
+  committedAt: string;
+};
+
 export type AgentTreeSnapshot = {
   version: 1;
   sessionId: string;
@@ -94,6 +103,7 @@ export type AgentTreeSnapshot = {
   agents: AgentRecord[];
   runs: AgentRunRecord[];
   conversations: AgentConversation[];
+  contexts: AgentContextRecord[];
   operations: Record<string, { agentId: string; agentRunId: string }>;
 };
 
@@ -101,6 +111,7 @@ export type AgentStoreEvent =
   | { type: 'agent_created'; agent: AgentRecord; operationId: string }
   | { type: 'agent_run_started'; run: AgentRunRecord; operationId: string }
   | { type: 'agent_message_committed'; agentId: string; agentRunId: string; message: ChatMessage }
+  | { type: 'agent_context_committed'; context: AgentContextRecord }
   | { type: 'agent_tool_started'; agentId: string; agentRunId: string; tool: AgentToolRecord }
   | { type: 'agent_tool_finished'; agentId: string; agentRunId: string; callId: string; presentation: ToolPresentation }
   | { type: 'agent_stop_requested'; agentId: string; agentRunId: string; reason?: string }

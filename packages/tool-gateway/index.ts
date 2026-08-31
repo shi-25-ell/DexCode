@@ -67,6 +67,7 @@ export type AgentToolExecutionContext = {
   onEffectStart?: () => void;
   signal?: AbortSignal;
   executeExternal?: (name: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
+  nonInteractive?: boolean;
 };
 
 function isWithinRoot(root: string, target: string): boolean {
@@ -631,10 +632,14 @@ export function createCodingToolHost(
     }
     const subject = await approvalSubject(toolName, input, context.origin);
     const decision = approvalPolicy.authorize(subject, approvalMode.getMode());
-    if (decision.outcome === 'deny') return { status: 'blocked', error: decision.reason };
+    if (decision.outcome === 'deny') return context.nonInteractive
+      ? { status: 'blocked', code: 'blocked_by_policy', tool: toolName, reason: decision.reason }
+      : { status: 'blocked', error: decision.reason };
     if (decision.outcome === 'ask') {
       if (!context.onApproval || context.origin === 'mcp_http') {
-        return { status: 'denied', error: '该操作需要用户批准，但当前没有可用的批准通道' };
+        return context.nonInteractive
+          ? { status: 'blocked', code: 'approval_required', tool: toolName, reason: decision.reason }
+          : { status: 'denied', error: '该操作需要用户批准，但当前没有可用的批准通道' };
       }
       const response = await context.onApproval(approvalRequest(subject, decision.options, decision.reason));
       if (response.fingerprint !== subject.fingerprint) {

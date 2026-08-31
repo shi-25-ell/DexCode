@@ -256,3 +256,52 @@ export const CONTEXT_TOOL_DEFINITIONS = [
     },
   },
 ];
+
+export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
+  {
+    type: 'function' as const,
+    function: {
+      name: 'spawn_agent',
+      description: 'Start a persistent child agent asynchronously for a bounded task.',
+      parameters: {
+        type: 'object', additionalProperties: false, required: ['task', 'agent'],
+        properties: {
+          task: { type: 'string', minLength: 1 }, agent: { type: 'string', minLength: 1 },
+          context_mode: { type: 'string', enum: ['fresh', 'fork'] }, name: { type: 'string' },
+          isolation: { type: 'string', enum: ['shared', 'worktree'] },
+        },
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'wait_agent',
+      description: 'Wait for the current Runs of one or more child agents. A timeout is a normal result.',
+      parameters: {
+        type: 'object', additionalProperties: false, required: ['agent_ids'],
+        properties: {
+          agent_ids: { type: 'array', minItems: 1, items: { type: 'string' } },
+          mode: { type: 'string', enum: ['any', 'all'] },
+          timeout_ms: { type: 'integer', minimum: 0, maximum: 60000 },
+        },
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'followup_agent',
+      description: 'Start a new Run for an existing idle child agent using its retained conversation and policy snapshot.',
+      parameters: { type: 'object', additionalProperties: false, required: ['agent_id', 'task'], properties: { agent_id: { type: 'string' }, task: { type: 'string', minLength: 1 } } },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'stop_agent',
+      description: 'Interrupt the current Run of a child agent without deleting its identity or conversation.',
+      parameters: { type: 'object', additionalProperties: false, required: ['agent_id'], properties: { agent_id: { type: 'string' }, reason: { type: 'string' } } },
+    },
+  },
+] as const;

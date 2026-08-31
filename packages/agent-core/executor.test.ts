@@ -149,6 +149,24 @@ test('streams text deltas and completes a no-tool Run', async () => {
   assert.deepEqual(events.find((event) => (event as { type?: string }).type === 'chunk'), { type: 'chunk', chunk: 'done' });
 });
 
+test('orchestration tools receive immutable caller context and stay out of ordinary Tool Cards', async () => {
+  const { host } = toolHost();
+  const events: AgentEvent[] = [];
+  const calls: unknown[] = [];
+  const orchestration = {
+    spawn: async (input: unknown, caller: unknown) => { calls.push({ input, caller }); return { agent_id: 'agent-a', status: 'running' }; },
+    wait: async () => ({}), followup: async () => ({}), stop: async () => ({}),
+  };
+  const result = await createExecutor(host, undefined, undefined, orchestration).runReActLoop(scriptedModel([
+    { content: '', reasoning: '', toolCalls: [{ id: 'spawn-1', name: 'spawn_agent', arguments: { task: 'inspect', agent: 'researcher', context_mode: 'fork' } }], finishReason: 'tool_calls' },
+    { content: 'delegated', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ]), [{ role: 'user', content: 'delegate this' }], (event) => events.push(event), undefined, { runId: 'main-1', sessionId: 'session-1' });
+  assert.equal(result.status, 'completed');
+  assert.equal(calls.length, 1);
+  assert.equal((calls[0] as { caller: { forkSnapshot: ChatMessage[] } }).caller.forkSnapshot.at(-1)?.role, 'user');
+  assert.equal(events.some((event) => event.type === 'tool' || event.type === 'tool_view' || event.type === 'tool_status'), false);
+});
+
 test('consumes one Steer at a natural safe boundary before the next model request', async () => {
   const { host } = toolHost();
   const scripted = scriptedModel([

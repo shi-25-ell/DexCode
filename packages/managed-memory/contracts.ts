@@ -5,7 +5,7 @@ import type { ChatMessage } from '../shared/types.ts';
 export const MANAGED_MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const;
 export type ManagedMemoryType = typeof MANAGED_MEMORY_TYPES[number];
 export type ManagedMemoryMode = 'off' | 'observe' | 'on';
-export type ManagedMemoryActor = 'main-agent' | 'memory-extractor' | 'memory-consolidator' | 'user';
+export type ManagedMemoryActor = 'main-agent' | 'child-agent' | 'memory-extractor' | 'memory-consolidator' | 'user';
 
 export const MANAGED_MEMORY_LIMITS = {
   maxTopics: 200,
@@ -101,6 +101,7 @@ export type PreparedManagedMemory = {
 export type PrepareManagedMemoryInput = {
   workspaceId: string;
   sessionId: string;
+  contextOwnerId?: string;
   runId: string;
   query: string;
   signal?: AbortSignal;

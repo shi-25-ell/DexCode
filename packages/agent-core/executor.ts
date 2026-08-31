@@ -28,11 +28,18 @@ import type {
 import { captureFileDiff } from './file-diff.ts';
 import { presentTool } from '../conversation-view/tool-presentation.ts';
 import type { ContextEngine, ContextSection, PreparedContext } from '../context-engine/index.ts';
+import { projectAgentFork } from '../context-engine/index.ts';
 import type { ContextPolicy, ContextUsageSnapshot } from '../shared/types.ts';
 import type { CommittedAssistantMessage, RunEventPayload, RunPhase } from '../run-protocol/index.ts';
 import { CONTEXT_TOOL_DEFINITIONS, LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitions.ts';
 import { MEMORY_TOOL_DEFINITIONS, isMemoryTool } from '../managed-memory/tools.ts';
 import type { RunCommandSource } from './run-commands.ts';
+import {
+  isAgentOrchestrationTool,
+  validateOrchestrationToolInput,
+  type AgentOrchestrationPort,
+} from '../agent-manager/contracts.ts';
+import { AGENT_ORCHESTRATION_TOOL_DEFINITIONS } from './tool-definitions.ts';
 
 export type CodingToolHost = {
   readFile: (path: string) => Promise<unknown> | unknown;
@@ -119,6 +126,8 @@ export type ReActLoopOptions = {
   maxRetriesPerTurn?: number;
   maxOutputTokens?: number;
   toolPolicy?: ToolPolicy;
+  callerAgentId?: string;
+  nonInteractive?: boolean;
   semantic?: ExecutorSemanticHooks;
   commandSource?: RunCommandSource;
   refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
@@ -314,6 +323,7 @@ export function createExecutor(
   codingToolHost: CodingToolHost,
   externalMcpRegistry?: ExternalMcpRegistry,
   skillRegistry?: SkillRegistry,
+  orchestration?: AgentOrchestrationPort,
 ) {
   const skillToolNames = new Set(SKILL_TOOL_DEFINITIONS.map((tool) => tool.function.name));
 
@@ -322,6 +332,7 @@ export function createExecutor(
     if (policy.deny?.includes(toolName)) return false;
     if (toolName.startsWith('mcp__') && policy.allowExternalMcp === false) return false;
     if (skillToolNames.has(toolName) && policy.allowSkills === false) return false;
+    if (isAgentOrchestrationTool(toolName) && policy.allowOrchestration === false) return false;
     return !policy.allow || policy.allow.includes(toolName);
   }
 
@@ -346,7 +357,10 @@ export function createExecutor(
     const enabled = codingToolHost.isToolEnabled
       ? local.filter((tool) => codingToolHost.isToolEnabled?.(tool.function.name))
       : local;
-    const builtIn = (includeContextTools ? [...enabled, ...CONTEXT_TOOL_DEFINITIONS] : enabled)
+    const withOrchestration = orchestration && policy?.allowOrchestration !== false
+      ? [...enabled, ...AGENT_ORCHESTRATION_TOOL_DEFINITIONS]
+      : enabled;
+    const builtIn = (includeContextTools ? [...withOrchestration, ...CONTEXT_TOOL_DEFINITIONS] : withOrchestration)
       .filter((tool) => policyAllows(tool.function.name, policy));
     if (policy?.allowExternalMcp === false || !externalMcpRegistry?.hasExternalTools()) return builtIn;
     const external = await externalMcpRegistry.listTools();
@@ -396,6 +410,7 @@ export function createExecutor(
       const contextRefreshWarnings: Array<{ itemId: string; message: string }> = [];
       let forceSummaryNext = false;
       let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
+      let forkSnapshot: ChatMessage[] = [];
       const base = () => ({ messages: loopMessages, finalContent, ...(finalMessageId ? { finalMessageId } : {}), toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage, contextRefreshWarnings });
       const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
       const maxAttempts = options.maxModelAttempts ?? maxTurns * 2;
@@ -513,6 +528,7 @@ export function createExecutor(
             messageStarted = true;
             emitPresentation({ type: 'assistant_message_started', turn: modelTurnCount, messageId });
           }
+          forkSnapshot = structuredClone(requestMessages);
           const turn = await collectModelTurn(observeModelEvents(modelClient.streamMessage(requestMessages, {
             tools: definitions,
             tool_choice: 'auto',
@@ -666,11 +682,12 @@ export function createExecutor(
           toolsUsed.push(toolName);
           let toolResult: unknown;
           let fileDiff: FileDiff | undefined;
-          const semanticContextTool = toolName === 'compact_context';
+          const semanticContextTool = toolName === 'compact_context' || isAgentOrchestrationTool(toolName);
           const policyDenied = !policyAllows(toolName, options.toolPolicy);
+          const orchestrationInvalid = isAgentOrchestrationTool(toolName) ? validateOrchestrationToolInput(toolName, args) : undefined;
           const invalid = policyDenied
             ? `tool forbidden by policy: ${toolName}`
-            : validationError(currentDefinitions, toolName, args);
+            : orchestrationInvalid ?? validationError(currentDefinitions, toolName, args);
           let toolRunning = false;
           const markToolRunning = () => {
             if (semanticContextTool || toolRunning) return;
@@ -698,11 +715,13 @@ export function createExecutor(
                 });
               }
             }
-            if (invalid) toolResult = { status: 'rejected', error: invalid };
+            if (invalid) toolResult = policyDenied
+              ? { status: 'blocked', code: 'blocked_by_policy', tool: toolName, reason: invalid }
+              : { status: 'rejected', error: invalid };
             if (invalid) {
               // Rejected calls still receive a paired tool result but never reach an execution adapter.
             } else if (toolName === 'ask_user') {
-              if (!onConfirm) toolResult = { error: 'confirmation unavailable' };
+              if (!onConfirm) toolResult = { status: 'blocked', code: 'approval_required', tool: toolName, reason: 'interactive confirmation is unavailable for this Agent' };
               else {
                 if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
                 toolResult = { answer: await onConfirm(String(args.question ?? 'Please confirm'), Array.isArray(args.options) ? args.options.map(String) : undefined) };
@@ -717,6 +736,36 @@ export function createExecutor(
             } else if (toolName === 'compact_context' && options.context) {
               toolResult = { status: 'scheduled', message: '上下文将在当前工具批次完成后整理' };
               forceSummaryNext = true;
+            } else if (isAgentOrchestrationTool(toolName) && orchestration) {
+              const caller = {
+                sessionId,
+                ...(options.callerAgentId ? { callerAgentId: options.callerAgentId } : {}),
+                callerRunId: runId,
+                toolCallId: call.id,
+                delegationGroupId: `delegation-${runId}-${modelTurnCount}`,
+                forkSnapshot: projectAgentFork(forkSnapshot, {
+                  maxSegments: 4,
+                  maxTokens: Math.max(1_000, Math.floor((modelClient.contextWindow ?? 32_000) * 0.25)),
+                }).messages,
+              };
+              if (toolName === 'spawn_agent') {
+                toolResult = await orchestration.spawn({
+                  task: String(args.task), agent: String(args.agent),
+                  ...(typeof args.context_mode === 'string' ? { contextMode: args.context_mode as 'fresh' | 'fork' } : {}),
+                  ...(typeof args.name === 'string' ? { name: args.name } : {}),
+                  ...(typeof args.isolation === 'string' ? { isolation: args.isolation as 'shared' | 'worktree' } : {}),
+                }, caller);
+              } else if (toolName === 'wait_agent') {
+                toolResult = await orchestration.wait({
+                  agentIds: (args.agent_ids as unknown[]).map(String),
+                  ...(typeof args.mode === 'string' ? { mode: args.mode as 'any' | 'all' } : {}),
+                  ...(typeof args.timeout_ms === 'number' ? { timeoutMs: args.timeout_ms } : {}),
+                }, caller);
+              } else if (toolName === 'followup_agent') {
+                toolResult = await orchestration.followup({ agentId: String(args.agent_id), task: String(args.task) }, caller);
+              } else {
+                toolResult = await orchestration.stop({ agentId: String(args.agent_id), ...(typeof args.reason === 'string' ? { reason: args.reason } : {}) }, caller);
+              }
             } else if (isMemoryTool(toolName) && codingToolHost.executeManagedMemoryTool) {
               markToolRunning();
               toolResult = await codingToolHost.executeManagedMemoryTool(toolName, args, { runId, ...(options.sessionId ? { sessionId: options.sessionId } : {}), signal });
@@ -756,6 +805,7 @@ export function createExecutor(
                   const execute = () => codingToolHost.executeAgentTool!(toolName, args, {
                     origin: 'agent',
                     onApproval,
+                    nonInteractive: options.nonInteractive,
                     signal,
                     onEffectStart: markToolRunning,
                   });
@@ -789,6 +839,7 @@ export function createExecutor(
                   toolResult = await codingToolHost.executeAgentTool(toolName, args, {
                     origin: 'agent',
                     onApproval,
+                    nonInteractive: options.nonInteractive,
                     signal,
                     onEffectStart: markToolRunning,
                     executeExternal: (name, input, executionSignal) => externalMcpRegistry.callTool(name, input, executionSignal),

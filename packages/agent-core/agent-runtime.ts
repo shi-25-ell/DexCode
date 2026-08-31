@@ -15,9 +15,10 @@ import {
   type ToolPolicy,
 } from './executor.ts';
 import type { RunCommandSource } from './run-commands.ts';
+import type { AgentOrchestrationPort } from '../agent-manager/contracts.ts';
 
-export type AgentProfile = 'main' | 'memory' | 'internal' | 'internal-readonly';
-export type AgentOrigin = 'user' | 'internal';
+export type AgentProfile = 'main' | 'child' | 'memory' | 'internal' | 'internal-readonly';
+export type AgentOrigin = 'user' | 'orchestrated' | 'internal';
 export type AgentPersistencePolicy = 'session' | 'none' | 'child';
 
 export type AgentRunIdentity = {
@@ -125,6 +126,7 @@ export interface AgentRunSpec {
   productSessionId?: string;
   modelClient?: ModelClient;
   toolHost?: CodingToolHost;
+  skillRegistry?: SkillRegistry;
   executorHooks?: ConfirmHook | ExecutorHooks;
   commandSource?: RunCommandSource;
   refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
@@ -174,6 +176,7 @@ type AgentRuntimeDependencies = {
   modelClient: ModelClient;
   externalMcpRegistry?: ExternalMcpRegistry;
   skillRegistry?: SkillRegistry;
+  orchestration?: AgentOrchestrationPort;
 };
 
 type InternalAgentRunSpec = Omit<
@@ -232,12 +235,11 @@ function systemMessage(sections: ContextSection[]): ChatMessage[] {
 
 export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
   async function runAgent(spec: AgentRunSpec): Promise<AgentRunResult> {
-    if (spec.persistence === 'child') throw new Error('UnsupportedPersistencePolicy: child');
     if (spec.persistence === 'none' && spec.persistenceHooks) {
       throw new Error('persistenceHooks are not allowed when persistence is none');
     }
-    if (spec.persistence === 'session' && !spec.persistenceHooks) {
-      throw new Error('persistenceHooks are required when persistence is session');
+    if (spec.persistence !== 'none' && !spec.persistenceHooks) {
+      throw new Error(`persistenceHooks are required when persistence is ${spec.persistence}`);
     }
     validateBudget(spec.budget);
 
@@ -304,7 +306,8 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
     const executor = createExecutor(
       spec.toolHost ?? dependencies.toolHost,
       dependencies.externalMcpRegistry,
-      dependencies.skillRegistry,
+      spec.skillRegistry ?? dependencies.skillRegistry,
+      dependencies.orchestration,
     );
 
     let loop: LoopResult;
@@ -323,6 +326,7 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
           maxRetriesPerTurn: spec.budget.maxRetriesPerTurn,
           maxOutputTokens: spec.budget.maxOutputTokens,
           toolPolicy: spec.toolPolicy,
+          nonInteractive: identity.origin === 'orchestrated',
           semantic,
           commandSource: spec.commandSource,
           presentation: spec.presentation,

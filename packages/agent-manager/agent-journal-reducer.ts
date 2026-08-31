@@ -10,7 +10,7 @@ function conversation(snapshot: AgentTreeSnapshot, agentId: string) {
 }
 
 export function createAgentTreeSnapshot(sessionId: string, rootAgentId: string): AgentTreeSnapshot {
-  return { version: 1, sessionId, rootAgentId, revision: 0, agents: [], runs: [], conversations: [], operations: {} };
+  return { version: 1, sessionId, rootAgentId, revision: 0, agents: [], runs: [], conversations: [], contexts: [], operations: {} };
 }
 
 export function applyAgentStoreEvent(snapshot: AgentTreeSnapshot, event: AgentStoreEvent): void {
@@ -29,6 +29,10 @@ export function applyAgentStoreEvent(snapshot: AgentTreeSnapshot, event: AgentSt
     agent.lastRunId = event.run.agentRunId;
     agent.updatedAt = event.run.startedAt;
     snapshot.operations[event.operationId] = { agentId: event.run.agentId, agentRunId: event.run.agentRunId };
+    return;
+  }
+  if (event.type === 'agent_context_committed') {
+    if (!snapshot.contexts.some((item) => item.agentRunId === event.context.agentRunId)) snapshot.contexts.push(structuredClone(event.context));
     return;
   }
   const agent = snapshot.agents.find((item) => item.agentId === event.agentId);

@@ -1,0 +1,289 @@
+import type { ChatMessage, ToolCall } from '../shared/types.ts';
+import type { AgentPersistenceHooks, AgentRunResult } from '../agent-core/agent-runtime.ts';
+import type { AgentDefinitionRegistry } from './agent-definitions.ts';
+import type { AgentStore } from './agent-store.ts';
+import {
+  type AgentCallerContext,
+  type AgentContextMode,
+  type AgentIsolation,
+  type AgentOrchestrationPort,
+  type AgentRecord,
+  type AgentRunRecord,
+  type AgentTreeSnapshot,
+  type StoredAgentRunResult,
+} from './contracts.ts';
+import { AgentManagerError, agentErrorResult } from './errors.ts';
+import { createHash } from 'node:crypto';
+
+type ChildRunInput = {
+  sessionId: string;
+  agent: AgentRecord;
+  run: AgentRunRecord;
+  messages: ChatMessage[];
+  persistenceHooks: AgentPersistenceHooks;
+  signal: AbortSignal;
+};
+
+type Handle = { sessionId: string; agentId: string; agentRunId: string; abortController: AbortController; promise: Promise<StoredAgentRunResult> };
+
+const WRITE_TOOLS = new Set(['write_file', 'patch_file', 'run_command', 'restore_snapshot', 'create_snapshot']);
+
+function isWriter(agent: AgentRecord): boolean {
+  const allow = agent.definitionSnapshot.toolPolicy.allow ?? [];
+  return allow.some((tool) => WRITE_TOOLS.has(tool));
+}
+
+function storedResult(result: AgentRunResult): StoredAgentRunResult {
+  return {
+    status: result.status === 'aborted' ? 'interrupted' : result.status,
+    terminationReason: result.terminationReason,
+    finalContent: result.finalContent,
+    usage: result.usage,
+    toolsUsed: result.toolsUsed,
+    filesModified: result.filesModified,
+    fileChanges: result.fileChanges,
+    ...(result.error ? { error: result.error } : {}),
+  };
+}
+
+function resultView(run: AgentRunRecord, maxBytes: number) {
+  if (!run.result) return { agent_run_id: run.agentRunId, status: run.status };
+  const content = new TextEncoder().encode(run.result.finalContent);
+  const truncated = content.byteLength > maxBytes;
+  return {
+    agent_run_id: run.agentRunId,
+    status: run.status,
+    result: {
+      ...run.result,
+      finalContent: truncated ? new TextDecoder().decode(content.slice(0, maxBytes)) : run.result.finalContent,
+      ...(truncated ? { truncated: true, totalBytes: content.byteLength } : {}),
+    },
+  };
+}
+
+export function multiAgentEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const value = env.MULTI_AGENT_ENABLED?.trim().toLowerCase();
+  if (value === undefined || value === '') return false;
+  if (['1', 'true', 'on'].includes(value)) return true;
+  if (['0', 'false', 'off'].includes(value)) return false;
+  throw new Error('MULTI_AGENT_ENABLED must be true or false');
+}
+
+export function createAgentManager(options: {
+  enabled: boolean;
+  store: AgentStore;
+  definitions: AgentDefinitionRegistry;
+  runChild(input: ChildRunInput): Promise<AgentRunResult>;
+  limits?: { maxConcurrentAgents?: number; maxAgentsPerSession?: number; maxDepth?: number; maxConcurrentSharedWriters?: number };
+}): AgentOrchestrationPort & {
+  list(sessionId: string): Promise<AgentTreeSnapshot | null>;
+  detail(sessionId: string, agentId: string): Promise<{ agent: AgentRecord; runs: AgentRunRecord[]; messages: ChatMessage[] } | null>;
+  stopSession(sessionId: string, reason?: string): Promise<void>;
+  shutdown(reason?: string): Promise<void>;
+} {
+  const limits = {
+    maxConcurrentAgents: options.limits?.maxConcurrentAgents ?? 4,
+    maxAgentsPerSession: options.limits?.maxAgentsPerSession ?? 8,
+    maxDepth: options.limits?.maxDepth ?? 1,
+    maxConcurrentSharedWriters: options.limits?.maxConcurrentSharedWriters ?? 1,
+  };
+  const handles = new Map<string, Handle>();
+  const locks = new Map<string, Promise<void>>();
+  const recoveredSessions = new Set<string>();
+
+  const requireEnabled = () => { if (!options.enabled) throw new AgentManagerError('feature_disabled', 'Multi-Agent is disabled'); };
+  const withAgentLock = async <T>(agentId: string, action: () => Promise<T>): Promise<T> => {
+    const previous = locks.get(agentId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => gate);
+    locks.set(agentId, queued);
+    await previous;
+    try { return await action(); } finally { release(); if (locks.get(agentId) === queued) locks.delete(agentId); }
+  };
+  const loadTree = async (sessionId: string) => {
+    const recover = !recoveredSessions.has(sessionId);
+    recoveredSessions.add(sessionId);
+    return options.store.load(sessionId, recover);
+  };
+  const treeFor = async (sessionId: string) => {
+    const tree = await loadTree(sessionId);
+    if (!tree) throw new AgentManagerError('not_found', 'This Session has no child agents');
+    return tree;
+  };
+  const findAgent = async (sessionId: string, agentId: string) => {
+    const tree = await treeFor(sessionId);
+    const agent = tree.agents.find((item) => item.agentId === agentId);
+    if (!agent) throw new AgentManagerError('not_found', `Agent not found: ${agentId}`);
+    return { tree, agent };
+  };
+
+  const launch = (agent: AgentRecord, run: AgentRunRecord, initialMessages: ChatMessage[]): Handle => {
+    const abortController = new AbortController();
+    const persistenceHooks: AgentPersistenceHooks = {
+      assistantCommitted: (message) => options.store.append(agent.sessionId, [{ type: 'agent_message_committed', agentId: agent.agentId, agentRunId: run.agentRunId, message }]).then(() => undefined),
+      toolStarted: (call: ToolCall) => {
+        let input: Record<string, unknown> | undefined;
+        try { input = JSON.parse(call.function.arguments) as Record<string, unknown>; } catch { input = undefined; }
+        return options.store.append(agent.sessionId, [{
+          type: 'agent_tool_started', agentId: agent.agentId, agentRunId: run.agentRunId,
+          tool: { callId: call.id, name: call.function.name, ...(input ? { input } : {}), status: 'running' },
+        }]).then(() => undefined);
+      },
+      toolOutcome: (message, presentation) => options.store.append(agent.sessionId, [
+        { type: 'agent_message_committed', agentId: agent.agentId, agentRunId: run.agentRunId, message },
+        { type: 'agent_tool_finished', agentId: agent.agentId, agentRunId: run.agentRunId, callId: message.tool_call_id, presentation },
+      ]).then(() => undefined),
+    };
+    const promise = (async () => {
+      let result: StoredAgentRunResult;
+      try {
+        result = storedResult(await options.runChild({ sessionId: agent.sessionId, agent, run, messages: initialMessages, persistenceHooks, signal: abortController.signal }));
+      } catch (error) {
+        result = {
+          status: abortController.signal.aborted ? 'interrupted' : 'failed',
+          terminationReason: abortController.signal.aborted ? 'user_abort' : 'model_failure',
+          finalContent: '', toolsUsed: [], filesModified: [],
+          error: { code: 'CHILD_RUN_FAILURE', message: error instanceof Error ? error.message : String(error) },
+        };
+      }
+      await options.store.append(agent.sessionId, [{ type: 'agent_run_terminal', agentId: agent.agentId, agentRunId: run.agentRunId, status: result.status, result, completedAt: new Date().toISOString() }]);
+      handles.delete(agent.agentId);
+      return result;
+    })();
+    const handle = { sessionId: agent.sessionId, agentId: agent.agentId, agentRunId: run.agentRunId, abortController, promise };
+    handles.set(agent.agentId, handle);
+    return handle;
+  };
+
+  async function spawnRaw(input: { task: string; agent: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext) {
+    requireEnabled();
+    if (caller.callerAgentId && limits.maxDepth <= 1) throw new AgentManagerError('depth_exceeded', 'Child agents cannot spawn recursively');
+    const existing = await loadTree(caller.sessionId);
+    const replay = existing?.operations[`${caller.callerRunId}:${caller.toolCallId}`];
+    if (replay?.agentRunId) return { agent_id: replay.agentId, agent_run_id: replay.agentRunId, status: 'running', replayed: true };
+    if ((existing?.agents.length ?? 0) >= limits.maxAgentsPerSession) throw new AgentManagerError('capacity_exceeded', 'Session child-agent capacity is exhausted');
+    if (handles.size >= limits.maxConcurrentAgents) throw new AgentManagerError('capacity_exceeded', 'Concurrent child-agent capacity is exhausted');
+    const resolved = options.definitions.resolve(input.agent);
+    if (!resolved) throw new AgentManagerError('definition_not_found', `Agent definition not found: ${input.agent}`);
+    const contextMode = input.contextMode ?? resolved.definition.defaultContextMode;
+    if (!resolved.definition.allowedContextModes.includes(contextMode)) throw new AgentManagerError('context_mode_forbidden', `Context mode ${contextMode} is not allowed`);
+    const isolation = input.isolation ?? resolved.definition.isolationPolicy.default;
+    if (!resolved.definition.isolationPolicy.allowed.includes(isolation)) throw new AgentManagerError('isolation_forbidden', `Isolation ${isolation} is not allowed`);
+    const now = new Date().toISOString();
+    const agentId = `agent-${crypto.randomUUID()}`;
+    const agentRunId = `agent-run-${crypto.randomUUID()}`;
+    const rootAgentId = existing?.rootAgentId ?? `agent-root-${caller.sessionId.slice('session-'.length)}`;
+    const agent: AgentRecord = {
+      agentId, sessionId: caller.sessionId, rootAgentId, parentAgentId: caller.callerAgentId ?? rootAgentId,
+      createdByRunId: caller.callerRunId, name: input.name?.trim() || resolved.definition.name, task: input.task,
+      contextMode, isolation, definitionName: resolved.definition.name, definitionDigest: resolved.digest,
+      definitionSnapshot: resolved.definition, contextSeed: contextMode === 'fork' ? structuredClone(caller.forkSnapshot) : [],
+      delegationGroupId: caller.delegationGroupId, status: 'running', currentRunId: agentRunId, lastRunId: agentRunId, createdAt: now, updatedAt: now,
+    };
+    if (isWriter(agent) && [...handles.values()].filter((handle) => {
+      const running = existing?.agents.find((item) => item.agentId === handle.agentId);
+      return running?.isolation === 'shared' && isWriter(running);
+    }).length >= limits.maxConcurrentSharedWriters) throw new AgentManagerError('write_capacity_exceeded', 'A shared-workspace writer is already running');
+    const run: AgentRunRecord = { agentRunId, agentId, invokedByRunId: caller.callerRunId, trigger: 'spawn', status: 'running', input: input.task, startedAt: now };
+    await options.store.createAgentRun(caller.sessionId, agent, run, `${caller.callerRunId}:${caller.toolCallId}`);
+    launch(agent, run, [...agent.contextSeed, { role: 'user', content: input.task }]);
+    return { agent_id: agentId, agent_run_id: agentRunId, status: 'running' };
+  }
+
+  async function followupRaw(input: { agentId: string; task: string }, caller: AgentCallerContext) {
+    requireEnabled();
+    return withAgentLock(input.agentId, async () => {
+      const { tree, agent } = await findAgent(caller.sessionId, input.agentId);
+      if (agent.currentRunId || handles.has(agent.agentId)) throw new AgentManagerError('agent_busy', `Agent is already running: ${agent.agentId}`);
+      const operationId = `${caller.callerRunId}:${caller.toolCallId}`;
+      const replay = tree.operations[operationId];
+      if (replay?.agentRunId) return { agent_id: replay.agentId, agent_run_id: replay.agentRunId, status: 'running', replayed: true };
+      const now = new Date().toISOString();
+      const run: AgentRunRecord = { agentRunId: `agent-run-${crypto.randomUUID()}`, agentId: agent.agentId, invokedByRunId: caller.callerRunId, trigger: 'followup', status: 'running', input: input.task, startedAt: now };
+      const next = await options.store.append(caller.sessionId, [
+        { type: 'agent_run_started', run, operationId },
+        { type: 'agent_context_committed', context: {
+          owner: { kind: 'agent', sessionId: caller.sessionId, agentId: agent.agentId }, agentRunId: run.agentRunId, mode: agent.contextMode,
+          seedMessageCount: tree.conversations.find((item) => item.agentId === agent.agentId)?.messages.length ?? 0,
+          seedDigest: `sha256-${createHash('sha256').update(JSON.stringify(tree.conversations.find((item) => item.agentId === agent.agentId)?.messages ?? [])).digest('hex')}`,
+          committedAt: now,
+        } },
+        { type: 'agent_message_committed', agentId: agent.agentId, agentRunId: run.agentRunId, message: { role: 'user', content: input.task } },
+      ]);
+      const messages = next.conversations.find((item) => item.agentId === agent.agentId)?.messages ?? [{ role: 'user', content: input.task }];
+      launch(agent, run, messages);
+      return { agent_id: agent.agentId, agent_run_id: run.agentRunId, status: 'running' };
+    });
+  }
+
+  async function stopRaw(input: { agentId: string; reason?: string }, caller: AgentCallerContext) {
+    requireEnabled();
+    const { agent } = await findAgent(caller.sessionId, input.agentId);
+    const handle = handles.get(agent.agentId);
+    if (!handle || !agent.currentRunId) return { agent_id: agent.agentId, status: 'already_idle' };
+    await options.store.append(caller.sessionId, [{ type: 'agent_stop_requested', agentId: agent.agentId, agentRunId: handle.agentRunId, ...(input.reason ? { reason: input.reason } : {}) }]);
+    handle.abortController.abort(input.reason ?? 'Stopped by parent Agent');
+    return { agent_id: agent.agentId, agent_run_id: handle.agentRunId, status: 'stopped' };
+  }
+
+  async function waitRaw(input: { agentIds: string[]; mode?: 'any' | 'all'; timeoutMs?: number }, caller: AgentCallerContext) {
+    requireEnabled();
+    const tree = await treeFor(caller.sessionId);
+    const targets = input.agentIds.map((agentId) => {
+      const agent = tree.agents.find((item) => item.agentId === agentId);
+      if (!agent) throw new AgentManagerError('not_found', `Agent not found: ${agentId}`);
+      const runId = agent.currentRunId ?? agent.lastRunId;
+      const run = tree.runs.find((item) => item.agentRunId === runId);
+      if (!run) throw new AgentManagerError('not_found', `Agent has no Run: ${agentId}`);
+      return { agent, run, handle: handles.get(agentId) };
+    });
+    const mode = input.mode ?? 'all';
+    const timeoutMs = input.timeoutMs ?? 60_000;
+    const waitable = targets.filter((target) => target.run.status === 'running' && target.handle?.agentRunId === target.run.agentRunId);
+    let timedOut = false;
+    if (waitable.length > 0 && timeoutMs > 0) {
+      const completion = mode === 'any'
+        ? Promise.race(waitable.map((item) => item.handle!.promise))
+        : Promise.all(waitable.map((item) => item.handle!.promise));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([completion, new Promise<void>((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(); }, timeoutMs); })]);
+      if (timer) clearTimeout(timer);
+    } else if (waitable.length > 0) timedOut = true;
+    const latest = (await options.store.load(caller.sessionId, false))!;
+    const completed = targets.flatMap(({ agent, run }) => {
+      const current = latest.runs.find((item) => item.agentRunId === run.agentRunId)!;
+      return current.status === 'running' ? [] : [{ agent_id: agent.agentId, ...resultView(current, agent.definitionSnapshot.budget.maxResultBytes ?? 64 * 1024) }];
+    });
+    return { mode, timed_out: timedOut, completed, running: targets.filter(({ run }) => latest.runs.find((item) => item.agentRunId === run.agentRunId)?.status === 'running').map(({ agent, run }) => ({ agent_id: agent.agentId, agent_run_id: run.agentRunId })) };
+  }
+
+  return {
+    spawn: async (input, caller) => {
+      try { return await withAgentLock(`operation:${caller.sessionId}:${caller.callerRunId}:${caller.toolCallId}`, () => spawnRaw(input, caller)); }
+      catch (error) { return agentErrorResult(error); }
+    },
+    wait: async (input, caller) => { try { return await waitRaw(input, caller); } catch (error) { return agentErrorResult(error); } },
+    followup: async (input, caller) => { try { return await followupRaw(input, caller); } catch (error) { return agentErrorResult(error); } },
+    stop: async (input, caller) => { try { return await stopRaw(input, caller); } catch (error) { return agentErrorResult(error); } },
+    list: (sessionId) => loadTree(sessionId),
+    async detail(sessionId, agentId) {
+      const tree = await loadTree(sessionId);
+      const agent = tree?.agents.find((item) => item.agentId === agentId);
+      if (!tree || !agent) return null;
+      return { agent, runs: tree.runs.filter((run) => run.agentId === agentId), messages: tree.conversations.find((item) => item.agentId === agentId)?.messages ?? [] };
+    },
+    async stopSession(sessionId, reason = 'Session is closing') {
+      const sessionHandles = [...handles.values()].filter((handle) => handle.sessionId === sessionId);
+      for (const handle of sessionHandles) handle.abortController.abort(reason);
+      await Promise.allSettled(sessionHandles.map((handle) => handle.promise));
+    },
+    async shutdown(reason = 'Runtime is shutting down') {
+      const active = [...handles.values()];
+      for (const handle of active) handle.abortController.abort(reason);
+      await Promise.allSettled(active.map((handle) => handle.promise));
+    },
+  };
+}
+
+export type AgentManager = ReturnType<typeof createAgentManager>;
