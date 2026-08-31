@@ -4,6 +4,8 @@
 
 > Web 主界面下一阶段的产品与开发基线见 [`web-ui-refactor-development-design.md`](web-ui-refactor-development-design.md)。该文档覆盖流式单列对话、侧边栏、草稿会话、Tool Card、展示投影、浅色主题和 React 定向重构。
 
+> 全局只读、白名单与完全访问三种批准模式的开发基线见 [`approval-mode-development-plan.md`](approval-mode-development-plan.md)。该文档覆盖实时生效语义、统一工具批准策略、能力中心前端改造、白名单迁移和分步本地提交计划。
+
 这是一个面向本地工作区的 DexCode，目标是验证一条最核心的闭环：
 
 1. 用户输入需求
