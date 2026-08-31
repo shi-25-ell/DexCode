@@ -8,6 +8,7 @@ export type QueueState = {
 };
 
 export type QueueAction =
+  | { type: 'session_reset' }
   | { type: 'queue_snapshot'; items: QueueItem[]; revision: number; paused: boolean; activeRunId?: string }
   | { type: 'queue_upsert'; item: QueueItem; revision: number }
   | { type: 'queue_remove'; itemId: string; revision: number }
@@ -19,6 +20,7 @@ export type QueueAction =
 export const initialQueueState: QueueState = { items: [], revision: 0, paused: false };
 
 export function queueReducer(state: QueueState, action: QueueAction): QueueState {
+  if (action.type === 'session_reset') return initialQueueState;
   if ('revision' in action && action.revision < state.revision) return state;
   if (action.type === 'queue_snapshot') {
     return { items: action.items.filter((item) => item.status === 'queued'), revision: action.revision, paused: action.paused, ...(action.activeRunId ? { activeRunId: action.activeRunId } : {}) };

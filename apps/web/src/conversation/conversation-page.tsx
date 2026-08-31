@@ -92,6 +92,9 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const queueBusyRef = useRef<Set<string>>(new Set());
   const queuedContentRef = useRef<Map<string, string>>(new Map());
   const workspaceRef = scopeWorkspaceRef(scope);
+  const scopeIdentity = scope.kind === 'workspace' ? `workspace:${scope.workspaceRef}` : 'general';
+  const conversationIdentity = `${scopeIdentity}:${conversationRef ?? 'draft'}`;
+  const previousConversationIdentityRef = useRef(conversationIdentity);
   const snapshot = useQuery({
     queryKey: ['conversation', scope, conversationRef],
     queryFn: () => getConversation(scope, conversationRef!),
@@ -105,7 +108,25 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const loadingConversation = Boolean(conversationRef && !snapshot.data && snapshot.isPending);
 
   useEffect(() => {
-    if (snapshot.data && !streamingRef.current) {
+    const previousIdentity = previousConversationIdentityRef.current;
+    const materializedCurrentDraft = previousIdentity === `${scopeIdentity}:draft`
+      && Boolean(conversationRef)
+      && streamingRef.current;
+    previousConversationIdentityRef.current = conversationIdentity;
+    stickToBottom.current = true;
+    setAtBottom(true);
+
+    if (!materializedCurrentDraft && (previousIdentity !== conversationIdentity || !conversationRef)) {
+      queueDispatch({ type: 'session_reset' });
+      queuedContentRef.current.clear();
+    }
+    if (!conversationRef) {
+      dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], queuedItems: [], queuePaused: false, revision: 0, contextUsage: { source: 'unknown', timing: 'next_request' } } });
+    }
+  }, [conversationIdentity, conversationRef, scopeIdentity]);
+
+  useEffect(() => {
+    if (snapshot.data && snapshot.data.ref === conversationRef && !streamingRef.current) {
       queuedContentRef.current = new Map(snapshot.data.queuedItems.map((item) => [item.itemId, item.content]));
       dispatch({ type: 'hydrate', snapshot: snapshot.data });
       queueDispatch({
@@ -116,17 +137,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
         ...(snapshot.data.activeRun ? { activeRunId: snapshot.data.activeRun.runId } : {}),
       });
     }
-  }, [snapshot.data]);
-
-  useEffect(() => {
-    stickToBottom.current = true;
-    setAtBottom(true);
-    if (!conversationRef) {
-      dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], queuedItems: [], queuePaused: false, revision: 0, contextUsage: { source: 'unknown', timing: 'next_request' } } });
-      queueDispatch({ type: 'queue_snapshot', items: [], revision: 0, paused: false });
-      queuedContentRef.current.clear();
-    }
-  }, [conversationRef, scope.kind, scope.kind === 'workspace' ? scope.workspaceRef : 'general']);
+  }, [conversationRef, snapshot.data]);
 
   useLayoutEffect(() => {
     if (!stickToBottom.current) return;

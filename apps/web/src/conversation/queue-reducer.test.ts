@@ -20,6 +20,15 @@ describe('queueReducer', () => {
     expect(queueReducer(state, { type: 'queue_upsert', item: item('stale', 4), revision: 4 })).toBe(state);
   });
 
+  it('starts a fresh revision domain when the conversation identity changes', () => {
+    let state = queueReducer(initialQueueState, { type: 'queue_snapshot', items: [], revision: 119, paused: false });
+    state = queueReducer(state, { type: 'session_reset' });
+    state = queueReducer(state, { type: 'queue_upsert', item: item('new-session-steer', 8), revision: 8 });
+
+    expect(state.revision).toBe(8);
+    expect(state.items.map((entry) => entry.itemId)).toEqual(['new-session-steer']);
+  });
+
   it('removes consumed items and tracks the active chained Run', () => {
     let state = queueReducer(initialQueueState, { type: 'queue_snapshot', items: [item('queue-1', 1)], revision: 1, paused: true });
     state = queueReducer(state, { type: 'run_started', runId: 'run-2', sourceItemId: 'queue-1' });
