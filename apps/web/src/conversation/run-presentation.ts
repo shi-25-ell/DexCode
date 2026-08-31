@@ -33,6 +33,12 @@ export type AssistantDraftView = {
   hasToolCalls: boolean;
 };
 
+export type RunActivityEntry =
+  | { kind: 'assistant'; messageId: string }
+  | { kind: 'tool'; callId: string }
+  | { kind: 'approval'; approvalId: string }
+  | { kind: 'context'; operationRef: string };
+
 export type ActiveRunView = {
   runId: string;
   startedAt: string;
@@ -46,6 +52,7 @@ export type ActiveRunView = {
   toolsByCallId: Record<string, ToolPresentation>;
   approvalsById: Record<string, Extract<ConversationItem, { kind: 'approval' }>>;
   contextsById: Record<string, ContextPresentation>;
+  activityOrder: RunActivityEntry[];
 };
 
 export type RunPresentation = {
@@ -106,6 +113,7 @@ export function beginRunPresentation(state: RunPresentation, input: { content: s
       toolsByCallId: {},
       approvalsById: {},
       contextsById: {},
+      activityOrder: [],
     },
     title: state.committedItems.length === 0 ? shortTitle(input.content) : state.title,
     status: 'running',
@@ -132,7 +140,22 @@ function createActiveRun(envelope: RunEventEnvelope): ActiveRunView {
     toolsByCallId: {},
     approvalsById: {},
     contextsById: {},
+    activityOrder: [],
   };
+}
+
+function activityKey(entry: RunActivityEntry): string {
+  if (entry.kind === 'assistant') return `assistant:${entry.messageId}`;
+  if (entry.kind === 'tool') return `tool:${entry.callId}`;
+  if (entry.kind === 'approval') return `approval:${entry.approvalId}`;
+  return `context:${entry.operationRef}`;
+}
+
+function appendActivity(active: ActiveRunView, entry: RunActivityEntry): RunActivityEntry[] {
+  const key = activityKey(entry);
+  return active.activityOrder.some((item) => activityKey(item) === key)
+    ? active.activityOrder
+    : [...active.activityOrder, entry];
 }
 
 function appendBounded(current: string, delta: string, limit: number): { content: string; truncated: boolean } {
@@ -236,6 +259,7 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
       activeRun: {
         ...active,
         assistantDraft: { messageId: event.messageId, turn: event.turn, blocks: {}, committed: false, hasToolCalls: false },
+        activityOrder: appendActivity(active, { kind: 'assistant', messageId: event.messageId }),
       },
     };
   }
@@ -260,6 +284,16 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
       },
     };
   }
+  if (event.type === 'assistant_message_reset') {
+    if (!active.assistantDraft || active.assistantDraft.messageId !== event.messageId) return { ...state, needsResync: true };
+    return {
+      ...state,
+      activeRun: {
+        ...active,
+        assistantDraft: { ...active.assistantDraft, blocks: {}, hasToolCalls: false },
+      },
+    };
+  }
   if (event.type === 'assistant_message_committed') {
     const draft = draftFromCommitted(event.message);
     const committedMessages = event.message.toolCalls.length > 0 && event.message.content.trim()
@@ -278,6 +312,7 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
         ...active,
         committedMessages,
         assistantDraft: event.message.toolCalls.length > 0 ? null : draft,
+        activityOrder: appendActivity(active, { kind: 'assistant', messageId: event.message.messageId }),
       },
       ...(!event.message.toolCalls.length ? { finalMessageId: event.message.messageId } : {}),
     };
@@ -285,14 +320,22 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
   if (event.type === 'tool_started' || event.type === 'tool_progress' || event.type === 'tool_finished') {
     return {
       ...state,
-      activeRun: { ...active, toolsByCallId: { ...active.toolsByCallId, [event.callId]: boundedTool(event.presentation as ToolPresentation) } },
+      activeRun: {
+        ...active,
+        toolsByCallId: { ...active.toolsByCallId, [event.callId]: boundedTool(event.presentation as ToolPresentation) },
+        activityOrder: appendActivity(active, { kind: 'tool', callId: event.callId }),
+      },
     };
   }
   if (event.type === 'approval_requested') {
     const item = approvalItem(event.request);
     return {
       ...state,
-      activeRun: { ...active, approvalsById: { ...active.approvalsById, [event.request.approvalId]: item } },
+      activeRun: {
+        ...active,
+        approvalsById: { ...active.approvalsById, [event.request.approvalId]: item },
+        activityOrder: appendActivity(active, { kind: 'approval', approvalId: event.request.approvalId }),
+      },
       status: 'waiting',
     };
   }
@@ -307,7 +350,14 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
   }
   if (event.type === 'context_usage_changed') return { ...state, contextUsage: event.usage };
   if (event.type === 'context_activity_changed') {
-    return { ...state, activeRun: { ...active, contextsById: { ...active.contextsById, [event.presentation.operationRef]: event.presentation } } };
+    return {
+      ...state,
+      activeRun: {
+        ...active,
+        contextsById: { ...active.contextsById, [event.presentation.operationRef]: event.presentation },
+        activityOrder: appendActivity(active, { kind: 'context', operationRef: event.presentation.operationRef }),
+      },
+    };
   }
   if (event.type === 'run_finished') {
     const finalMessageId = event.finalMessageId;

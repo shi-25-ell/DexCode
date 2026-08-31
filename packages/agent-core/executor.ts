@@ -95,6 +95,7 @@ export type TerminationReason =
   | 'model_failure'
   | 'invalid_model_response'
   | 'model_attempt_limit'
+  | 'output_token_limit'
   | 'model_turn_limit';
 
 export type LoopResult = {
@@ -146,6 +147,19 @@ export type ReActLoopOptions = {
 export type Executor = ReturnType<typeof createExecutor>;
 
 const MAX_ITERATIONS = 20;
+const INITIAL_OUTPUT_TOKENS = 16_384;
+const SECOND_OUTPUT_TOKENS = 32_768;
+const MAX_RECOVERY_OUTPUT_TOKENS = 65_536;
+const MAX_CONTINUATIONS = 3;
+const CONTINUE_AFTER_LENGTH = 'Output token limit reached. Resume directly from the exact stopping point. Do not apologize, recap, or repeat completed content; keep the remaining work concise.';
+
+function outputTokenBudgets(model: ModelClient, runMaximum?: number): number[] {
+  const declaredInitial = model.outputTokenLimits?.initial ?? model.maxOutputTokens ?? INITIAL_OUTPUT_TOKENS;
+  const declaredMaximum = model.outputTokenLimits?.maximum ?? model.maxOutputTokens ?? INITIAL_OUTPUT_TOKENS;
+  const maximum = Math.max(1, Math.floor(Math.min(declaredMaximum, runMaximum ?? Number.POSITIVE_INFINITY, MAX_RECOVERY_OUTPUT_TOKENS)));
+  const initial = Math.max(1, Math.floor(Math.min(INITIAL_OUTPUT_TOKENS, declaredInitial, maximum)));
+  return [...new Set([initial, Math.min(SECOND_OUTPUT_TOKENS, maximum), maximum])].sort((left, right) => left - right);
+}
 
 function aborted(base: Omit<LoopResult, 'status' | 'terminationReason'>): LoopResult {
   return { ...base, status: 'aborted', terminationReason: 'user_abort' };
@@ -413,7 +427,7 @@ export function createExecutor(
       let forkSnapshot: ChatMessage[] = [];
       const base = () => ({ messages: loopMessages, finalContent, ...(finalMessageId ? { finalMessageId } : {}), toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage, contextRefreshWarnings });
       const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
-      const maxAttempts = options.maxModelAttempts ?? maxTurns * 2;
+      const maxAttempts = options.maxModelAttempts ?? maxTurns * (MAX_CONTINUATIONS + 3);
       const maxRetries = options.maxRetriesPerTurn ?? 1;
       const sessionId = options.sessionId ?? options.context?.sessionId ?? '';
 
@@ -457,8 +471,19 @@ export function createExecutor(
         let overflowRecovered = false;
         let recoverNext = false;
         let response: ModelResponse | undefined;
+        const outputBudgets = outputTokenBudgets(modelClient, options.maxOutputTokens);
+        let outputBudgetIndex = 0;
+        let continuationCount = 0;
+        let continuedContent = '';
+        let continuedReasoning = '';
         const messageId = `${runId}:message:${modelTurnCount}`;
         let messageStarted = false;
+        const resetDraft = () => {
+          if (!options.presentation || !messageStarted) return;
+          emitPresentation({ type: 'assistant_message_reset', messageId });
+          if (continuedReasoning) emitPresentation({ type: 'assistant_content_delta', messageId, contentIndex: 0, kind: 'reasoning', delta: continuedReasoning });
+          if (continuedContent) emitPresentation({ type: 'assistant_content_delta', messageId, contentIndex: 1, kind: 'text', delta: continuedContent });
+        };
         while (!response) {
           if (modelAttemptCount >= maxAttempts) {
             return { ...base(), status: 'limited', terminationReason: 'model_attempt_limit' };
@@ -468,7 +493,16 @@ export function createExecutor(
           const definitions = await buildToolDefinitions(Boolean(options.context), options.toolPolicy);
           currentDefinitions = definitions;
           let prepared: PreparedContext | undefined;
-          let requestMessages: ChatMessage[] = workingMessages;
+          const continuationMessages: ChatMessage[] = continuationCount > 0
+            ? [
+                ...(continuedContent ? [{ role: 'assistant' as const, content: continuedContent }] : []),
+                { role: 'user', content: CONTINUE_AFTER_LENGTH },
+              ]
+            : [];
+          const requestCanonicalMessages = continuationMessages.length > 0
+            ? [...workingMessages, ...continuationMessages]
+            : workingMessages;
+          let requestMessages: ChatMessage[] = requestCanonicalMessages;
           if (options.context) {
             const prepareInput = {
               sessionId: options.context.sessionId,
@@ -477,9 +511,9 @@ export function createExecutor(
               attempt: modelAttemptCount,
               activeRequest: options.context.activeRequest,
               systemSections: options.context.systemSections,
-              canonicalMessages: workingMessages,
+              canonicalMessages: requestCanonicalMessages,
               toolDefinitions: definitions,
-              policy: options.context.policy,
+              policy: { ...options.context.policy, maxOutputTokens: outputBudgets[outputBudgetIndex] },
               forceSummary: forceSummaryNext,
               signal,
               onActivity: (presentation: import('../shared/types.ts').ContextPresentation) => {
@@ -533,7 +567,7 @@ export function createExecutor(
             tools: definitions,
             tool_choice: 'auto',
             parallel_tool_calls: false,
-            ...(options.maxOutputTokens !== undefined ? { max_tokens: options.maxOutputTokens } : {}),
+            max_tokens: outputBudgets[outputBudgetIndex],
             signal,
           }), onEvent, options.presentation ? { messageId, emit: emitPresentation, phase: emitPhase } : undefined));
           if (signal.aborted || (turn.status === 'failed' && turn.failure.category === 'cancelled')) {
@@ -603,11 +637,36 @@ export function createExecutor(
             if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: latestContextUsage });
             else onEvent({ type: 'context_usage', ...latestContextUsage });
           }
-          response = turn.response;
+          usage = usageSummary(usage, turn.response.usage);
+          latestInputTokens = turn.response.usage?.inputTokens;
+          if (turn.response.finishReason === 'length') {
+            if (outputBudgetIndex < outputBudgets.length - 1) {
+              outputBudgetIndex += 1;
+              emitPhase('retrying');
+              resetDraft();
+              continue;
+            }
+            continuedContent += turn.response.content;
+            continuedReasoning += turn.response.reasoning;
+            if (continuationCount < MAX_CONTINUATIONS) {
+              continuationCount += 1;
+              emitPhase('retrying');
+              resetDraft();
+              continue;
+            }
+            response = { ...turn.response, content: continuedContent, reasoning: continuedReasoning, toolCalls: [] };
+            continue;
+          }
+          response = continuedContent || continuedReasoning
+            ? {
+                ...turn.response,
+                content: continuedContent + turn.response.content,
+                reasoning: continuedReasoning + turn.response.reasoning,
+              }
+            : turn.response;
         }
 
-        usage = usageSummary(usage, response.usage);
-        latestInputTokens = response.usage?.inputTokens;
+        latestInputTokens = response.usage?.inputTokens ?? latestInputTokens;
         if (!options.context) {
           latestContextUsage = {
             ...(latestInputTokens !== undefined ? { usedTokens: latestInputTokens } : {}),
@@ -621,7 +680,7 @@ export function createExecutor(
           else onEvent({ type: 'context_usage', ...latestContextUsage });
         }
         if (response.finishReason === 'length' && response.toolCalls.length === 0 && response.content.length === 0) {
-          return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
+          return { ...base(), status: 'limited', terminationReason: 'output_token_limit' };
         }
         finalContent = response.content || finalContent;
         const assistant = assistantMessage(response);
@@ -633,7 +692,7 @@ export function createExecutor(
           finalMessageId = messageId;
           await options.semantic?.turnEnded?.({ turn: modelTurnCount, toolCalls: [], finishReason: response.finishReason });
           if (response.finishReason === 'length') {
-            return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
+            return { ...base(), status: 'limited', terminationReason: 'output_token_limit' };
           }
           const decision = await options.commandSource?.atSafeBoundary({
             sessionId,

@@ -17,11 +17,55 @@ function run(overrides: Partial<ActiveRunView> = {}): ActiveRunView {
     toolsByCallId: {},
     approvalsById: {},
     contextsById: {},
+    activityOrder: [],
     ...overrides,
   };
 }
 
 describe('RunActivity', () => {
+  it('renders live assistant, tool, approval, and later assistant output in event order', () => {
+    render(createElement(RunActivity, {
+      run: run({
+        committedMessages: [{
+          id: 'message-1',
+          kind: 'assistant',
+          content: '先说明计划',
+          messageId: 'message-1',
+          runId: 'run-1',
+          turn: 1,
+        }],
+        toolsByCallId: {
+          'call-1': { callRef: 'call-1', category: 'command', name: '执行命令', status: 'queued', summary: '等待批准' },
+        },
+        approvalsById: {
+          'approval-1': { id: 'approval-1', kind: 'approval', approvalRef: 'approval-1', approvalKind: 'question', title: '允许执行吗？', options: ['允许', '拒绝'] },
+        },
+        assistantDraft: {
+          messageId: 'message-2',
+          turn: 2,
+          committed: false,
+          hasToolCalls: false,
+          blocks: { 0: { contentIndex: 0, kind: 'text', content: '命令完成后的说明' } },
+        },
+        activityOrder: [
+          { kind: 'assistant', messageId: 'message-1' },
+          { kind: 'tool', callId: 'call-1' },
+          { kind: 'approval', approvalId: 'approval-1' },
+          { kind: 'assistant', messageId: 'message-2' },
+        ],
+      }),
+      needsResync: false,
+    }));
+
+    const firstMessage = screen.getByText('先说明计划');
+    const tool = screen.getByText('执行命令');
+    const approval = screen.getByText('允许执行吗？');
+    const laterMessage = screen.getByText('命令完成后的说明');
+    expect(firstMessage.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(tool.compareDocumentPosition(approval) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(approval.compareDocumentPosition(laterMessage) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
   it('shows an exact phase without rendering an empty reasoning disclosure', () => {
     render(createElement(RunActivity, { run: run(), needsResync: false }));
     expect(screen.getByRole('status')).toHaveTextContent('正在请求模型……');
@@ -39,6 +83,7 @@ describe('RunActivity', () => {
           hasToolCalls: false,
           blocks: { 0: { contentIndex: 0, kind: 'reasoning', content: '只在运行态展示的思考' } },
         },
+        activityOrder: [{ kind: 'assistant', messageId: 'message-1' }],
       }),
       needsResync: false,
     }));
@@ -59,6 +104,10 @@ describe('RunActivity', () => {
         approvalsById: {
           'approval-1': { id: 'approval-1', kind: 'approval', approvalRef: 'approval-1', approvalKind: 'question', title: '继续执行吗？', options: ['继续', '停止'] },
         },
+        activityOrder: [
+          { kind: 'tool', callId: 'call-1' },
+          { kind: 'approval', approvalId: 'approval-1' },
+        ],
       }),
       needsResync: true,
     }));

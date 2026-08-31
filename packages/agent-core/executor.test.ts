@@ -413,35 +413,34 @@ test('returns limited rather than completed when the model turn budget is exhaus
   assert.equal(result.terminationReason, 'model_turn_limit');
 });
 
-test('continues a later Run after an empty length-limited response without persisting an invalid assistant message', async () => {
+test('escalates 16k to 32k to 64k, then continues a length-limited response', async () => {
   const { host } = toolHost();
-  const canonicalMessages: ChatMessage[] = [{ role: 'user', content: 'count the files' }];
-  const semantic = {
-    assistantCommitted: async (message: ChatMessage) => { canonicalMessages.push(message); },
-    toolStarted: async () => {},
-    toolOutcome: async () => {},
+  const budgets: number[] = [];
+  const responses: ModelResponse[] = [
+    { content: 'discard-16', reasoning: '', toolCalls: [], finishReason: 'length' },
+    { content: 'discard-32', reasoning: '', toolCalls: [], finishReason: 'length' },
+    { content: 'first ', reasoning: '', toolCalls: [], finishReason: 'length' },
+    { content: 'second', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ];
+  let index = 0;
+  const model: ModelClient = {
+    model: 'large',
+    baseUrl: 'memory://large',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+    outputTokenLimits: { initial: 16_384, maximum: 128_000 },
+    async *streamMessage(_messages, options): AsyncIterable<ModelEvent> {
+      budgets.push(options?.max_tokens ?? 0);
+      const response = responses[index++];
+      yield { version: 1, type: 'turn_started', attemptId: `attempt-${index}` };
+      if (response.content) yield { version: 1, type: 'text_delta', delta: response.content };
+      yield { version: 1, type: 'turn_completed', response };
+    },
   };
-
-  const limited = await createExecutor(host).runReActLoop(scriptedModel([{
-    content: '',
-    reasoning: '',
-    toolCalls: [],
-    finishReason: 'length',
-  }]), canonicalMessages, () => {}, undefined, { semantic });
-
-  assert.equal(limited.status, 'limited');
-  assert.equal(limited.terminationReason, 'model_turn_limit');
-
-  canonicalMessages.push({ role: 'user', content: 'why did you stop?' });
-  const continued = await createExecutor(host).runReActLoop(modelRejectingInvalidAssistantHistory(), canonicalMessages, () => {}, undefined, { semantic });
-  assert.equal(continued.status, 'completed');
-  assert.equal(continued.finalContent, 'continued');
-  assert.equal(limited.finalMessageId, undefined);
-  assert.equal(canonicalMessages.some((message) => (
-    message.role === 'assistant'
-    && message.content === null
-    && (message.tool_calls?.length ?? 0) === 0
-  )), false);
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'answer' }], () => {});
+  assert.equal(result.status, 'completed');
+  assert.equal(result.finalContent, 'first second');
+  assert.equal(result.modelTurnCount, 1);
+  assert.deepEqual(budgets, [16_384, 32_768, 65_536, 65_536]);
 });
 
 test('projects a valid request from a session that already contains an orphan empty assistant message', async () => {
@@ -463,26 +462,24 @@ test('projects a valid request from a session that already contains an orphan em
   assert.deepEqual(legacyMessages[1], { role: 'assistant', content: null });
 });
 
-test('keeps readable partial content when a response reaches the model length limit', async () => {
+test('never exceeds a smaller model limit and reports exhausted continuations separately', async () => {
   const { host } = toolHost();
-  const committed: ChatMessage[] = [];
-  const result = await createExecutor(host).runReActLoop(scriptedModel([{
-    content: 'partial answer',
-    reasoning: '',
-    toolCalls: [],
-    finishReason: 'length',
-  }]), [{ role: 'user', content: 'answer at length' }], () => {}, undefined, {
-    semantic: {
-      assistantCommitted: async (message) => { committed.push(message); },
-      toolStarted: async () => {},
-      toolOutcome: async () => {},
+  const budgets: number[] = [];
+  const model: ModelClient = {
+    model: 'small', baseUrl: 'memory://small',
+    reasoning: { supported: false, requestMode: 'disabled' },
+    outputTokenLimits: { initial: 16_384, maximum: 8_192 },
+    async *streamMessage(_messages, options): AsyncIterable<ModelEvent> {
+      budgets.push(options?.max_tokens ?? 0);
+      yield { version: 1, type: 'turn_started', attemptId: `attempt-${budgets.length}` };
+      yield { version: 1, type: 'turn_completed', response: { content: '', reasoning: '', toolCalls: [], finishReason: 'length' } };
     },
-  });
-
+  };
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'answer' }], () => {});
   assert.equal(result.status, 'limited');
-  assert.equal(result.finalContent, 'partial answer');
-  assert.equal(typeof result.finalMessageId, 'string');
-  assert.deepEqual(committed, [{ role: 'assistant', content: 'partial answer' }]);
+  assert.equal(result.terminationReason, 'output_token_limit');
+  assert.deepEqual(budgets, [8_192, 8_192, 8_192, 8_192]);
+  assert.equal(result.modelTurnCount, 1);
 });
 
 test('prepares and durably commits every model request in a multi-turn Run', async () => {

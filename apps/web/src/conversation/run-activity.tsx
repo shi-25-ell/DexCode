@@ -7,7 +7,7 @@ import type { RunPhase } from '../../../../packages/run-protocol/contracts';
 import { ApprovalCard } from './approval-card';
 import { AssistantMessage } from './assistant-message';
 import { ContextCard } from './context-card';
-import { draftReasoning, draftText, type ActiveRunView } from './run-presentation';
+import { draftReasoning, draftText, type ActiveRunView, type RunActivityEntry } from './run-presentation';
 import { ToolCard } from './tool-card';
 
 export const phaseLabels: Record<RunPhase, string> = {
@@ -61,12 +61,40 @@ function ReasoningDisclosure({ content, truncated, textStarted, startedAt, compl
   );
 }
 
+function activityKey(entry: RunActivityEntry): string {
+  if (entry.kind === 'assistant') return `assistant:${entry.messageId}`;
+  if (entry.kind === 'tool') return `tool:${entry.callId}`;
+  if (entry.kind === 'approval') return `approval:${entry.approvalId}`;
+  return `context:${entry.operationRef}`;
+}
+
+function RunActivityItem({ entry, run, workspaceRef }: { entry: RunActivityEntry; run: ActiveRunView; workspaceRef?: string }) {
+  if (entry.kind === 'assistant') {
+    const committed = run.committedMessages.find((item) => item.kind === 'assistant' && (item.messageId === entry.messageId || item.id === entry.messageId));
+    if (committed?.kind === 'assistant') return <AssistantMessage content={committed.content} showCopy={false} />;
+    if (run.assistantDraft?.messageId !== entry.messageId) return null;
+    const text = draftText(run.assistantDraft);
+    const reasoning = draftReasoning(run.assistantDraft);
+    return (
+      <>
+        {reasoning ? <ReasoningDisclosure content={reasoning.content} truncated={reasoning.truncated} textStarted={Boolean(text)} startedAt={run.reasoningStartedAt ?? run.startedAt} completedAt={run.reasoningCompletedAt} /> : null}
+        {text ? <AssistantMessage content={text} showCopy={false} /> : null}
+      </>
+    );
+  }
+  if (entry.kind === 'context') {
+    const context = run.contextsById[entry.operationRef];
+    return context ? <ContextCard context={context} /> : null;
+  }
+  if (entry.kind === 'tool') {
+    const tool = run.toolsByCallId[entry.callId];
+    return tool ? <ToolCard tool={tool} /> : null;
+  }
+  const approval = run.approvalsById[entry.approvalId];
+  return approval ? <ApprovalCard item={approval} workspaceRef={workspaceRef} /> : null;
+}
+
 export function RunActivity({ run, workspaceRef, needsResync }: { run: ActiveRunView; workspaceRef?: string; needsResync: boolean }) {
-  const text = draftText(run.assistantDraft);
-  const reasoning = draftReasoning(run.assistantDraft);
-  const tools = Object.values(run.toolsByCallId);
-  const approvals = Object.values(run.approvalsById);
-  const contexts = Object.values(run.contextsById);
   return (
     <section className="run-activity" aria-label="当前运行" aria-live="polite">
       <div className={`run-phase ${run.phase}`} role="status">
@@ -76,12 +104,7 @@ export function RunActivity({ run, workspaceRef, needsResync }: { run: ActiveRun
         {run.note ? <small>{run.note}</small> : null}
       </div>
       {needsResync ? <div className="run-resync-note">实时片段有缺失，完成后将使用已提交会话校准。</div> : null}
-      {run.committedMessages.map((item) => item.kind === 'assistant' ? <AssistantMessage key={item.id} content={item.content} showCopy={false} /> : null)}
-      {reasoning ? <ReasoningDisclosure content={reasoning.content} truncated={reasoning.truncated} textStarted={Boolean(text)} startedAt={run.reasoningStartedAt ?? run.startedAt} completedAt={run.reasoningCompletedAt} /> : null}
-      {text ? <AssistantMessage key={run.assistantDraft?.messageId} content={text} showCopy={false} /> : null}
-      {contexts.map((context) => <ContextCard key={context.operationRef} context={context} />)}
-      {tools.map((tool) => <ToolCard key={tool.callRef} tool={tool} />)}
-      {approvals.map((approval) => <ApprovalCard key={approval.approvalRef} item={approval} workspaceRef={workspaceRef} />)}
+      {run.activityOrder.map((entry) => <RunActivityItem key={activityKey(entry)} entry={entry} run={run} workspaceRef={workspaceRef} />)}
     </section>
   );
 }

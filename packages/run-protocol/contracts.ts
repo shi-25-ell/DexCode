@@ -94,6 +94,7 @@ export type RunEventPayload =
   | { type: 'run_started'; sessionId: string; isNew?: boolean; sourceItemId?: string }
   | { type: 'run_phase_changed'; phase: RunPhase; note?: SafeRunNote }
   | { type: 'assistant_message_started'; turn: number; messageId: string }
+  | { type: 'assistant_message_reset'; messageId: string }
   | {
       type: 'assistant_content_delta';
       messageId: string;

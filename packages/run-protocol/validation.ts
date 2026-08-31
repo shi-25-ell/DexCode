@@ -114,6 +114,11 @@ export class RunEventSequenceValidator {
       if (!message || message.committed) throw new RunProtocolError(`Assistant delta references inactive message: ${event.messageId}`);
       return;
     }
+    if (event.type === 'assistant_message_reset') {
+      const message = this.#messages.get(event.messageId);
+      if (!message || message.committed) throw new RunProtocolError(`Assistant reset references inactive message: ${event.messageId}`);
+      return;
+    }
     if (event.type === 'assistant_message_committed') {
       const message = this.#messages.get(event.message.messageId);
       if (!message || message.committed || message.turn !== event.turn || event.message.turn !== event.turn) {

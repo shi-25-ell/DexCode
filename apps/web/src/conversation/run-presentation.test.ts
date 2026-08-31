@@ -38,6 +38,13 @@ describe('RunPresentation', () => {
     expect(draftText(state.activeRun?.assistantDraft ?? null)).toBe('answer');
   });
 
+  it('clears a streamed draft before an output-limit retry', () => {
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 1, kind: 'text', delta: 'discarded' }));
+    state = reduceRunEvent(state, envelope(4, { type: 'assistant_message_reset', messageId: 'message-1' }));
+    expect(draftText(state.activeRun?.assistantDraft ?? null)).toBe('');
+  });
+
   it('uses a complete committed message to repair missing deltas without ending a tool Run', () => {
     let state = started();
     state = reduceRunEvent(state, envelope(3, {
@@ -70,6 +77,11 @@ describe('RunPresentation', () => {
     expect(state.activeRun?.toolsByCallId['call-1']?.status).toBe('succeeded');
     expect(Object.keys(state.activeRun?.approvalsById ?? {})).toEqual(['approval-1']);
     expect(state.activeRun?.approvalsById['approval-1']?.resolved).toBe('继续');
+    expect(state.activeRun?.activityOrder).toEqual([
+      { kind: 'assistant', messageId: 'message-1' },
+      { kind: 'tool', callId: 'call-1' },
+      { kind: 'approval', approvalId: 'approval-1' },
+    ]);
   });
 
   it('marks seq gaps for resync, ignores missing deltas, and accepts authoritative commit', () => {

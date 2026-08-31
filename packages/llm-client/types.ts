@@ -93,6 +93,10 @@ export type ModelClient = {
   readonly displayName?: string;
   readonly contextWindow?: number;
   readonly maxOutputTokens?: number;
+  readonly outputTokenLimits?: {
+    initial: number;
+    maximum: number;
+  };
   readonly providerDisplayName?: string;
   readonly reasoning: ReasoningCapability;
   streamMessage(messages: unknown[], options?: ChatOptions): AsyncIterable<ModelEvent>;

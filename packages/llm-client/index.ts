@@ -59,6 +59,14 @@ export function createModelClient(): ModelClient {
   }
 
   const descriptor = describeModel(model, baseUrl);
+  const configuredMaximum = getEnvNumber('LLM_MAX_OUTPUT_TOKENS') ?? getEnvNumber('LLM_MAX_TOKENS');
+  const descriptorMaximum = descriptor.outputTokens?.maximum;
+  const maximum = Math.max(1, Math.floor(
+    configuredMaximum !== undefined && descriptorMaximum !== undefined
+      ? Math.min(configuredMaximum, descriptorMaximum)
+      : configuredMaximum ?? descriptorMaximum ?? 16_384,
+  ));
+  const initial = Math.min(16_384, descriptor.outputTokens?.initial ?? 16_384, maximum);
   return createOpenAiCompatibleModelClient({
     baseUrl,
     apiKey,
@@ -67,11 +75,12 @@ export function createModelClient(): ModelClient {
     contextWindow: getEnvNumber('LLM_CONTEXT_WINDOW') ?? descriptor.contextWindow,
     providerDisplayName: getEnv('LLM_PROVIDER_DISPLAY_NAME') || undefined,
     reasoning: reasoningCapability(descriptor.reasoning),
+    outputTokenLimits: { initial, maximum },
     doubaoCompat: provider === 'doubao',
     defaults: {
       temperature: getEnvNumber('LLM_TEMPERATURE'),
       top_p: getEnvNumber('LLM_TOP_P'),
-      max_tokens: getEnvNumber('LLM_MAX_TOKENS'),
+      max_tokens: initial,
       timeout: getEnvNumber('LLM_TIMEOUT'),
     },
   });

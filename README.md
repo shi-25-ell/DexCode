@@ -125,7 +125,8 @@ LLM_PROVIDER=doubao
 | `LLM_BASE_URL` | 否 | API 地址，默认 `https://api.openai.com/v1` |
 | `LLM_PROVIDER` | 否 | Provider 标识，目前仅 `doubao` 有特殊行为 |
 | `LLM_TEMPERATURE` | 否 | 温度，默认 `0.7` |
-| `LLM_MAX_TOKENS` | 否 | 最大 token 数，默认 `4096` |
+| `LLM_MAX_OUTPUT_TOKENS` | 否 | 模型真实支持的单次输出上限；请求从 16k 起，截断后最多提升到 64k |
+| `LLM_MAX_TOKENS` | 否 | `LLM_MAX_OUTPUT_TOKENS` 的兼容别名 |
 | `LLM_TOP_P` | 否 | Top-p 采样，不填则不传给 API |
 | `LLM_TIMEOUT` | 否 | 请求超时（毫秒） |
 | `LLM_MAX_RETRIES` | 否 | 最大重试次数 |
