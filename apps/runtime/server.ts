@@ -21,6 +21,7 @@ import { createTemplateGenerator } from '../../packages/template-generator/index
 import { createSuccessResponse } from '../../packages/shared/index.ts';
 import { createCapabilityRegistry } from '../../packages/capability-registry/index.ts';
 import { presentTool, projectConversation, projectConversationListItem } from '../../packages/conversation-view/index.ts';
+import { createManagedMemorySystem } from '../../packages/managed-memory/index.ts';
 import {
   createRunReplayBuffer,
   isDroppableRunEvent,
@@ -394,6 +395,7 @@ type WorkspaceRuntime = {
   codingToolHost: CodingToolHost;
   skillRegistry: SkillRegistry;
   codingAgent: CodingAgent;
+  managedMemory: ReturnType<typeof createManagedMemorySystem>;
 };
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -446,6 +448,12 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
   const nextContextManager = createContextManager(nextCodingToolHost);
   const nextSkillRegistry = createSkillRegistry({ workspaceRoot: workspace.canonicalRootPath });
   await nextSkillRegistry.loadAll();
+  const nextManagedMemory = createManagedMemorySystem({
+    workspaceId: workspace.workspaceId,
+    workspaceStateDir: stateDir,
+    modelClient,
+    observe: (event) => console.info(JSON.stringify({ type: 'metric', ...event })),
+  });
   const nextCodingAgent = createCodingAgent(
     nextContextManager,
     nextCodingToolHost,
@@ -454,6 +462,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     externalMcpRegistry,
     nextSkillRegistry,
     { scope: { kind: 'workspace', workspaceId: workspace.workspaceId }, rootPath: workspace.canonicalRootPath },
+    nextManagedMemory,
   );
   const runtime = {
     workspace,
@@ -461,6 +470,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     codingToolHost: nextCodingToolHost,
     skillRegistry: nextSkillRegistry,
     codingAgent: nextCodingAgent,
+    managedMemory: nextManagedMemory,
   };
   workspaceRuntimes.set(workspace.workspaceId, runtime);
   return runtime;
@@ -880,6 +890,7 @@ export function startRuntimeServer() {
     }
 
     const requestedWorkspaceRef = String(req.headers['x-workspace-ref'] ?? url.searchParams.get('workspaceRef') ?? '').trim();
+    if (url.pathname.startsWith('/api/managed-memory') && !requestedWorkspaceRef) throw new HttpError(409, 'WORKSPACE_REQUIRED');
     const requestRuntime = requestedWorkspaceRef
       ? await runtimeForWorkspaceRef(requestedWorkspaceRef)
       : defaultRuntime;
@@ -888,6 +899,66 @@ export function startRuntimeServer() {
     const skillRegistry = requestRuntime.skillRegistry;
     const codingAgent = requestRuntime.codingAgent;
     const requestWorkspaceScope = workspaceScope(requestRuntime);
+
+    if (url.pathname === '/api/managed-memory' && req.method === 'GET') {
+      sendJson(res, 200, await requestRuntime.managedMemory.inspect(requestRuntime.workspace.workspaceId));
+      return;
+    }
+
+    if (url.pathname === '/api/managed-memory/settings' && req.method === 'PUT') {
+      const patch = await parseBody<Record<string, unknown>>(req);
+      sendJson(res, 200, await requestRuntime.managedMemory.updateSettings(requestRuntime.workspace.workspaceId, patch));
+      return;
+    }
+
+    if (url.pathname === '/api/managed-memory' && req.method === 'DELETE') {
+      const body = await parseBody<{ confirmationToken?: string }>(req);
+      sendJson(res, 200, await requestRuntime.managedMemory.clearProjectMemory(requestRuntime.workspace.workspaceId, { confirmationToken: body.confirmationToken ?? '' }));
+      return;
+    }
+
+    if (url.pathname === '/api/managed-memory/status' && req.method === 'GET') {
+      sendJson(res, 200, await requestRuntime.managedMemory.inspect(requestRuntime.workspace.workspaceId));
+      return;
+    }
+
+    if (url.pathname === '/api/managed-memory/files' && req.method === 'GET') {
+      sendJson(res, 200, { files: await requestRuntime.managedMemory.store.scan(requestRuntime.workspace.workspaceId) });
+      return;
+    }
+
+    const managedMemoryFileMatch = /^\/api\/managed-memory\/files\/(.+)$/.exec(url.pathname);
+    if (managedMemoryFileMatch && req.method === 'GET') {
+      const path = decodeURIComponent(managedMemoryFileMatch[1]);
+      sendJson(res, 200, path === 'MEMORY.md'
+        ? await requestRuntime.managedMemory.store.readIndex(requestRuntime.workspace.workspaceId)
+        : await requestRuntime.managedMemory.store.readTopic(requestRuntime.workspace.workspaceId, path));
+      return;
+    }
+
+    if (managedMemoryFileMatch && req.method === 'DELETE') {
+      const path = decodeURIComponent(managedMemoryFileMatch[1]);
+      const body = await parseBody<{ expectedDigest?: string; reason?: string; operationId?: string }>(req);
+      sendJson(res, 200, await requestRuntime.managedMemory.store.remove({
+        workspaceId: requestRuntime.workspace.workspaceId,
+        actor: 'user',
+        path,
+        expectedDigest: body.expectedDigest ?? '',
+        reason: body.reason ?? 'Deleted through diagnostics API',
+        operationId: body.operationId ?? crypto.randomUUID(),
+      }));
+      return;
+    }
+
+    if (url.pathname === '/api/managed-memory/consolidate' && req.method === 'POST') {
+      sendJson(res, 202, await requestRuntime.managedMemory.consolidate(true));
+      return;
+    }
+
+    if (url.pathname === '/api/managed-memory/rebuild-index' && req.method === 'POST') {
+      sendJson(res, 200, await requestRuntime.managedMemory.rebuildIndex(requestRuntime.workspace.workspaceId));
+      return;
+    }
 
     if (url.pathname === '/api/workspaces/resolve' && req.method === 'POST') {
       const { path } = await parseBody<{ path?: string }>(req);
@@ -2145,4 +2216,15 @@ export function startRuntimeServer() {
   server.listen(port, () => {
     console.log(`DexCode running at http://localhost:${port}`);
   });
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    (server as unknown as { close(callback?: () => void): void }).close();
+    await Promise.allSettled([...workspaceRuntimes.values()].map((runtime) => runtime.managedMemory.drain({ timeoutMs: 60_000 })));
+  };
+  const runtimeProcess = process as unknown as { once(event: 'SIGINT' | 'SIGTERM', listener: () => void): void };
+  runtimeProcess.once('SIGINT', () => { void shutdown(); });
+  runtimeProcess.once('SIGTERM', () => { void shutdown(); });
+  return { server, shutdown };
 }

@@ -102,7 +102,7 @@ test('tool output renders common content and command streams instead of JSON env
 
 test('projection restores Context Cards and provider-calibrated request usage from the ledger', () => {
   const now = new Date().toISOString();
-  const breakdown = { systemPrompt: 100, workspaceCode: 200, recentConversation: 300, toolResults: 100, projectMemory: 50, toolDefinitions: 150, other: 100 };
+  const breakdown = { systemPrompt: 100, workspaceCode: 200, recentConversation: 300, toolResults: 100, projectMemory: 50, managedMemory: 0, toolDefinitions: 150, other: 100 };
   const session: Session = {
     sessionId: 'session-context-view',
     scope: { kind: 'general' },

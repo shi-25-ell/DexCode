@@ -32,6 +32,20 @@ import {
   parseExplicitInvocations,
 } from '../skill-system/index.ts';
 import type { RunCommandSource } from './run-commands.ts';
+import type { ManagedMemoryCoordinator } from '../managed-memory/coordinator.ts';
+import { MEMORY_TOOL_NAMES, isMemoryTool } from '../managed-memory/tools.ts';
+import type { ManagedMemoryActor } from '../managed-memory/contracts.ts';
+
+function composeLifecycleHooks(...hooks: Array<AgentLifecycleHooks | undefined>): AgentLifecycleHooks {
+  const active = hooks.filter((hook): hook is AgentLifecycleHooks => Boolean(hook));
+  return {
+    onAgentStart: async (event) => { for (const hook of active) await hook.onAgentStart?.(event); },
+    onTurnEnd: async (event) => { for (const hook of active) await hook.onTurnEnd?.(event); },
+    beforeToolCall: async (event) => { for (const hook of active) await hook.beforeToolCall?.(event); },
+    afterToolCall: async (event) => { for (const hook of active) await hook.afterToolCall?.(event); },
+    onAgentEnd: async (event) => { for (const hook of active) await hook.onAgentEnd?.(event); },
+  };
+}
 
 type PromptContext = {
   prompt: string;
@@ -143,6 +157,7 @@ export function createCodingAgent(
   externalMcpRegistry?: ReturnType<typeof createExternalMcpRegistry>,
   skillRegistry?: SkillRegistry,
   environment?: { scope: SessionScope; rootPath?: string },
+  managedMemory?: ManagedMemoryCoordinator,
 ) {
   if (!environment) throw new Error('CodingAgent environment is required');
   const agentEnvironment = environment;
@@ -156,6 +171,42 @@ export function createCodingAgent(
     externalMcpRegistry,
     skillRegistry: effectiveSkillRegistry,
   });
+  function withManagedMemoryTools(base: CodingToolHost, generation: number, actor: ManagedMemoryActor): CodingToolHost {
+    if (!managedMemory) return base;
+    return {
+      ...base,
+      isToolEnabled(name) {
+        if (isMemoryTool(name)) return managedMemory.mode === 'on';
+        return base.isToolEnabled?.(name) ?? true;
+      },
+      executeManagedMemoryTool(name, args, execution) {
+        return managedMemory.executeTool(name, args, {
+          workspaceId: managedMemory.workspaceId,
+          actor,
+          generation,
+          runId: execution.runId,
+          ...(execution.sessionId ? { sessionId: execution.sessionId } : {}),
+        });
+      },
+    };
+  }
+  if (managedMemory) {
+    managedMemory.setInternalRunner({
+      run: (input) => runtime.runInternalAgent({
+        runId: `memory-${crypto.randomUUID()}`,
+        ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
+        profile: 'memory',
+        messages: input.messages,
+        systemSections: input.systemSections,
+        toolPolicy: { allow: [...MEMORY_TOOL_NAMES], allowExternalMcp: false, allowSkills: false },
+        toolHost: withManagedMemoryTools(effectiveToolHost, input.generation, input.kind === 'extraction' ? 'memory-extractor' : 'memory-consolidator'),
+        contextPolicy: { mode: 'isolated' },
+        budget: { maxModelTurns: 5, maxModelAttempts: 6, maxRetriesPerTurn: 1 },
+        signal: input.signal,
+        productSessionId: input.sessionId,
+      }),
+    });
+  }
   const contextStrategy = contextCompactionStrategy();
   const contextPolicy = contextStrategy === 'four_layer' ? defaultContextPolicy(modelClient) : undefined;
   const contextEngine = contextStrategy === 'four_layer' && sessionRepository ? createContextEngine({
@@ -245,27 +296,34 @@ export function createCodingAgent(
     publish({ type: 'run_started', sessionId, isNew: options.isNew ?? false, ...(options.sourceItemId ? { sourceItemId: options.sourceItemId } : {}) });
     publish({ type: 'run_phase_changed', phase: 'preparing_context' });
     let result: AgentRunResult;
+    let managedMemoryRefs: import('../shared/types.ts').ManagedMemoryContextRef[] = [];
     try {
       const projectMemory = await sessionRepository.readProjectMemory(
         agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : undefined,
       );
-      const context = agentEnvironment.scope.kind === 'workspace'
-        ? await contextManager.buildForPrompt(userPrompt, selectedFile, { projectMemory })
-        : {
+      const [context, preparedMemory] = await Promise.all([
+        agentEnvironment.scope.kind === 'workspace'
+          ? contextManager.buildForPrompt(userPrompt, selectedFile, { projectMemory })
+          : Promise.resolve({
             prompt: userPrompt,
             selectedFile: null,
             selectedFileContent: null,
             workspaceSummary: '',
             projectMemorySummary: '',
             contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
-          };
-      const systemSections = buildSystemSections(
+          }),
+        agentEnvironment.scope.kind === 'workspace' && managedMemory
+          ? managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId, runId, query: userPrompt, signal: options.signal })
+          : Promise.resolve({ enabled: false, generation: 0, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none' as const, durationMs: 0 } }),
+      ]);
+      const systemSections = [...buildSystemSections(
         context,
         projectMemory,
         session.taskSummaries,
         skillsBlock(effectiveSkillRegistry, userPrompt),
         agentEnvironment.scope,
-      );
+      ), ...preparedMemory.sections];
+      managedMemoryRefs = preparedMemory.refs;
       const historyMessages = options.prestarted
         && session.messages.at(-1)?.role === 'user'
         && session.messages.at(-1)?.content === userPrompt
@@ -275,6 +333,7 @@ export function createCodingAgent(
         ? projectLegacyHistory(runId, historyMessages)
         : undefined;
       if (legacy) {
+        if (preparedMemory.refs.length > 0) legacy.manifest.managedMemoryRefs = preparedMemory.refs;
         await sessionRepository.commitContext({
           sessionId,
           runId,
@@ -285,6 +344,31 @@ export function createCodingAgent(
       const executionMessages = legacy
         ? [...legacy.messages, user]
         : pairedMessages([...historyMessages, user]);
+      const observedToolCalls = new Map<string, { name: string; input: unknown; outcome?: unknown }>();
+      const memoryLifecycle: AgentLifecycleHooks | undefined = managedMemory && agentEnvironment.scope.kind === 'workspace' ? {
+        beforeToolCall(event) {
+          let input: unknown;
+          try { input = JSON.parse(event.call.function.arguments); } catch { input = undefined; }
+          observedToolCalls.set(event.call.id, { name: event.call.function.name, input });
+        },
+        afterToolCall(event) {
+          const current = observedToolCalls.get(event.message.tool_call_id) ?? { name: event.message.name, input: undefined };
+          try { current.outcome = JSON.parse(event.message.content); } catch { current.outcome = event.message.content; }
+          observedToolCalls.set(event.message.tool_call_id, current);
+        },
+        onAgentEnd(event) {
+          managedMemory.enqueueExtraction({
+            workspaceId: agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : '',
+            sessionId,
+            runId,
+            completedAt: event.result.completedAt,
+            status: event.result.status,
+            messages: [...executionMessages, ...event.result.messages],
+            systemSections,
+            toolCalls: [...observedToolCalls.values()],
+          });
+        },
+      } : undefined;
       result = await runtime.runAgent({
         identity: { runId, profile: 'main', origin: 'user' },
         messages: executionMessages,
@@ -313,8 +397,10 @@ export function createCodingAgent(
         commandSource: options.commandSource,
         presentation: { emit: publish },
         onExecutorEvent: onEvent,
-        lifecycle: options.lifecycle,
+        lifecycle: composeLifecycleHooks(memoryLifecycle, options.lifecycle),
         metadata: { sessionId },
+        toolPolicy: preparedMemory.enabled ? undefined : { deny: [...MEMORY_TOOL_NAMES] },
+        toolHost: withManagedMemoryTools(effectiveToolHost, preparedMemory.generation, 'main-agent'),
         contextPolicy: contextEngine && contextPolicy ? {
           mode: 'managed',
           engine: contextEngine,
@@ -322,25 +408,32 @@ export function createCodingAgent(
           activeRequest: userPrompt,
           policy: contextPolicy,
           readArtifact: (input) => sessionRepository.readContextArtifact({ sessionId, ...input }),
+          managedMemoryRefs: preparedMemory.refs,
           refreshDirective: async (directive) => {
-            const refreshedContext = agentEnvironment.scope.kind === 'workspace'
-              ? await contextManager.buildForPrompt(directive, null, { projectMemory })
-              : {
+            const [refreshedContext, refreshedMemory] = await Promise.all([
+              agentEnvironment.scope.kind === 'workspace'
+                ? contextManager.buildForPrompt(directive, null, { projectMemory })
+                : Promise.resolve({
                   prompt: directive,
                   selectedFile: null,
                   selectedFileContent: null,
                   workspaceSummary: '',
                   projectMemorySummary: '',
                   contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
-                };
+                }),
+              agentEnvironment.scope.kind === 'workspace' && managedMemory
+                ? managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId, runId, query: directive, signal: options.signal })
+                : Promise.resolve({ sections: [], refs: [] }),
+            ]);
             return {
-              systemSections: buildSystemSections(
+              systemSections: [...buildSystemSections(
                 refreshedContext,
                 projectMemory,
                 session.taskSummaries,
                 skillsBlock(effectiveSkillRegistry, directive),
                 agentEnvironment.scope,
-              ),
+              ), ...refreshedMemory.sections],
+              managedMemoryRefs: refreshedMemory.refs,
             };
           },
         } : { mode: 'isolated' },
@@ -396,6 +489,7 @@ export function createCodingAgent(
       modelAttemptCount: result.modelAttemptCount,
       usage: result.usage,
       contextStrategy,
+      ...(managedMemoryRefs.length > 0 ? { managedMemoryRefs } : {}),
       contextSummaryUsage: result.contextSummaryUsage,
       ...(result.latestInputTokens !== undefined ? { latestInputTokens: result.latestInputTokens } : {}),
       ...(result.latestContextUsage ? { latestContextUsage: result.latestContextUsage } : {}),
@@ -454,6 +548,7 @@ export function createCodingAgent(
       messages: [{ role: 'user', content: prompt }],
       systemSections: [{ source: 'systemPrompt', content: system.content }],
       persistence: 'none',
+      toolPolicy: { deny: [...MEMORY_TOOL_NAMES] },
       budget: { maxModelTurns: 20 },
       signal: options.signal,
       onExecutorEvent: onEvent,

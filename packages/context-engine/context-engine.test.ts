@@ -193,7 +193,7 @@ test('old tool results are compacted only after a prior manifest proves they wer
     maxOutputTokens: 300,
     reserveTokens: 200,
     hardLimitTokens: 2_500,
-    breakdown: { systemPrompt: 1, workspaceCode: 1, recentConversation: 1, toolResults: 20, projectMemory: 1, toolDefinitions: 1, other: 0 },
+    breakdown: { systemPrompt: 1, workspaceCode: 1, recentConversation: 1, toolResults: 20, projectMemory: 1, managedMemory: 0, toolDefinitions: 1, other: 0 },
     layers: [],
     artifactRefs: [],
     includedToolResultIds: ['call-old'],

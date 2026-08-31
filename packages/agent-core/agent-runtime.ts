@@ -16,7 +16,7 @@ import {
 } from './executor.ts';
 import type { RunCommandSource } from './run-commands.ts';
 
-export type AgentProfile = 'main' | 'internal' | 'internal-readonly';
+export type AgentProfile = 'main' | 'memory' | 'internal' | 'internal-readonly';
 export type AgentOrigin = 'user' | 'internal';
 export type AgentPersistencePolicy = 'session' | 'none' | 'child';
 
@@ -43,7 +43,8 @@ export type AgentContextPolicy =
       activeRequest: string;
       policy: ContextPolicy;
       readArtifact: (input: { ref: string; offset?: number; limit?: number }) => Promise<unknown>;
-      refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[] }>;
+      refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
+      managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[];
     };
 
 export type AgentRuntimeWarning = {
@@ -333,6 +334,7 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
               systemSections: sections,
               policy: contextPolicy.policy,
               readArtifact: contextPolicy.readArtifact,
+              ...(contextPolicy.managedMemoryRefs ? { managedMemoryRefs: contextPolicy.managedMemoryRefs } : {}),
             },
             refreshDirective: contextPolicy.refreshDirective,
           } : {}),

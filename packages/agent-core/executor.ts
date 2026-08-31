@@ -31,6 +31,7 @@ import type { ContextEngine, ContextSection, PreparedContext } from '../context-
 import type { ContextPolicy, ContextUsageSnapshot } from '../shared/types.ts';
 import type { CommittedAssistantMessage, RunEventPayload, RunPhase } from '../run-protocol/index.ts';
 import { CONTEXT_TOOL_DEFINITIONS, LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitions.ts';
+import { MEMORY_TOOL_DEFINITIONS, isMemoryTool } from '../managed-memory/tools.ts';
 import type { RunCommandSource } from './run-commands.ts';
 
 export type CodingToolHost = {
@@ -46,6 +47,7 @@ export type CodingToolHost = {
   createSnapshot: (name?: string, description?: string) => unknown;
   restoreSnapshot: (snapshotId: string) => unknown;
   executeAgentTool?: (toolName: string, args: Record<string, unknown>, context: AgentToolExecutionContext) => Promise<unknown>;
+  executeManagedMemoryTool?: (toolName: string, args: Record<string, unknown>, context: { runId: string; sessionId?: string; signal: AbortSignal }) => Promise<unknown>;
   isToolEnabled?: (name: string) => boolean;
 };
 
@@ -118,7 +120,7 @@ export type ReActLoopOptions = {
   toolPolicy?: ToolPolicy;
   semantic?: ExecutorSemanticHooks;
   commandSource?: RunCommandSource;
-  refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[] }>;
+  refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
   presentation?: { emit(event: RunEventPayload): void };
   context?: {
     engine: ContextEngine;
@@ -127,6 +129,7 @@ export type ReActLoopOptions = {
     systemSections: ContextSection[];
     policy: ContextPolicy;
     readArtifact: (input: { ref: string; offset?: number; limit?: number }) => Promise<unknown>;
+    managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[];
   };
 };
 
@@ -337,8 +340,8 @@ export function createExecutor(
 
   async function buildToolDefinitions(includeContextTools = false, policy?: ToolPolicy) {
     const local = skillRegistry && policy?.allowSkills !== false
-      ? [...LOCAL_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS]
-      : LOCAL_TOOL_DEFINITIONS;
+      ? [...LOCAL_TOOL_DEFINITIONS, ...MEMORY_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS]
+      : [...LOCAL_TOOL_DEFINITIONS, ...MEMORY_TOOL_DEFINITIONS];
     const enabled = codingToolHost.isToolEnabled
       ? local.filter((tool) => codingToolHost.isToolEnabled?.(tool.function.name))
       : local;
@@ -406,7 +409,10 @@ export function createExecutor(
         onEvent({ type: 'context_refresh_started', sessionId, runId, itemId: decision.itemId });
         try {
           const refreshed = await options.refreshDirective(decision.directive);
-          if (options.context) options.context.systemSections = refreshed.systemSections;
+          if (options.context) {
+            options.context.systemSections = refreshed.systemSections;
+            options.context.managedMemoryRefs = refreshed.managedMemoryRefs;
+          }
           else {
             const system = refreshed.systemSections.map((section) => section.content).join('\n\n');
             const existing = workingMessages.findIndex((message) => message.role === 'system');
@@ -464,6 +470,7 @@ export function createExecutor(
                 if (options.presentation) emitPresentation({ type: 'context_activity_changed', presentation });
                 else onEvent({ type: 'context_activity', presentation });
               },
+              ...(options.context.managedMemoryRefs ? { managedMemoryRefs: options.context.managedMemoryRefs } : {}),
             };
             prepared = recoverNext
               ? await options.context.engine.recoverFromOverflow(prepareInput)
@@ -709,6 +716,9 @@ export function createExecutor(
             } else if (toolName === 'compact_context' && options.context) {
               toolResult = { status: 'scheduled', message: '上下文将在当前工具批次完成后整理' };
               forceSummaryNext = true;
+            } else if (isMemoryTool(toolName) && codingToolHost.executeManagedMemoryTool) {
+              markToolRunning();
+              toolResult = await codingToolHost.executeManagedMemoryTool(toolName, args, { runId, ...(options.sessionId ? { sessionId: options.sessionId } : {}), signal });
             } else if (toolName === 'list_skills' && skillRegistry) {
               markToolRunning();
               toolResult = { skills: skillRegistry.listSkills() };

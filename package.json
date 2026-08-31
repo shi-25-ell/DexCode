@@ -12,7 +12,7 @@
     "lint": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p apps/web/tsconfig.build.json --noEmit",
     "test:web": "vitest run --config apps/web/vite.config.ts",
     "test:dev": "node scripts/dev-smoke.mjs",
-    "test": "node --experimental-strip-types --test packages/agent-core/*.test.ts packages/capability-registry/*.test.ts packages/context-engine/*.test.ts packages/conversation-view/*.test.ts packages/llm-client/*.test.ts packages/mcp-client/*.test.ts packages/run-protocol/*.test.ts packages/session-store/*.test.ts packages/tool-gateway/*.test.ts packages/workspace-manager/*.test.ts",
+    "test": "node --experimental-strip-types --test packages/agent-core/*.test.ts packages/capability-registry/*.test.ts packages/context-engine/*.test.ts packages/conversation-view/*.test.ts packages/llm-client/*.test.ts packages/managed-memory/*.test.ts packages/mcp-client/*.test.ts packages/run-protocol/*.test.ts packages/session-store/*.test.ts packages/tool-gateway/*.test.ts packages/workspace-manager/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit"
   },

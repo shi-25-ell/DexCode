@@ -56,6 +56,7 @@ export type ContextBreakdown = {
   recentConversation: number;
   toolResults: number;
   projectMemory: number;
+  managedMemory: number;
   toolDefinitions: number;
   other: number;
 };
@@ -90,6 +91,15 @@ export type ContextPolicy = {
 };
 
 export type ContextCompactionStrategy = 'four_layer' | 'legacy';
+
+export type ManagedMemoryContextRef = {
+  path: string;
+  digest: string;
+  mtimeMs: number;
+  bytes: number;
+  truncated: boolean;
+  reason: 'index' | 'relevant';
+};
 
 export type ContextArtifactRef = {
   version: 1;
@@ -155,6 +165,7 @@ export type RunReport = {
     unknown: number;
   };
   contextStrategy?: ContextCompactionStrategy;
+  managedMemoryRefs?: ManagedMemoryContextRef[];
   contextSummaryUsage?: {
     inputTokens: number;
     outputTokens: number;
@@ -181,6 +192,7 @@ export type ContextManifestV1 = {
   omittedMessageCount: number;
   requestDigest: string;
   checkpointId?: string;
+  managedMemoryRefs?: ManagedMemoryContextRef[];
 };
 
 export type ContextManifestV2 = {
@@ -206,6 +218,7 @@ export type ContextManifestV2 = {
   summaryRecordId?: string;
   artifactRefs: ContextArtifactRef[];
   includedToolResultIds: string[];
+  managedMemoryRefs?: ManagedMemoryContextRef[];
 };
 
 export type ContextManifest = ContextManifestV1 | ContextManifestV2;
@@ -246,7 +259,7 @@ export type ToolViewStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'de
 
 export type ToolPresentation = {
   callRef: string;
-  category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'other';
+  category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'memory' | 'other';
   name: string;
   target?: string;
   status: ToolViewStatus;

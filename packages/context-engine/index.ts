@@ -6,6 +6,7 @@ import type {
   ContextArtifactRef,
   ContextBreakdown,
   ContextLayer,
+  ManagedMemoryContextRef,
   ContextManifestV2,
   ContextPolicy,
   ContextPresentation,
@@ -16,7 +17,7 @@ import type {
 } from '../shared/types.ts';
 
 export type ContextSection = {
-  source: 'systemPrompt' | 'workspaceCode' | 'projectMemory';
+  source: 'systemPrompt' | 'workspaceCode' | 'projectMemory' | 'managedMemory';
   content: string;
 };
 
@@ -75,6 +76,7 @@ export type PrepareContextInput = {
   forceSummary?: boolean;
   signal?: AbortSignal;
   onActivity?: (presentation: ContextPresentation) => void;
+  managedMemoryRefs?: ManagedMemoryContextRef[];
 };
 
 export type OverflowRecoveryInput = Omit<PrepareContextInput, 'forceSummary'>;
@@ -146,6 +148,7 @@ function emptyBreakdown(): ContextBreakdown {
     recentConversation: 0,
     toolResults: 0,
     projectMemory: 0,
+    managedMemory: 0,
     toolDefinitions: 0,
     other: 0,
   };
@@ -690,6 +693,7 @@ export function createContextEngine(options: {
       ...(summaryRecord ? { summaryRecordId: summaryRecord.id } : {}),
       artifactRefs: refs,
       includedToolResultIds,
+      ...(input.managedMemoryRefs && input.managedMemoryRefs.length > 0 ? { managedMemoryRefs: input.managedMemoryRefs } : {}),
     };
     prepared.set(manifest.id, { input, measure: finalMeasure });
     return { messages: [systemMessage(input.systemSections), ...messages], manifest, usage, ...(completedActivity ? { activity: completedActivity } : {}), ...(summaryRecord ? { summaryRecord } : {}) };

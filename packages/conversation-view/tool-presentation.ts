@@ -47,6 +47,10 @@ function descriptor(tool: string, args: Record<string, unknown>) {
   if (tool === 'list_workspace') return { category: 'read' as const, name: '浏览目录', target: targetPath ?? '当前项目' };
   if (tool === 'read_lints') return { category: 'read' as const, name: '检查问题', target: targetPath ?? '当前项目' };
   if (tool === 'list_skills') return { category: 'skill' as const, name: '浏览 Skill', target: '可用能力' };
+  if (tool.startsWith('memory_')) {
+    const names: Record<string, string> = { memory_list: '浏览记忆', memory_read: '读取记忆', memory_search: '搜索记忆', memory_upsert: '更新记忆', memory_remove: '删除记忆' };
+    return { category: 'memory' as const, name: names[tool] ?? '管理记忆', target: targetPath ?? '当前项目' };
+  }
   if (tool === 'read_skill' || tool === 'activate_skill' || tool === 'deactivate_skill') {
     return { category: 'skill' as const, name: tool === 'deactivate_skill' ? '停用 Skill' : '使用 Skill', target: String(args.name ?? 'Skill') };
   }
@@ -72,6 +76,8 @@ function successSummary(tool: string, result: unknown, status: ToolViewStatus): 
   if (tool === 'write_file' || tool === 'patch_file') return '文件已更新';
   if (tool === 'run_command') return '命令执行完成';
   if (tool === 'activate_skill' || tool === 'read_skill') return '已加载能力说明';
+  if (tool === 'memory_upsert') return '项目记忆已更新';
+  if (tool === 'memory_remove') return '项目记忆已删除';
   if (tool.startsWith('mcp__')) return '外部工具调用完成';
   return '执行完成';
 }

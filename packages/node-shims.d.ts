@@ -2,15 +2,18 @@ declare const process: {
   cwd(): string;
   env: Record<string, string | undefined>;
   platform: string;
+  pid: number;
 };
 
 declare type FsDirent = {
   name: string;
   isDirectory(): boolean;
   isFile(): boolean;
+  isSymbolicLink(): boolean;
 };
 
 declare module 'node:fs' {
+  export type Dirent = FsDirent;
   export const promises: {
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     readFile(path: string, options?: string): Promise<string>;
@@ -19,7 +22,7 @@ declare module 'node:fs' {
     rename(oldPath: string, newPath: string): Promise<void>;
     rm(path: string, options?: { recursive?: boolean; force?: boolean; maxRetries?: number; retryDelay?: number }): Promise<void>;
     cp(source: string, destination: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
-    stat(path: string): Promise<{ isDirectory(): boolean; size: number }>;
+    stat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean; size: number; mtimeMs: number }>;
     lstat(path: string): Promise<{ isSymbolicLink(): boolean }>;
     realpath(path: string): Promise<string>;
     readdir(path: string, options?: { withFileTypes?: boolean }): Promise<Array<string | FsDirent>>;
@@ -64,6 +67,7 @@ declare module 'node:path' {
   export function relative(from: string, to: string): string;
   export function resolve(...parts: string[]): string;
   export function isAbsolute(path: string): boolean;
+  export const sep: string;
 }
 
 declare module 'path' {
