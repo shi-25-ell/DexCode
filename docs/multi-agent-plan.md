@@ -196,6 +196,8 @@ packages/agent-manager/
 
 - `packages/conversation-view`
   - 增加 Agent tree snapshot
+  - 增加 Transcript 内联 Agent activity projection
+  - 将底层 orchestration tool event 聚合为 Agent lifecycle view
 
 - `apps/runtime`
   - WorkspaceRuntime 装配 AgentManager
@@ -203,8 +205,11 @@ packages/agent-manager/
   - shutdown/session deletion 收口
 
 - `apps/web`
-  - 独立 Agent tree reducer 和 UI
-  - 不把 Child 塞入现有 `activeRun`
+  - 保持现有 Transcript-first 主布局，不增加永久 Agent sidebar
+  - 顶栏增加按需出现的 Agent 状态入口和 overlay Drawer
+  - Transcript 内联 Agent / Agent Group Activity Card
+  - 独立 Agent tree/activity reducer，不把 Child 塞入现有 `activeRun`
+  - Agent transcript 只读 Drawer，复用现有 Transcript 组件
 
 ---
 
@@ -649,6 +654,9 @@ agent_resync_required
 - 不向 Main conversation 流式注入 Child token delta。
 - Child 完成不会自动创建新的 Main Run。
 - `wait_agent` 是 Main 获取结果的正式途径。
+- `spawn_agent`、`wait_agent`、`followup_agent`、`stop_agent` 不投影为普通 Tool Card。
+- presentation layer 按稳定 `agentId` 聚合 lifecycle；followup 更新原 Agent Card，不创建第二张卡。
+- 同一 Main assistant tool batch 中创建的多个 Agent 共享一个 `delegationGroupId`，可投影成 Agent Group Card；这只是展示分组，不引入固定并行编排模式。
 
 运行时增加独立的 Session activity stream，解决 Child 在 Main Run terminal 后仍可能继续运行的问题。重连超出 replay window 时返回完整 Agent tree snapshot。
 
@@ -662,34 +670,152 @@ agents: {
 }
 ```
 
-Web 使用独立 `agentTree` reducer，不修改现有 `activeRun` reducer。
+`ConversationItem` 增加内联 activity item：
 
-UI 最低展示：
-
-```text
-Agents
-
-● main
-├─ ✓ researcher-auth
-│    completed · 12.4s · tokens
-├─ ● worker-api
-│    running · using search_in_workspace
-└─ ○ reviewer
-     idle · last run interrupted
+```ts
+type AgentActivityItem = {
+  id: string;
+  kind: 'agent_activity';
+  sourceRunId: string;
+  sourceMessageId?: string;
+  delegationGroupId?: string;
+  agentIds: string[];
+};
 ```
 
-展开显示：
+该 item 在 Main 首次 delegation 的 Transcript 位置创建，后续状态变化原位更新，不追加 orchestration 噪音。
 
-- identity、role、parent
-- task、context mode
+### 11.1 主布局保持 Transcript-first
+
+主页面继续保持当前两栏结构：
+
+```text
+┌──────────┬──────────────────────────────────────┐
+│ 左侧栏   │  当前会话标题              ● 就绪   │
+│          ├──────────────────────────────────────┤
+│ 会话     │                                      │
+│          │              Transcript              │
+│ 能力中心 │                                      │
+│          │              Composer                │
+└──────────┴──────────────────────────────────────┘
+```
+
+不新增永久右侧 Agent 面板，避免压缩 Transcript。左侧能力中心也不增加运行时 Agents 入口；Agent Definition 管理未来可以作为配置能力单独设计，但不与当前 Agent 实例混合。
+
+### 11.2 顶栏状态入口与临时 Drawer
+
+没有 Child Agent 时完全不显示入口。存在 Child 后，标题栏显示轻量状态：
+
+```text
+这是一个什么项目？   ● 运行中   Agents 2/3
+```
+
+其中 `2/3` 表示当前运行 2 个、Session 内共有 3 个 Child Agent；没有正在运行的 Child 时显示总数或“全部完成”，但入口仍保留。
+
+点击后打开右侧 overlay Drawer，而不是永久 sidebar：
+
+```text
+                           ┌──────────────────────────┐
+                           │ Agents                × │
+                           │ ● Main                   │
+                           │ ├─ ✓ auth-research       │
+                           │ │  Researcher · 14s      │
+                           │ ├─ ● api-worker          │
+                           │ │  Editing auth.ts       │
+                           │ └─ ○ reviewer            │
+                           │    Idle                  │
+                           └──────────────────────────┘
+```
+
+Drawer 展示完整 Agent Tree 和运行摘要，关闭后不占主界面宽度。Child 全部结束后入口继续保留，以便查看结果和后续运行；切换到从未创建 Child 的 Session 时隐藏。
+
+### 11.3 Transcript 内联 Agent Activity Card
+
+Agent activity 使用现有 Tool Card 的视觉语言，但层级更高。用户看到的是 Agent 生命周期，而不是底层 primitive：
+
+```text
+┌──────────────────────────────────────────────────┐
+│ ◉ 子 Agent                              2 个任务 │
+│ ● auth-researcher                                │
+│   调查登录认证流程                     运行中 12s │
+│ ✓ frontend-scout                                 │
+│   检查前端登录调用                     完成   8s │
+│                                      展开详情 ⌄ │
+└──────────────────────────────────────────────────┘
+```
+
+展示规则：
+
+- `spawn_agent` 创建或加入 Agent Activity Card。
+- `wait_agent` 没有独立 UI，仅通过 running/completed 状态变化体现。
+- `followup_agent` 在同一 Agent Card 内增加 Run timeline，不新建 Agent Card。
+- `stop_agent` 更新同一卡片为 stopping/interrupted，并提供明确状态反馈。
+- 原始 tool call、agentId、runId 和 raw event 仅在深层诊断视图中出现。
+
+同一 Agent 的多次 Run：
+
+```text
+┌─────────────────────────────────────────────┐
+│ ◉ auth-worker                     ✓ 已完成  │
+│ ① 调查认证问题                    ✓ 12s     │
+│ ② 修复 refresh token              ✓ 21s     │
+│ 修改  auth.ts · token.ts                    │
+│                                   查看详情⌄ │
+└─────────────────────────────────────────────┘
+```
+
+一次明显的并行 delegation 优先投影为 Agent Group Card：
+
+```text
+┌─────────────────────────────────────────────────────┐
+│ ◉ 并行调查                                   2 Agents│
+│ ✓ frontend-scout    前端登录流程              8s    │
+│ ● backend-scout     后端认证流程             14s…   │
+│ ████████████████░░░░                                │
+└─────────────────────────────────────────────────────┘
+```
+
+分组依据是相同 `delegationGroupId`，不是新增 orchestration workflow。Group 完成后展示总 Agents、总 tokens 和 wall-clock duration。
+
+### 11.4 分层详情与 Agent Transcript
+
+默认卡片只展示：
+
+- Agent 名称和角色
+- 当前任务
+- running/completed/interrupted 等用户状态
+- duration 和简短结果
+
+第一层展开显示：
+
+- Agent 名称、角色、父 Agent
+- 当前任务、上下文来源
 - 当前/最近 Run
-- tools used
-- files modified
-- duration、usage
-- result/error
-- isolation metadata
+- 工具使用摘要
+- 修改文件摘要
+- duration、tokens
+- result/error 摘要
+- shared workspace / 独立工作区等 isolation 摘要
 
-完整 transcript 按需加载，不塞入主 Conversation View。
+其中技术字段转换为用户语言，例如 `fork` 显示为“继承上下文”，`fresh` 显示为“独立上下文”，`worktree` 显示为“独立工作区”。agentId、runId、parentRunId、ToolPolicy 和 raw events 只放在更深的诊断区。
+
+点击“查看 Agent 对话”打开只读 Drawer，按需加载完整 transcript，并复用 Main Transcript 的消息、文本和 Tool Card 组件。V1 不在该 Drawer 提供 Composer；用户仍只与 Main 交互：
+
+```text
+User ↔ Main ↔ Child
+```
+
+### 11.5 Stop 与恢复状态
+
+运行中的 Agent Card 和 runtime Drawer 都可以提供停止按钮：
+
+```text
+● backend-worker   修改 API 层   运行中 32s   ■ 停止
+```
+
+停止后原位变为“已停止”。服务重启恢复出的 interrupted Run 显示“上次运行被中断 · 可继续任务”，不伪装成普通失败或完成。
+
+Web 使用独立 `agentTree`/`agentActivity` reducer，不修改现有 `activeRun` reducer；主 Transcript 仍然是唯一主界面。
 
 ---
 
@@ -814,8 +940,12 @@ P0 完成门槛：
 
 - Agent Activity Protocol validation/replay。
 - Agent tree projection。
+- Transcript Agent lifecycle projection 和 `delegationGroupId` 聚合。
 - Session activity SSE。
-- Agent Tree、详情、运行状态和结果 UI。
+- 顶栏按需 Agent 状态入口和 overlay Drawer。
+- Transcript 内联 Agent / Agent Group Activity Card。
+- 只读 Agent transcript Drawer，复用现有 Transcript 组件。
+- stop、interrupted、followup Run timeline 的原位状态更新。
 
 验收：
 
@@ -824,6 +954,11 @@ P0 完成门槛：
 - replay window 超出后可 resync。
 - Child 在 Main Run 结束后完成，UI 仍更新。
 - Child 状态不污染 Main `activeRun`。
+- 没有 Child 的 Session 不显示顶栏入口或空面板。
+- `wait_agent` 不产生独立 Tool Card。
+- followup 不创建重复 Agent Card。
+- overlay 开关不改变 Transcript 宽度和滚动位置。
+- Agent transcript Drawer 不提供直接向 Child 输入的 Composer。
 
 ### M7 — P2 Worktree Isolation
 
@@ -885,9 +1020,14 @@ P0 完成门槛：
 6. **Protocol/Web tests**
    - validation
    - replay/resync
-   - Agent tree reducer
+   - Agent tree/activity reducer
    - background completion
    - detail projection
+   - orchestration tools are suppressed from ordinary Tool Cards
+   - followup updates the stable Agent Card
+   - same-batch spawns form one Agent Group Card
+   - header entry visibility and overlay behavior
+   - read-only Agent transcript Drawer
 
 7. **端到端测试**
    - Main 动态组合四个原语
@@ -903,6 +1043,7 @@ P0 完成门槛：
 - 不修改现有 Session journal version 1 的语义。
 - 新增 Agent journal，旧 Session 无需迁移。
 - `ConversationViewSnapshot.agents` 作为可选字段上线，Web 缺失时按空树处理。
+- 新增的 `agent_activity` ConversationItem 采用可选投影；旧 Web 客户端可以忽略，旧 Session 不生成该 item。
 - 现有 `RunEventEnvelope version:2` 不增加并发 Child 语义。
 - Multi-Agent tools 仅在 feature flag 和 AgentManager 都可用时暴露。
 - 主 Agent、Managed Memory、Queue、Steer、approval 路径保持原状。
