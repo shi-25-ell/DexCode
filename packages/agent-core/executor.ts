@@ -79,6 +79,7 @@ export type ToolPolicy = {
   deny?: string[];
   allowExternalMcp?: boolean;
   allowSkills?: boolean;
+  allowOrchestration?: boolean;
 };
 export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
 export type TerminationReason =
