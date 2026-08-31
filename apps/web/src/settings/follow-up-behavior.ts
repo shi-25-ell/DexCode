@@ -1,4 +1,4 @@
-import type { FollowUpBehavior } from '../types';
+import type { FollowUpBehavior, QueueDelivery } from '../types';
 
 const STORAGE_KEY = 'dexcode.follow-up-behavior.v1';
 
@@ -16,4 +16,8 @@ export function writeFollowUpBehavior(value: FollowUpBehavior) {
   } catch {
     // A blocked storage backend should not prevent sending a follow-up.
   }
+}
+
+export function deliveryForFollowUp(value: FollowUpBehavior): QueueDelivery {
+  return value === 'steer' ? 'steer' : 'next_run';
 }

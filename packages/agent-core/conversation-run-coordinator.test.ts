@@ -104,6 +104,95 @@ test('Coordinator promotes and consumes Steer in the active Run without starting
   }
 });
 
+test('Coordinator accepts Steer while approval is pending and consumes it after approval settles', async () => {
+  const repository = createSessionRepository({ projectId: `test-coordinator-approval-steer-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const approvalEntered = deferred();
+    const resolveApproval = deferred();
+    const agent = {
+      async runTask(sessionId: string, prompt: string, _selectedFile: string | null, _onEvent: (event: AgentEvent) => void, hooks: any, options: any) {
+        await repository.beginRun({ sessionId, runId: options.runId, userMessage: { role: 'user', content: prompt }, context });
+        const request = {
+          version: 1 as const,
+          toolName: 'write_file',
+          effect: 'write' as const,
+          title: '修改文件',
+          reason: '测试批准期间的 Steer',
+          fingerprint: 'approval-fingerprint',
+          options: ['allow_once', 'deny'] as const,
+        };
+        const approval = await hooks.onApproval(request);
+        assert.equal(approval.decision, 'allow_once');
+        const steered = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 2, wouldNaturallyComplete: false });
+        assert.equal(steered.action, 'continue');
+        assert.equal(steered.directive, 'change direction after approval');
+        const promoted = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 1, wouldNaturallyComplete: false });
+        assert.equal(promoted.action, 'continue');
+        assert.equal(promoted.directive, 'promote after approval');
+        const finish = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 1, wouldNaturallyComplete: true });
+        assert.equal(finish.action, 'finish');
+        const value = terminal(options.runId, prompt);
+        await repository.finishRun({ sessionId, report: value.report, summary: value.summary });
+        return value.summary;
+      },
+    };
+    const coordinator = createConversationRunCoordinator({
+      repository,
+      resolveEnvironment: async () => ({ agent, context }),
+      createHooks: (_sessionId, runId, sink) => ({
+        onApproval: async (request) => {
+          sink({ ...request, type: 'approval_request', taskId: runId, approvalId: 'approval-1' });
+          approvalEntered.release();
+          await resolveApproval.promise;
+          return { decision: 'allow_once', fingerprint: request.fingerprint };
+        },
+      }),
+    });
+
+    const running = coordinator.start({ sessionId: session.sessionId, runId: 'run-approval-steer', prompt: 'initial', prestarted: false }, () => {});
+    await approvalEntered.promise;
+    assert.equal((await coordinator.snapshot(session.sessionId)).activeRun?.phase, 'waiting_confirm');
+    const outcome = await coordinator.submitDuringRun({
+      sessionId: session.sessionId,
+      content: 'change direction after approval',
+      delivery: 'steer',
+      expectedRunId: 'run-approval-steer',
+      operationId: 'steer-during-approval',
+    });
+    assert.equal(outcome.outcome, 'steered');
+    if (outcome.outcome === 'steered') {
+      assert.equal(outcome.targetRunId, 'run-approval-steer');
+      assert.equal(outcome.item.delivery, 'steer');
+    }
+    const queued = await coordinator.submitDuringRun({
+      sessionId: session.sessionId,
+      content: 'promote after approval',
+      delivery: 'next_run',
+      operationId: 'queue-during-approval',
+    });
+    if (!('item' in queued)) throw new Error('Queue item missing');
+    const promoted = await coordinator.mutateQueue({
+      type: 'promote_to_steer',
+      sessionId: session.sessionId,
+      itemId: queued.item.itemId,
+      expectedRunId: 'run-approval-steer',
+      operationId: 'promote-during-approval',
+    });
+    assert.equal('outcome' in promoted ? promoted.outcome : undefined, 'steered');
+
+    resolveApproval.release();
+    const result = await running;
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.equal(result.summaries.length, 1);
+    assert.equal(loaded?.runReports?.length, 1);
+    assert.deepEqual(loaded?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['initial', 'change direction after approval', 'promote after approval']);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('Coordinator Stop aborts only the active Run and preserves a paused Queue', async () => {
   const repository = createSessionRepository({ projectId: `test-coordinator-stop-${crypto.randomUUID()}` });
   const projectDir = dirname(repository.sessionsDir);

@@ -115,7 +115,7 @@ export type QueueItem = {
 export type QueueMutationOutcome =
   | { outcome: 'queued'; item: QueueItem; sessionRevision: number; replayed?: boolean }
   | { outcome: 'steered'; item: QueueItem; targetRunId: string; sessionRevision: number; replayed?: boolean }
-  | { outcome: 'remained_queued'; item: QueueItem; reason: 'run_changed' | 'run_closing' | 'waiting_confirm'; sessionRevision: number }
+  | { outcome: 'remained_queued'; item: QueueItem; reason: 'run_changed' | 'run_closing'; sessionRevision: number }
   | { outcome: 'cancelled'; itemId: string; sessionRevision: number; replayed?: boolean }
   | { outcome: 'already_cancelled'; itemId: string; sessionRevision: number }
   | { outcome: 'already_consumed'; itemId: string; runId: string; sessionRevision: number };

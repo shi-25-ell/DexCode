@@ -61,7 +61,7 @@
 |---|---|---|---|---|
 | `idle` | 启动新 Run | 不适用 | 允许 | 不适用 |
 | `running` | 默认进入 `nextRun` | 可转换为当前 Run 的 Steer | 允许 | 停止当前 Run，暂停 Queue |
-| `waiting_confirm` | 允许进入 `nextRun` | 禁止；不得代替审批 | 允许 | abort 当前 Run 和未决审批，暂停 Queue |
+| `waiting_confirm` | 允许进入 `nextRun` | 可绑定当前 Run；批准完成且工具批 settlement 后消费，不得代替审批 | 允许 | abort 当前 Run 和未决审批，暂停 Queue |
 | `closing` | 进入 `nextRun` | 转换失败并保持 Queue | 允许 | 等价于停止尚未 terminal 的 Run |
 | `aborted/failed/limited` | 后续手动提交或恢复 drain | 不适用 | 允许 | 不适用 |
 
@@ -271,8 +271,8 @@ type ActiveConversationRun = {
 
 关键规则：
 
-- `accepting_commands` 才允许 Queue Item 转换为该 Run 的 Steer。
-- `waiting_confirm` 允许普通 Queue，但禁止 promote。
+- `accepting_commands` 和 `waiting_confirm` 都允许 Queue Item 绑定或转换为该 Run 的 Steer。
+- `waiting_confirm` 只开放 Steer 的 durable acceptance gate；approval 未决时不得消费，必须等待批准完成且当前工具批全部 settlement 后的安全边界。
 - executor 决定自然结束前，Coordinator 先把 phase 原子切换为 `closing`。
 - phase 进入 `closing` 后，新消息只能成为 `nextRun`。
 - `stopping` 不再消费 Steer。
@@ -467,6 +467,8 @@ type QueueLedgerRecord =
 accepting_commands
     |       |
     |       +-- approval requested --> waiting_confirm
+    |                                  |
+    |                                  +-- enqueue/promote steer --> bound to current Run, pending
     |                                  |
     |                                  +-- resolved --> accepting_commands
     |
@@ -670,7 +672,7 @@ Queue command body：
 type QueueMutationOutcome =
   | { outcome: 'queued'; item: QueueItemView; sessionRevision: number }
   | { outcome: 'steered'; item: QueueItemView; targetRunId: string; sessionRevision: number }
-  | { outcome: 'remained_queued'; item: QueueItemView; reason: 'run_changed' | 'run_closing' | 'waiting_confirm'; sessionRevision: number }
+  | { outcome: 'remained_queued'; item: QueueItemView; reason: 'run_changed' | 'run_closing'; sessionRevision: number }
   | { outcome: 'cancelled'; itemId: string; sessionRevision: number }
   | { outcome: 'already_consumed'; itemId: string; runId: string; sessionRevision: number };
 ```
@@ -771,7 +773,7 @@ Projection 规则：
 - `running` 时 textarea 保持可编辑。
 - 默认 follow-up behavior 为 `queue`。
 - `Enter` 按当前设置发送；`Shift+Enter` 换行。
-- `waiting_confirm` 时只允许 Queue，忽略 `steer` 设置并清楚提示。
+- `waiting_confirm` 时遵循 `steer` 设置；成功绑定后提示“将在批准完成且工具结算后调整方向”。
 - Stop 按钮继续独立存在，不与发送按钮复用语义。
 - 提交期间只锁定当前 operation，不能锁死整个 composer。
 
@@ -823,7 +825,7 @@ type FollowUpBehavior = 'queue' | 'steer';
 - 默认 `queue`；
 - 该设置只决定 Web 在 active Run 时提交的显式 `delivery`；
 - 后端永远依据请求中的 delivery 和当前 Run 状态处理；
-- `waiting_confirm` 强制发送为 `next_run`；
+- `waiting_confirm` 可显式发送 `steer`，后端将其绑定当前 Run，但只在 approval resolved 且工具批 settlement 后消费；
 - 设置变更不修改已经存在的 Queue Item。
 
 ## 15. Approval、Stop 与 Queue
@@ -832,9 +834,10 @@ type FollowUpBehavior = 'queue' | 'steer';
 
 - approval request 进入 `waiting_confirm`；
 - 普通发送仍可 Queue；
-- promote 返回 `remained_queued(reason=waiting_confirm)`；
+- 显式 Steer 和 promote 可绑定当前 Run，并保持 pending；
 - approval answer 只能走现有 confirm route；
-- approval resolved 后 Run 返回 `accepting_commands`；
+- approval resolved 后 Run 返回 `accepting_commands`，继续完成当前工具批；
+- 当前工具批全部 settlement 后，executor 才在安全边界消费一条 pending Steer；
 - 用户拒绝 approval 后，当前工具产生 denied ToolOutcome，再到安全边界；
 - Queue 消息不会被解释为批准、拒绝或 ask_user answer。
 
@@ -1222,7 +1225,7 @@ apps/web/src/conversation/queue-reducer.test.ts
 - normal terminal 自动 nextRun；
 - failed/limited/aborted terminal pause；
 - disconnect abort + pause；
-- wait confirmation 禁止 promote；
+- wait confirmation 接收 direct Steer/promote，但只在 approval 和工具 settlement 后消费；
 - operationId retry；
 - different Sessions 并发不互相阻塞。
 
@@ -1242,7 +1245,7 @@ apps/web/src/conversation/queue-reducer.test.ts
 - running 时 Enter 创建 Queue；
 - idle 时 Enter 启动普通 Run；
 - setting=steer 时 active 发送 Steer；
-- waiting_confirm 强制 Queue；
+- waiting_confirm 的 steer 设置保持 Steer，并展示延迟到工具结算后的提示；
 - Queue card promote/delete；
 - `remained_queued` 不移除卡片；
 - revision 防旧 event 回滚；
@@ -1317,7 +1320,7 @@ npm run build:web
 8. 消费后的 Steer 能影响最新 directive 和上下文准备。
 9. 当前 Run 与 Queue 启动的新 Run 各自有独立且 exactly-one RunReport。
 10. Stop 后 active Run aborted、Queue paused 且消息保留。
-11. approval 输入不会与 Queue/Steer 混淆。
+11. approval 输入不会与 Queue/Steer 混淆；approval pending 时接收的 Steer 只在批准完成且工具 settlement 后消费。
 12. 重复请求不会产生重复 Queue Item 或重复消费。
 13. Runtime recovery 能重建 Queue，并把孤立 Steer 安全退回 nextRun。
 14. semantic Queue events 在 backpressure 下不丢失。

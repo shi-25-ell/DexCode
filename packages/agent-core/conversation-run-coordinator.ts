@@ -120,6 +120,11 @@ export function createConversationRunCoordinator(dependencies: {
     handle.phase = 'terminal';
   }
 
+  function acceptingSteerTarget(handle: ActiveConversationRun | undefined, expectedRunId?: string): ActiveConversationRun | undefined {
+    if (!handle || (handle.phase !== 'accepting_commands' && handle.phase !== 'waiting_confirm')) return undefined;
+    return !expectedRunId || expectedRunId === handle.runId ? handle : undefined;
+  }
+
   async function unregisterChain(chain: ConversationRunChain) {
     await withSessionLock(chain.sessionId, async () => {
       if (chainsBySessionId.get(chain.sessionId) === chain) chainsBySessionId.delete(chain.sessionId);
@@ -346,27 +351,25 @@ export function createConversationRunCoordinator(dependencies: {
   async function submitDuringRun(input: SubmitDuringRunInput): Promise<QueueMutationOutcome> {
     return withSessionLock(input.sessionId, async () => {
       const handle = activeBySessionId.get(input.sessionId);
-      const canSteer = input.delivery === 'steer'
-        && handle?.phase === 'accepting_commands'
-        && (!input.expectedRunId || input.expectedRunId === handle.runId);
+      const steerTarget = input.delivery === 'steer' ? acceptingSteerTarget(handle, input.expectedRunId) : undefined;
       const queued = await repository.enqueueQueueItem({
         sessionId: input.sessionId,
         content: input.content,
-        delivery: canSteer ? 'steer' : 'next_run',
+        delivery: steerTarget ? 'steer' : 'next_run',
         operationId: input.operationId,
-        ...(canSteer ? { targetRunId: handle.runId } : {}),
+        ...(steerTarget ? { targetRunId: steerTarget.runId } : {}),
         ...(input.expectedSessionRevision !== undefined ? { expectedSessionRevision: input.expectedSessionRevision } : {}),
       });
-      observe({ metric: 'queue.enqueue.count', value: 1, sessionId: input.sessionId, runId: handle?.runId, itemId: queued.item.itemId, operationId: input.operationId, delivery: queued.item.delivery, outcome: canSteer ? 'steered' : 'queued' });
+      observe({ metric: 'queue.enqueue.count', value: 1, sessionId: input.sessionId, runId: handle?.runId, itemId: queued.item.itemId, operationId: input.operationId, delivery: queued.item.delivery, outcome: steerTarget ? 'steered' : 'queued' });
       if (queued.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: input.sessionId, runId: handle?.runId, itemId: queued.item.itemId, operationId: input.operationId });
       observe({ metric: 'queue.pending.count', value: (await repository.getQueue(input.sessionId)).pending.length, sessionId: input.sessionId, runId: handle?.runId });
       handle?.sink({ type: 'queue_item_added', sessionId: input.sessionId, item: queued.item, sessionRevision: queued.sessionRevision });
-      if (input.delivery !== 'steer' || canSteer) {
-        return canSteer
-          ? { outcome: 'steered', item: queued.item, targetRunId: handle.runId, sessionRevision: queued.sessionRevision }
+      if (input.delivery !== 'steer' || steerTarget) {
+        return steerTarget
+          ? { outcome: 'steered', item: queued.item, targetRunId: steerTarget.runId, sessionRevision: queued.sessionRevision }
           : queued;
       }
-      const reason = handle?.phase === 'waiting_confirm' ? 'waiting_confirm' : handle ? 'run_closing' : 'run_changed';
+      const reason = handle ? 'run_closing' : 'run_changed';
       return { outcome: 'remained_queued', item: queued.item, reason, sessionRevision: queued.sessionRevision };
     });
   }
@@ -375,19 +378,20 @@ export function createConversationRunCoordinator(dependencies: {
     return withSessionLock(command.sessionId, async () => {
       const handle = activeBySessionId.get(command.sessionId);
       if (command.type === 'promote_to_steer') {
-        if (!handle || handle.runId !== command.expectedRunId || handle.phase !== 'accepting_commands') {
+        const steerTarget = acceptingSteerTarget(handle, command.expectedRunId);
+        if (!steerTarget) {
           const queue = await repository.getQueue(command.sessionId);
           const item = queue.items.find((candidate) => candidate.itemId === command.itemId);
           if (!item) throw new Error(`Queue item not found: ${command.itemId}`);
           if (item.status === 'consumed') return { outcome: 'already_consumed', itemId: item.itemId, runId: item.consumedRunId!, sessionRevision: queue.sessionRevision } as const;
-          const reason = handle?.phase === 'waiting_confirm' ? 'waiting_confirm' : handle ? 'run_closing' : 'run_changed';
+          const reason = handle ? 'run_closing' : 'run_changed';
           observe({ metric: 'queue.promote.count', value: 1, sessionId: command.sessionId, runId: handle?.runId, itemId: command.itemId, operationId: command.operationId, outcome: `remained_queued:${reason}` });
           return { outcome: 'remained_queued', item, reason, sessionRevision: queue.sessionRevision } as const;
         }
         const result = await repository.promoteQueueItem(command);
-        observe({ metric: 'queue.promote.count', value: 1, sessionId: command.sessionId, runId: handle.runId, itemId: command.itemId, operationId: command.operationId, outcome: result.outcome });
-        if ('replayed' in result && result.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: command.sessionId, runId: handle.runId, itemId: command.itemId, operationId: command.operationId });
-        if (result.outcome === 'steered') queueUpdated(handle.sink, command.sessionId, result.item, result.sessionRevision);
+        observe({ metric: 'queue.promote.count', value: 1, sessionId: command.sessionId, runId: steerTarget.runId, itemId: command.itemId, operationId: command.operationId, outcome: result.outcome });
+        if ('replayed' in result && result.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: command.sessionId, runId: steerTarget.runId, itemId: command.itemId, operationId: command.operationId });
+        if (result.outcome === 'steered') queueUpdated(steerTarget.sink, command.sessionId, result.item, result.sessionRevision);
         return result;
       }
       if (command.type === 'cancel') {

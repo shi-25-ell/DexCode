@@ -13,7 +13,7 @@ import { isTimelineNearBottom } from './scroll-follow';
 import { UserMessage } from './user-message';
 import { initialQueueState, queueReducer } from './queue-reducer';
 import { QueuedMessageCard } from './queued-message-card';
-import { readFollowUpBehavior, writeFollowUpBehavior } from '../settings/follow-up-behavior';
+import { deliveryForFollowUp, readFollowUpBehavior, writeFollowUpBehavior } from '../settings/follow-up-behavior';
 
 type LiveState = {
   items: ConversationItem[];
@@ -241,7 +241,9 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     if (outcome.outcome === 'queued' || outcome.outcome === 'steered' || outcome.outcome === 'remained_queued') {
       queueDispatch({ type: 'queue_upsert', item: outcome.item, revision: outcome.sessionRevision });
       if (outcome.outcome === 'remained_queued') {
-        setQueueNotice(outcome.reason === 'waiting_confirm' ? '当前正在等待批准，这条消息会在下一轮处理。' : '当前运行已进入结束阶段，这条消息会在下一轮处理。');
+        setQueueNotice('当前运行已进入结束阶段，这条消息会在下一轮处理。');
+      } else if (outcome.outcome === 'steered' && state.status === 'waiting') {
+        setQueueNotice('已绑定当前任务，将在批准完成且工具结算后调整方向。');
       }
       return;
     }
@@ -270,7 +272,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           scope,
           sessionId: conversationRef,
           content,
-          delivery: state.status === 'waiting' || followUpBehavior === 'queue' ? 'next_run' : 'steer',
+          delivery: deliveryForFollowUp(followUpBehavior),
           ...(queueState.activeRunId ? { expectedRunId: queueState.activeRunId } : {}),
         });
         applyQueueOutcome(outcome);
@@ -474,7 +476,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
                   key={item.itemId}
                   item={item}
                   busy={queueBusy.has(item.itemId) || queueBusy.has('reorder')}
-                  canPromote={state.status === 'running' && Boolean(queueState.activeRunId)}
+                  canPromote={(state.status === 'running' || state.status === 'waiting') && Boolean(queueState.activeRunId)}
                   canMoveUp={index > 0}
                   canMoveDown={index < queueState.items.length - 1}
                   onPromote={() => void promote(item.itemId)}
