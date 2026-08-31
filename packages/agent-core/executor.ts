@@ -49,14 +49,14 @@ export type CodingToolHost = {
   isToolEnabled?: (name: string) => boolean;
 };
 
-type ExternalMcpRegistry = {
+export type ExternalMcpRegistry = {
   listTools: () => Promise<ExternalMcpTool[]>;
   callTool: (qualifiedName: string, args?: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
   hasExternalTools: () => boolean;
   normalizeToolName: (serverName: string, toolName: string) => string;
 };
 
-type SkillRegistry = {
+export type SkillRegistry = {
   listSkills: () => SkillSummary[];
   readSkill: (name: string) => SkillReadResult;
   activateSkill: (name: string, trigger: SkillTrigger, reason?: string) => SkillActivationResult;
@@ -70,6 +70,13 @@ export type ExecutorSemanticHooks = {
   toolStarted(call: ToolCall): Promise<void>;
   toolOutcome(message: ToolResultMessage, presentation: import('../shared/types.ts').ToolPresentation): Promise<void>;
   contextPrepared?(prepared: PreparedContext): Promise<void>;
+  turnEnded?(event: { turn: number; toolCalls: ToolCall[]; finishReason: ModelResponse['finishReason'] }): Promise<void>;
+};
+export type ToolPolicy = {
+  allow?: string[];
+  deny?: string[];
+  allowExternalMcp?: boolean;
+  allowSkills?: boolean;
 };
 export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
 export type TerminationReason =
@@ -107,6 +114,8 @@ export type ReActLoopOptions = {
   maxIterations?: number;
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
+  maxOutputTokens?: number;
+  toolPolicy?: ToolPolicy;
   semantic?: ExecutorSemanticHooks;
   commandSource?: RunCommandSource;
   refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[] }>;
@@ -302,6 +311,16 @@ export function createExecutor(
   externalMcpRegistry?: ExternalMcpRegistry,
   skillRegistry?: SkillRegistry,
 ) {
+  const skillToolNames = new Set(SKILL_TOOL_DEFINITIONS.map((tool) => tool.function.name));
+
+  function policyAllows(toolName: string, policy: ToolPolicy | undefined): boolean {
+    if (!policy) return true;
+    if (policy.deny?.includes(toolName)) return false;
+    if (toolName.startsWith('mcp__') && policy.allowExternalMcp === false) return false;
+    if (skillToolNames.has(toolName) && policy.allowSkills === false) return false;
+    return !policy.allow || policy.allow.includes(toolName);
+  }
+
   const toolFns: Record<string, (args: Record<string, unknown>) => unknown> = {
     read_file: ({ path }) => codingToolHost.readFile(path as string),
     write_file: ({ path, content }) => codingToolHost.writeFile(path as string, content as string),
@@ -316,13 +335,16 @@ export function createExecutor(
     restore_snapshot: ({ snapshotId }) => codingToolHost.restoreSnapshot(snapshotId as string),
   };
 
-  async function buildToolDefinitions(includeContextTools = false) {
-    const local = skillRegistry ? [...LOCAL_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS] : LOCAL_TOOL_DEFINITIONS;
+  async function buildToolDefinitions(includeContextTools = false, policy?: ToolPolicy) {
+    const local = skillRegistry && policy?.allowSkills !== false
+      ? [...LOCAL_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS]
+      : LOCAL_TOOL_DEFINITIONS;
     const enabled = codingToolHost.isToolEnabled
       ? local.filter((tool) => codingToolHost.isToolEnabled?.(tool.function.name))
       : local;
-    const builtIn = includeContextTools ? [...enabled, ...CONTEXT_TOOL_DEFINITIONS] : enabled;
-    if (!externalMcpRegistry?.hasExternalTools()) return builtIn;
+    const builtIn = (includeContextTools ? [...enabled, ...CONTEXT_TOOL_DEFINITIONS] : enabled)
+      .filter((tool) => policyAllows(tool.function.name, policy));
+    if (policy?.allowExternalMcp === false || !externalMcpRegistry?.hasExternalTools()) return builtIn;
     const external = await externalMcpRegistry.listTools();
     return [...builtIn, ...external.map((tool) => ({
       type: 'function' as const,
@@ -333,7 +355,7 @@ export function createExecutor(
           ? tool.inputSchema
           : { type: 'object', properties: {}, additionalProperties: true },
       },
-    }))];
+    })).filter((tool) => policyAllows(tool.function.name, policy))];
   }
 
   return {
@@ -421,7 +443,7 @@ export function createExecutor(
           }
           modelAttemptCount += 1;
           if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'executing', note: `model attempt ${modelAttemptCount}` });
-          const definitions = await buildToolDefinitions(Boolean(options.context));
+          const definitions = await buildToolDefinitions(Boolean(options.context), options.toolPolicy);
           currentDefinitions = definitions;
           let prepared: PreparedContext | undefined;
           let requestMessages: ChatMessage[] = workingMessages;
@@ -487,6 +509,7 @@ export function createExecutor(
             tools: definitions,
             tool_choice: 'auto',
             parallel_tool_calls: false,
+            ...(options.maxOutputTokens !== undefined ? { max_tokens: options.maxOutputTokens } : {}),
             signal,
           }), onEvent, options.presentation ? { messageId, emit: emitPresentation, phase: emitPhase } : undefined));
           if (signal.aborted || (turn.status === 'failed' && turn.failure.category === 'cancelled')) {
@@ -584,6 +607,7 @@ export function createExecutor(
         loopMessages.push(assistant);
         if (response.toolCalls.length === 0) {
           finalMessageId = messageId;
+          await options.semantic?.turnEnded?.({ turn: modelTurnCount, toolCalls: [], finishReason: response.finishReason });
           if (response.finishReason === 'length') {
             return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
           }
@@ -635,7 +659,10 @@ export function createExecutor(
           let toolResult: unknown;
           let fileDiff: FileDiff | undefined;
           const semanticContextTool = toolName === 'compact_context';
-          const invalid = validationError(currentDefinitions, toolName, args);
+          const policyDenied = !policyAllows(toolName, options.toolPolicy);
+          const invalid = policyDenied
+            ? `tool forbidden by policy: ${toolName}`
+            : validationError(currentDefinitions, toolName, args);
           let toolRunning = false;
           const markToolRunning = () => {
             if (semanticContextTool || toolRunning) return;
@@ -790,6 +817,15 @@ export function createExecutor(
           workingMessages.push(toolMessage);
           loopMessages.push(toolMessage);
         }
+        await options.semantic?.turnEnded?.({
+          turn: modelTurnCount,
+          toolCalls: response.toolCalls.map((call) => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+          })),
+          finishReason: response.finishReason,
+        });
         const decision = await options.commandSource?.atSafeBoundary({
           sessionId,
           runId,
