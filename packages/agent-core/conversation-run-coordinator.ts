@@ -28,6 +28,12 @@ type ActiveConversationRun = {
   stoppedFor?: QueuePauseReason;
 };
 
+type ConversationRunChain = {
+  sessionId: string;
+  sink: EventSink;
+  stoppedFor?: QueuePauseReason;
+};
+
 export type StartConversationRunInput = {
   sessionId: string;
   runId: string;
@@ -64,10 +70,12 @@ export function createConversationRunCoordinator(dependencies: {
   repository: SessionRepository;
   resolveEnvironment(session: Session): Promise<RunEnvironment>;
   createHooks(sessionId: string, runId: string, sink: EventSink): ExecutorHooks;
+  cancelPending?(sessionId: string, runId: string, reason: QueuePauseReason): void;
 }) {
   const { repository } = dependencies;
   const activeByRunId = new Map<string, ActiveConversationRun>();
   const activeBySessionId = new Map<string, ActiveConversationRun>();
+  const chainsBySessionId = new Map<string, ConversationRunChain>();
   const locks = new Map<string, Promise<void>>();
 
   async function withSessionLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
@@ -163,7 +171,9 @@ export function createConversationRunCoordinator(dependencies: {
 
   function observedSink(handle: ActiveConversationRun): EventSink {
     return (event) => {
-      if (event.type === 'task_status' && event.taskId === handle.runId) {
+      if ((event.type === 'confirm_request' || event.type === 'command_confirm_request' || event.type === 'approval_request') && event.taskId === handle.runId && handle.phase === 'accepting_commands') {
+        handle.phase = 'waiting_confirm';
+      } else if (event.type === 'task_status' && event.taskId === handle.runId) {
         if (event.status === 'waiting_confirm' && handle.phase === 'accepting_commands') handle.phase = 'waiting_confirm';
         else if (event.status === 'executing' && handle.phase === 'waiting_confirm') handle.phase = 'accepting_commands';
       }
@@ -171,7 +181,25 @@ export function createConversationRunCoordinator(dependencies: {
     };
   }
 
-  async function executeChain(first: StartConversationRunInput, sink: EventSink): Promise<RunChainResult> {
+  function runHooks(handle: ActiveConversationRun, sink: EventSink): ExecutorHooks {
+    const hooks = dependencies.createHooks(handle.sessionId, handle.runId, sink);
+    const restore = () => {
+      if (handle.phase === 'waiting_confirm') handle.phase = 'accepting_commands';
+    };
+    return {
+      ...(hooks.onConfirm ? { onConfirm: async (...args: Parameters<NonNullable<ExecutorHooks['onConfirm']>>) => {
+        try { return await hooks.onConfirm!(...args); } finally { restore(); }
+      } } : {}),
+      ...(hooks.onCommandConfirm ? { onCommandConfirm: async (...args: Parameters<NonNullable<ExecutorHooks['onCommandConfirm']>>) => {
+        try { return await hooks.onCommandConfirm!(...args); } finally { restore(); }
+      } } : {}),
+      ...(hooks.onApproval ? { onApproval: async (...args: Parameters<NonNullable<ExecutorHooks['onApproval']>>) => {
+        try { return await hooks.onApproval!(...args); } finally { restore(); }
+      } } : {}),
+    };
+  }
+
+  async function executeChain(first: StartConversationRunInput, sink: EventSink, chain: ConversationRunChain): Promise<RunChainResult> {
     const summaries: TaskSummary[] = [];
     let current = first;
     while (true) {
@@ -185,6 +213,11 @@ export function createConversationRunCoordinator(dependencies: {
         abortController: new AbortController(),
         sink,
       };
+      if (chain.stoppedFor) {
+        handle.phase = 'stopping';
+        handle.stoppedFor = chain.stoppedFor;
+        handle.abortController.abort(chain.stoppedFor);
+      }
       await withSessionLock(current.sessionId, async () => register(handle));
       sink({ type: 'run_started', sessionId: current.sessionId, runId: current.runId, ...(current.sourceItemId ? { sourceItemId: current.sourceItemId } : {}) });
       const onEvent = observedSink(handle);
@@ -195,7 +228,7 @@ export function createConversationRunCoordinator(dependencies: {
           current.prompt,
           null,
           onEvent,
-          dependencies.createHooks(current.sessionId, current.runId, onEvent),
+          runHooks(handle, onEvent),
           {
             runId: current.runId,
             signal: handle.abortController.signal,
@@ -208,7 +241,10 @@ export function createConversationRunCoordinator(dependencies: {
         await withSessionLock(current.sessionId, async () => unregister(handle));
       }
       summaries.push(summary!);
-      if (handle.stoppedFor) return { summaries, paused: true };
+      if (handle.stoppedFor || chain.stoppedFor) {
+        if (!handle.stoppedFor) await requeueAndPause(handle, chain.stoppedFor!, summary!.status);
+        return { summaries, paused: true };
+      }
       if (summary!.status !== 'completed') {
         await requeueAndPause(handle, 'failure', summary!.status);
         return { summaries, paused: true };
@@ -228,13 +264,26 @@ export function createConversationRunCoordinator(dependencies: {
   }
 
   async function start(input: StartConversationRunInput, sink: EventSink): Promise<RunChainResult> {
-    await repository.setQueuePaused({ sessionId: input.sessionId, paused: false, operationId: `start:${input.runId}:resume` });
-    return executeChain(input, sink);
+    const chain: ConversationRunChain = { sessionId: input.sessionId, sink };
+    await withSessionLock(input.sessionId, async () => {
+      if (chainsBySessionId.has(input.sessionId)) throw new Error('Session already has an active Run chain');
+      chainsBySessionId.set(input.sessionId, chain);
+    });
+    try {
+      await repository.setQueuePaused({ sessionId: input.sessionId, paused: false, operationId: `start:${input.runId}:resume` });
+      return await executeChain(input, sink, chain);
+    } finally {
+      await withSessionLock(input.sessionId, async () => {
+        if (chainsBySessionId.get(input.sessionId) === chain) chainsBySessionId.delete(input.sessionId);
+      });
+    }
   }
 
   async function resume(sessionId: string, sink: EventSink): Promise<RunChainResult> {
+    const chain: ConversationRunChain = { sessionId, sink };
     const next = await withSessionLock(sessionId, async () => {
-      if (activeBySessionId.has(sessionId)) throw new Error('Session already has an active Run');
+      if (chainsBySessionId.has(sessionId) || activeBySessionId.has(sessionId)) throw new Error('Session already has an active Run');
+      chainsBySessionId.set(sessionId, chain);
       const session = await repository.loadSession(sessionId);
       if (!session) throw new Error(`Session not found: ${sessionId}`);
       const environment = await dependencies.resolveEnvironment(session);
@@ -244,8 +293,15 @@ export function createConversationRunCoordinator(dependencies: {
       queueUpdated(sink, sessionId, claimed.item, claimed.session.revision ?? 0);
       return { runId, prompt: claimed.message.content, sourceItemId: claimed.item.itemId };
     });
-    if (!next) return { summaries: [], paused: false };
-    return executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, sourceItemId: next.sourceItemId }, sink);
+    if (!next) {
+      await withSessionLock(sessionId, async () => { if (chainsBySessionId.get(sessionId) === chain) chainsBySessionId.delete(sessionId); });
+      return { summaries: [], paused: false };
+    }
+    try {
+      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, sourceItemId: next.sourceItemId }, sink, chain);
+    } finally {
+      await withSessionLock(sessionId, async () => { if (chainsBySessionId.get(sessionId) === chain) chainsBySessionId.delete(sessionId); });
+    }
   }
 
   async function submitDuringRun(input: SubmitDuringRunInput): Promise<QueueMutationOutcome> {
@@ -300,14 +356,27 @@ export function createConversationRunCoordinator(dependencies: {
     });
   }
 
-  async function stop(input: { runId: string; reason?: QueuePauseReason }) {
-    const handle = activeByRunId.get(input.runId);
-    if (!handle) return { stopped: false };
+  async function stop(input: { runId?: string; sessionId?: string; reason?: QueuePauseReason }) {
+    const handle = input.runId ? activeByRunId.get(input.runId) : input.sessionId ? activeBySessionId.get(input.sessionId) : undefined;
+    const sessionId = handle?.sessionId ?? input.sessionId;
+    const chain = sessionId ? chainsBySessionId.get(sessionId) : undefined;
+    if (!handle && !chain) return { stopped: false };
+    const reason = input.reason ?? 'user_stop';
+    if (chain) chain.stoppedFor = reason;
+    if (!handle) {
+      const queue = await repository.getQueue(sessionId!);
+      if (queue.pending.length > 0) {
+        await repository.setQueuePaused({ sessionId: sessionId!, paused: true, reason, operationId: `chain:${sessionId}:pause:${reason}` });
+        chain?.sink({ type: 'run_chain_paused', sessionId: sessionId!, reason });
+      }
+      return { stopped: true, sessionId };
+    }
     await withSessionLock(handle.sessionId, async () => {
       if (handle.phase === 'terminal') return;
       handle.phase = 'stopping';
-      handle.stoppedFor = input.reason ?? 'user_stop';
-      handle.abortController.abort(input.reason ?? 'user_stop');
+      handle.stoppedFor = reason;
+      dependencies.cancelPending?.(handle.sessionId, handle.runId, handle.stoppedFor);
+      handle.abortController.abort(reason);
       await requeueAndPause(handle, handle.stoppedFor);
     });
     return { stopped: true, sessionId: handle.sessionId };

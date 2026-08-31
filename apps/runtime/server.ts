@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, readdir } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { createCodingAgent } from '../../packages/agent-core/index.ts';
+import { createConversationRunCoordinator } from '../../packages/agent-core/conversation-run-coordinator.ts';
+import { QueueMutationError } from '../../packages/agent-core/session-contracts.ts';
 import { createContextManager } from '../../packages/context-builder/index.ts';
 import { createModelClient } from '../../packages/llm-client/index.ts';
 import { createApprovalModeStore, createCodingToolHost, isApprovalMode } from '../../packages/tool-gateway/index.ts';
@@ -144,7 +146,6 @@ async function parseBody<T>(req: IncomingMessage): Promise<T> {
 const pendingConfirms = new Map<string, PendingConfirm>();
 const pendingCommandConfirms = new Map<string, PendingCommandConfirm>();
 const pendingToolApprovals = new Map<string, PendingToolApproval>();
-const activeConversationRuns = new Map<string, AbortController>();
 
 function createToolApprovalHook(
   sessionId: string,
@@ -261,6 +262,25 @@ function createConfirmHook(
       }, CONFIRM_TIMEOUT_MS);
     });
   };
+}
+
+function cancelPendingRun(runId: string, reason: string) {
+  const error = new Error(`Run stopped: ${reason}`);
+  for (const [id, pending] of pendingConfirms) {
+    if (pending.taskId !== runId) continue;
+    pendingConfirms.delete(id);
+    pending.reject(error);
+  }
+  for (const [id, pending] of pendingCommandConfirms) {
+    if (pending.taskId !== runId) continue;
+    pendingCommandConfirms.delete(id);
+    pending.reject(error);
+  }
+  for (const [id, pending] of pendingToolApprovals) {
+    if (pending.taskId !== runId) continue;
+    pendingToolApprovals.delete(id);
+    pending.reject(error);
+  }
 }
 
 // ── 模块级初始化 ──
@@ -392,6 +412,27 @@ const generalAgent = createCodingAgent(
   { scope: { kind: 'general' } },
 );
 
+const conversationRunCoordinator = createConversationRunCoordinator({
+  repository: sessionRepository,
+  async resolveEnvironment(session) {
+    if (session.scope.kind === 'general') return { agent: generalAgent, context: { scope: session.scope } };
+    const runtime = await runtimeForSession(session);
+    return {
+      agent: runtime.codingAgent,
+      context: {
+        scope: session.scope,
+        workspace: { workspaceId: session.scope.workspaceId, rootPath: runtime.workspace.canonicalRootPath },
+      },
+    };
+  },
+  createHooks: (sessionId, runId, sink) => ({
+    onConfirm: createConfirmHook(sessionId, runId, sink),
+    onCommandConfirm: createCommandConfirmHook(sessionId, runId, sink),
+    onApproval: createToolApprovalHook(sessionId, runId, sink),
+  }),
+  cancelPending: (_sessionId, runId, reason) => cancelPendingRun(runId, reason),
+});
+
 function workspaceScope(runtime: WorkspaceRuntime): SessionScope {
   return { kind: 'workspace', workspaceId: runtime.workspace.workspaceId };
 }
@@ -489,7 +530,8 @@ function createBoundedSseWriter(
         if (discardIndex >= 0) queue.splice(discardIndex, 1);
         else {
           onOverflow();
-          return;
+          // Semantic events are never dropped. Aborting the producer bounds how
+          // many additional events can arrive while the writer drains.
         }
       }
       queue.push(event);
@@ -577,7 +619,123 @@ export function startRuntimeServer() {
       const conversationRef = decodeURIComponent(conversationViewMatch[1]);
       const scope = conversationScope(url, requestWorkspaceScope);
       const session = await loadScopedSession(conversationRef, scope);
-      sendJson(res, 200, { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }) });
+      const runtimeSnapshot = await conversationRunCoordinator.snapshot(session.sessionId);
+      const latestSession = await sessionRepository.loadSession(session.sessionId) ?? session;
+      const activePhase = runtimeSnapshot.activeRun?.phase === 'accepting_commands'
+        ? 'running'
+        : runtimeSnapshot.activeRun?.phase === 'terminal'
+          ? undefined
+          : runtimeSnapshot.activeRun?.phase;
+      sendJson(res, 200, { conversation: projectConversation(latestSession, { contextWindow: modelClient.contextWindow, ...(activePhase ? { activePhase } : {}) }) });
+      return;
+    }
+
+    const queueResumeMatch = /^\/api\/conversations\/([^/]+)\/queued-messages\/commands$/.exec(url.pathname);
+    if (queueResumeMatch && req.method === 'POST') {
+      const sessionId = decodeURIComponent(queueResumeMatch[1]);
+      const scope = conversationScope(url, requestWorkspaceScope);
+      await loadScopedSession(sessionId, scope);
+      const { action } = await parseBody<{ action?: 'resume' }>(req);
+      if (action !== 'resume') throw new HttpError(400, '不支持的队列命令');
+      res.writeHead(200, sseHeaders());
+      const writer = createBoundedSseWriter(res, () => { void conversationRunCoordinator.stop({ sessionId, reason: 'disconnect' }); });
+      writer.write({ type: 'session', sessionId, isNew: false });
+      let responseFinished = false;
+      res.on('close', () => {
+        if (!responseFinished) void conversationRunCoordinator.stop({ sessionId, reason: 'disconnect' });
+      });
+      try {
+        await conversationRunCoordinator.resume(sessionId, (event) => writer.write(event));
+      } catch (error) {
+        writer.write({ type: 'error', message: error instanceof Error ? error.message : '恢复队列失败' });
+      } finally {
+        responseFinished = true;
+        await writer.drain();
+        res.end();
+      }
+      return;
+    }
+
+    const queueCollectionMatch = /^\/api\/conversations\/([^/]+)\/queued-messages$/.exec(url.pathname);
+    if (queueCollectionMatch && req.method === 'POST') {
+      const sessionId = decodeURIComponent(queueCollectionMatch[1]);
+      const scope = conversationScope(url, requestWorkspaceScope);
+      await loadScopedSession(sessionId, scope);
+      const body = await parseBody<{
+        content?: string;
+        delivery?: 'next_run' | 'steer';
+        operationId?: string;
+        expectedRunId?: string;
+        expectedSessionRevision?: number;
+      }>(req);
+      if (!body.content?.trim()) throw new HttpError(400, '消息不能为空');
+      if (body.delivery !== 'next_run' && body.delivery !== 'steer') throw new HttpError(400, 'delivery 必须是 next_run 或 steer');
+      if (!body.operationId?.trim()) throw new HttpError(400, 'operationId required');
+      const result = await conversationRunCoordinator.submitDuringRun({
+        sessionId,
+        content: body.content,
+        delivery: body.delivery,
+        operationId: body.operationId,
+        ...(body.expectedRunId ? { expectedRunId: body.expectedRunId } : {}),
+        ...(body.expectedSessionRevision !== undefined ? { expectedSessionRevision: body.expectedSessionRevision } : {}),
+      });
+      sendJson(res, 200, result);
+      return;
+    }
+
+    const queueOrderMatch = /^\/api\/conversations\/([^/]+)\/queued-messages\/order$/.exec(url.pathname);
+    if (queueOrderMatch && req.method === 'PATCH') {
+      const sessionId = decodeURIComponent(queueOrderMatch[1]);
+      const scope = conversationScope(url, requestWorkspaceScope);
+      await loadScopedSession(sessionId, scope);
+      const body = await parseBody<{ orderedItemIds?: string[]; operationId?: string; expectedSessionRevision?: number }>(req);
+      if (!Array.isArray(body.orderedItemIds) || body.orderedItemIds.some((item) => typeof item !== 'string')) throw new HttpError(400, 'orderedItemIds 必须是字符串数组');
+      if (!body.operationId?.trim()) throw new HttpError(400, 'operationId required');
+      if (!Number.isInteger(body.expectedSessionRevision)) throw new HttpError(400, 'expectedSessionRevision required');
+      const result = await conversationRunCoordinator.mutateQueue({
+        type: 'reorder',
+        sessionId,
+        orderedItemIds: body.orderedItemIds,
+        operationId: body.operationId,
+        expectedSessionRevision: body.expectedSessionRevision!,
+      });
+      sendJson(res, 200, result);
+      return;
+    }
+
+    const queueItemCommandMatch = /^\/api\/conversations\/([^/]+)\/queued-messages\/([^/]+)\/commands$/.exec(url.pathname);
+    const queueItemMatch = /^\/api\/conversations\/([^/]+)\/queued-messages\/([^/]+)$/.exec(url.pathname);
+    if ((queueItemCommandMatch && req.method === 'POST') || (queueItemMatch && req.method === 'DELETE')) {
+      const match = queueItemCommandMatch ?? queueItemMatch!;
+      const sessionId = decodeURIComponent(match[1]);
+      const itemId = decodeURIComponent(match[2]);
+      const scope = conversationScope(url, requestWorkspaceScope);
+      await loadScopedSession(sessionId, scope);
+      if (queueItemMatch && req.method === 'DELETE') {
+        const body = await parseBody<{ operationId?: string; expectedSessionRevision?: number }>(req);
+        if (!body.operationId?.trim()) throw new HttpError(400, 'operationId required');
+        const result = await conversationRunCoordinator.mutateQueue({
+          type: 'cancel',
+          sessionId,
+          itemId,
+          operationId: body.operationId,
+          ...(body.expectedSessionRevision !== undefined ? { expectedSessionRevision: body.expectedSessionRevision } : {}),
+        });
+        sendJson(res, 200, result);
+        return;
+      }
+      const body = await parseBody<{ action?: 'promote_to_steer'; operationId?: string; expectedRunId?: string; expectedSessionRevision?: number }>(req);
+      if (body.action !== 'promote_to_steer') throw new HttpError(400, '不支持的 Queue Item 命令');
+      if (!body.operationId?.trim() || !body.expectedRunId?.trim()) throw new HttpError(400, 'operationId 和 expectedRunId required');
+      const result = await conversationRunCoordinator.mutateQueue({
+        type: 'promote_to_steer',
+        sessionId,
+        itemId,
+        operationId: body.operationId,
+        expectedRunId: body.expectedRunId,
+        ...(body.expectedSessionRevision !== undefined ? { expectedSessionRevision: body.expectedSessionRevision } : {}),
+      });
+      sendJson(res, 200, result);
       return;
     }
 
@@ -621,10 +779,8 @@ export function startRuntimeServer() {
       const runRef = decodeURIComponent(runCommandMatch[1]);
       const { action } = await parseBody<{ action?: 'stop' }>(req);
       if (action !== 'stop') throw new HttpError(400, '不支持的运行命令');
-      const controller = activeConversationRuns.get(runRef);
-      if (!controller) throw new HttpError(404, '当前运行不存在或已经结束');
-      controller.abort();
-      sendJson(res, 200, { ok: true });
+      const result = await conversationRunCoordinator.stop({ runId: runRef, reason: 'user_stop' });
+      sendJson(res, 200, { ok: true, ...result });
       return;
     }
 
@@ -636,17 +792,14 @@ export function startRuntimeServer() {
       if (!clientRequestId) throw new HttpError(400, 'clientRequestId required');
 
       let scope: SessionScope;
-      let agent: CodingAgent;
       if (payload.scope?.kind === 'workspace') {
         const workspaceRef = payload.scope.workspaceRef?.trim();
         if (!workspaceRef) throw new HttpError(400, 'workspaceRef required');
         const workspace = await workspaceRegistry.resolveAvailable(workspaceRef);
         const runtime = await loadWorkspaceRuntime(workspace.canonicalRootPath);
         scope = workspaceScope(runtime);
-        agent = runtime.codingAgent;
       } else {
         scope = { kind: 'general' };
-        agent = generalAgent;
       }
 
       const runId = crypto.randomUUID();
@@ -692,33 +845,19 @@ export function startRuntimeServer() {
       }
 
       res.writeHead(200, sseHeaders());
-      const controller = new AbortController();
-      activeConversationRuns.set(runId, controller);
-      const writer = createBoundedSseWriter(res, () => controller.abort());
+      const writer = createBoundedSseWriter(res, () => { void conversationRunCoordinator.stop({ sessionId: session.sessionId, reason: 'disconnect' }); });
       writer.write({ type: 'session', sessionId: session.sessionId, isNew });
       const onEvent = (event: AgentEvent) => writer.write(event);
       let responseFinished = false;
       res.on('close', () => {
-        if (!responseFinished) controller.abort();
+        if (!responseFinished) void conversationRunCoordinator.stop({ sessionId: session.sessionId, reason: 'disconnect' });
       });
       try {
-        await agent.runTask(
-          session.sessionId,
-          prompt,
-          null,
-          onEvent,
-          {
-            onConfirm: createConfirmHook(session.sessionId, runId, onEvent),
-            onCommandConfirm: createCommandConfirmHook(session.sessionId, runId, onEvent),
-            onApproval: createToolApprovalHook(session.sessionId, runId, onEvent),
-          },
-          { runId, signal: controller.signal, prestarted, clientRequestId },
-        );
+        await conversationRunCoordinator.start({ sessionId: session.sessionId, prompt, runId, prestarted, clientRequestId }, onEvent);
       } catch (error) {
         writer.write({ type: 'error', message: error instanceof Error ? error.message : '运行失败' });
       } finally {
         responseFinished = true;
-        activeConversationRuns.delete(runId);
         await writer.drain();
         res.end();
       }
@@ -1599,7 +1738,11 @@ export function startRuntimeServer() {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Not Found");
     } catch (err) {
-      const status = err instanceof HttpError ? err.status : 500;
+      const status = err instanceof HttpError
+        ? err.status
+        : err instanceof QueueMutationError
+          ? err.code === 'NOT_FOUND' ? 404 : err.code === 'INVALID_ORDER' || err.code === 'INVALID_STATE' ? 400 : 409
+          : 500;
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[request error] ${req.method} ${url.pathname}:`, message);
       if (!(res as ServerResponse & { headersSent: boolean }).headersSent) {

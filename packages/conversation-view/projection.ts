@@ -127,7 +127,7 @@ export function projectConversation(session: Session, options: { contextWindow?:
   return {
     ref: item.ref,
     title: item.title,
-    state: item.state,
+    state: options.activePhase === 'waiting_confirm' ? 'waiting' : item.state,
     ...(session.activeTaskId ? { activeRun: { runId: session.activeTaskId, phase: options.activePhase ?? (item.state === 'waiting' ? 'waiting_confirm' : 'running') } } : {}),
     queuedItems: queue.pending,
     queuePaused: queue.paused,

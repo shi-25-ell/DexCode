@@ -92,7 +92,7 @@ test('Coordinator promotes and consumes Steer in the active Run without starting
     assert.equal(queued.outcome, 'queued');
     if (!('item' in queued)) throw new Error('Queue item missing');
     const promoted = await coordinator.mutateQueue({ type: 'promote_to_steer', sessionId: session.sessionId, itemId: queued.item.itemId, expectedRunId: 'run-steer', operationId: 'promote-steer' });
-    assert.equal(promoted.outcome, 'steered');
+    assert.equal('outcome' in promoted ? promoted.outcome : undefined, 'steered');
     continueRun.release();
     const result = await running;
     const loaded = await repository.loadSession(session.sessionId);
@@ -129,6 +129,55 @@ test('Coordinator Stop aborts only the active Run and preserves a paused Queue',
     const queue = await repository.getQueue(session.sessionId);
     assert.equal(queue.paused, true);
     assert.deepEqual(queue.pending.map((item) => item.content), ['keep me']);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('promote racing with natural closing remains queued and drains without loss', async () => {
+  const repository = createSessionRepository({ projectId: `test-coordinator-closing-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const firstStarted = deferred();
+    const enterBoundary = deferred();
+    const closing = deferred();
+    const finishFirst = deferred();
+    let calls = 0;
+    const agent = {
+      async runTask(sessionId: string, prompt: string, _selectedFile: string | null, _onEvent: (event: AgentEvent) => void, _hooks: unknown, options: any) {
+        calls += 1;
+        if (!options.prestarted) await repository.beginRun({ sessionId, runId: options.runId, userMessage: { role: 'user', content: prompt }, context });
+        if (calls === 1) {
+          firstStarted.release();
+          await enterBoundary.promise;
+        }
+        const decision = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 1, wouldNaturallyComplete: true });
+        assert.equal(decision.action, 'finish');
+        if (calls === 1) {
+          closing.release();
+          await finishFirst.promise;
+        }
+        const value = terminal(options.runId, prompt);
+        await repository.finishRun({ sessionId, report: value.report, summary: value.summary });
+        return value.summary;
+      },
+    };
+    const coordinator = createConversationRunCoordinator({ repository, resolveEnvironment: async () => ({ agent, context }), createHooks: () => ({}) });
+    const running = coordinator.start({ sessionId: session.sessionId, runId: 'run-closing', prompt: 'initial', prestarted: false }, () => {});
+    await firstStarted.promise;
+    const queued = await coordinator.submitDuringRun({ sessionId: session.sessionId, content: 'must survive', delivery: 'next_run', operationId: 'enqueue-race' });
+    if (!('item' in queued)) throw new Error('Queue item missing');
+    enterBoundary.release();
+    await closing.promise;
+    const promoted = await coordinator.mutateQueue({ type: 'promote_to_steer', sessionId: session.sessionId, itemId: queued.item.itemId, expectedRunId: 'run-closing', operationId: 'promote-race' });
+    assert.equal('outcome' in promoted ? promoted.outcome : undefined, 'remained_queued');
+    if ('outcome' in promoted && promoted.outcome === 'remained_queued') assert.equal(promoted.reason, 'run_closing');
+    finishFirst.release();
+    const result = await running;
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.equal(result.summaries.length, 2);
+    assert.deepEqual(loaded?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['initial', 'must survive']);
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }

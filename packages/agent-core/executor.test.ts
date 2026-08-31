@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createExecutor } from './executor.ts';
 import type { ModelClient, ModelEvent, ModelResponse } from '../llm-client/index.ts';
 import type { ContextEngine, PrepareContextInput, PreparedContext } from '../context-engine/index.ts';
-import type { AgentEvent } from '../shared/types.ts';
+import type { AgentEvent, ChatMessage } from '../shared/types.ts';
 
 function scriptedModel(responses: ModelResponse[]): ModelClient {
   let index = 0;
@@ -122,7 +122,7 @@ test('consumes one Steer at a natural safe boundary before the next model reques
   const model: ModelClient = {
     ...scripted,
     async *streamMessage(messages, options) {
-      requests.push(messages.flatMap((message) => message.role === 'user' ? [message.content] : []));
+      requests.push((messages as ChatMessage[]).flatMap((message) => message.role === 'user' ? [message.content] : []));
       yield* scripted.streamMessage(messages, options);
     },
   };
