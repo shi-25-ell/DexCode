@@ -71,6 +71,18 @@ function ContextLabel({ usage, running }: { usage: ContextUsage; running: boolea
   return <span title={`${detail} · ${timing} · ${source}${usage.breakdownEstimated ? ' · 构成估算' : ''}`}>上下文 {usage.percentage}%{estimated ? ' · 估算' : ''}</span>;
 }
 
+export function shouldShowConversationLoading(input: {
+  hasConversationRef: boolean;
+  hasSnapshot: boolean;
+  snapshotPending: boolean;
+  materializingDraft: boolean;
+}): boolean {
+  return input.hasConversationRef
+    && !input.hasSnapshot
+    && input.snapshotPending
+    && !input.materializingDraft;
+}
+
 export function ConversationPage({ scope, conversationRef }: { scope: ConversationScope; conversationRef?: string }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -105,7 +117,12 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     queryFn: () => apiJson<{ model: { displayName: string; contextWindow?: number } }>('/api/meta', { workspaceRef }),
     staleTime: 60_000,
   });
-  const loadingConversation = Boolean(conversationRef && !snapshot.data && snapshot.isPending);
+  const loadingConversation = shouldShowConversationLoading({
+    hasConversationRef: Boolean(conversationRef),
+    hasSnapshot: Boolean(snapshot.data),
+    snapshotPending: snapshot.isPending,
+    materializingDraft: Boolean(state.activeRun && streamingRef.current),
+  });
 
   useEffect(() => {
     const previousIdentity = previousConversationIdentityRef.current;

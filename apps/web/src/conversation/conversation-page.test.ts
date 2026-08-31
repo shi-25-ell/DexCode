@@ -6,10 +6,20 @@ import { ApprovalCard } from './approval-card';
 import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
+import { shouldShowConversationLoading } from './conversation-page';
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-id' });
 
 describe('conversation presentation', () => {
+  it('keeps the optimistic timeline visible while a new draft Session is materializing', () => {
+    expect(shouldShowConversationLoading({
+      hasConversationRef: true,
+      hasSnapshot: false,
+      snapshotPending: true,
+      materializingDraft: true,
+    })).toBe(false);
+  });
+
   it('only marks the terminal assistant segment of each completed response as copyable', () => {
     const items: ConversationItem[] = [
       { id: 'u1', kind: 'user', content: '搜索仓库' },
