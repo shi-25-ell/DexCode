@@ -27,7 +27,7 @@ export type ToolPresentation = {
   category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'other';
   name: string;
   target?: string;
-  status: 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
   summary: string;
   rawOutput?: string;
   truncated?: boolean;
@@ -36,7 +36,7 @@ export type ToolPresentation = {
 
 export type ConversationItem =
   | { id: string; kind: 'user'; content: string }
-  | { id: string; kind: 'assistant'; content: string }
+  | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command' | 'tool'; title: string; target?: string; reason?: string; toolName?: string; effect?: ApprovalEffect; fingerprint?: string; options: string[]; resolved?: string }
@@ -79,7 +79,7 @@ export type ContextPresentation = {
   summarizedMessages?: number;
   retainedConversationSegments?: number;
   retainedMessageCount?: number;
-  reason?: string;
+  reason?: 'summary_failed' | 'cancelled' | 'invalid_summary' | 'interrupted' | 'persistence_failed';
 };
 
 export type ConversationSnapshot = {
@@ -87,6 +87,7 @@ export type ConversationSnapshot = {
   title: string;
   state: 'idle' | 'running' | 'waiting' | 'failed';
   updatedAt: string;
+  revision: number;
   items: ConversationItem[];
   contextUsage: ContextUsage;
 };

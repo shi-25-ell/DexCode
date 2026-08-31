@@ -38,6 +38,7 @@ export const toolIcons: Record<ToolPresentation['category'], ComponentType<{ siz
 
 export const statusIcons = {
   succeeded: CircleCheck,
+  queued: FolderSearch2,
   running: FolderSearch2,
   failed: CircleAlert,
   denied: CircleStop,

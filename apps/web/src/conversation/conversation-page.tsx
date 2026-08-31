@@ -162,7 +162,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   useEffect(() => {
     stickToBottom.current = true;
     setAtBottom(true);
-    if (!conversationRef) dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], contextUsage: { source: 'unknown', timing: 'next_request' } } });
+    if (!conversationRef) dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', revision: 0, items: [], contextUsage: { source: 'unknown', timing: 'next_request' } } });
   }, [conversationRef, scope.kind, scope.kind === 'workspace' ? scope.workspaceRef : 'general']);
 
   useLayoutEffect(() => {
