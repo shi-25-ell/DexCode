@@ -267,6 +267,10 @@ export type ToolPresentation = {
   summary: string;
   rawOutput?: string;
   truncated?: boolean;
+  approval?: {
+    status: 'not_required' | 'pending' | 'approved' | 'denied';
+    addedToWhitelist: boolean;
+  };
   fileChange?: {
     path: string;
     kind: 'created' | 'modified';
@@ -278,7 +282,7 @@ export type ToolPresentation = {
   };
 };
 
-export type ToolBatchType = 'inspection' | 'modification';
+export type ToolBatchType = 'inspection' | 'modification' | 'command';
 
 export type ToolBatchPresentation = {
   id: string;

@@ -60,4 +60,22 @@ describe('ToolBatchCard', () => {
     fireEvent.click(operationButtons[1]!);
     expect(screen.getByText(/-second\s+\+SECOND/)).toBeInTheDocument();
   });
+
+  it('shows every command execution and approval outcome', () => {
+    render(createElement(ToolBatchCard, { batch: {
+      id: 'tool-batch-command-first', type: 'command', members: [
+        member('first', 'succeeded', { toolName: 'run_command', category: 'command', name: '执行命令', target: 'npm test', approval: { status: 'approved', addedToWhitelist: true } }),
+        member('second', 'failed', { toolName: 'run_command', category: 'command', name: '执行命令', target: 'npm run lint', approval: { status: 'denied', addedToWhitelist: false } }),
+      ],
+    } }));
+    expect(screen.getByText('执行了 2 个命令 · 失败 1 个')).toBeInTheDocument();
+    expect(screen.getByText('部分失败')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '执行命令，展开批次详情' }));
+    expect(screen.getByText('npm test')).toBeInTheDocument();
+    expect(screen.getByText('npm run lint')).toBeInTheDocument();
+    expect(screen.getByText('已批准')).toBeInTheDocument();
+    expect(screen.getByText('已拒绝')).toBeInTheDocument();
+    expect(screen.getByText('加入白名单：是')).toBeInTheDocument();
+    expect(screen.getByText('加入白名单：否')).toBeInTheDocument();
+  });
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { Session, ToolPresentation, ToolViewStatus } from '../shared/types.ts';
+import type { Session, ToolApprovalRequest, ToolPresentation, ToolViewStatus } from '../shared/types.ts';
 import { projectConversation } from './projection.ts';
 import { batchToolSequence, toolBatchStatus, toolBatchSummary } from './tool-batching.ts';
 import { presentTool } from './tool-presentation.ts';
@@ -62,10 +62,29 @@ test('type changes, assistant boundaries, other tools and context-like boundarie
     'boundary:assistant-empty',
     'tool_batch:inspection:1',
     'boundary:assistant-visible',
-    'tool:command-1',
+    'tool_batch:command:1',
     'boundary:context',
     'tool_batch:inspection:1',
   ]);
+});
+
+test('consecutive commands merge across their individual approval cards', () => {
+  const first = tool('run_command', 'command-1');
+  const second = tool('run_command', 'command-2', 'failed');
+  const output = batchToolSequence([
+    { kind: 'tool', key: first.callRef, tool: first },
+    { kind: 'boundary', key: 'approval-1', value: 'approval-1', transparentFor: ['command'] },
+    { kind: 'tool', key: second.callRef, tool: second },
+    { kind: 'boundary', key: 'approval-2', value: 'approval-2', transparentFor: ['command'] },
+  ]);
+  assert.equal(output[0]?.kind, 'tool_batch');
+  if (output[0]?.kind === 'tool_batch') {
+    assert.equal(output[0].batch.id, 'tool-batch-command-command-1');
+    assert.deepEqual(output[0].batch.members.map((member) => member.callRef), ['command-1', 'command-2']);
+    assert.equal(toolBatchSummary(output[0].batch), '执行了 2 个命令 · 失败 1 个');
+    assert.deepEqual(toolBatchStatus(output[0].batch), { status: 'warning', failed: 1 });
+  }
+  assert.deepEqual(output.slice(1).map((entry) => entry.key), ['approval-1', 'approval-2']);
 });
 
 test('batch status exposes partial and total failures without changing membership', () => {
@@ -96,6 +115,38 @@ test('history ends a batch when the Run changes and never projects completion re
   };
   const batches = projectConversation(session).items.filter((item) => item.kind === 'tool_batch');
   assert.deepEqual(batches.map((item) => item.kind === 'tool_batch' ? item.batch.members.map((member) => member.callRef) : []), [['run-one-call'], ['run-two-call']]);
+});
+
+test('history keeps command approvals separate while annotating the merged command batch', () => {
+  const now = '2026-09-01T00:00:00.000Z';
+  const first = tool('run_command', 'command-one');
+  const second = tool('run_command', 'command-two', 'denied');
+  const request = (approvalId: string, target: string): ToolApprovalRequest => ({
+    version: 1 as const, approvalId, toolName: 'run_command', effect: 'execute' as const,
+    title: `批准 ${target}`, target, reason: '需要批准', fingerprint: approvalId,
+    options: ['allow_once', 'allow_whitelist', 'deny'],
+  });
+  const session: Session = {
+    sessionId: 'session-command-history', scope: { kind: 'general' }, createdAt: now, updatedAt: now,
+    messages: [], taskSummaries: [], activeTaskId: null,
+    ledger: [
+      { seq: 1, at: now, runId: 'run-1', type: 'tool_started', callId: first.callRef, tool: 'run_command', input: { command: 'npm test' } },
+      { seq: 2, at: now, runId: 'run-1', type: 'approval_requested', approvalId: 'approval-1', request: request('approval-1', 'npm test') },
+      { seq: 3, at: now, runId: 'run-1', type: 'approval_resolved', approvalId: 'approval-1', decision: 'allow_whitelist' },
+      { seq: 4, at: now, runId: 'run-1', type: 'tool_completed', callId: first.callRef, presentation: first },
+      { seq: 5, at: now, runId: 'run-1', type: 'tool_started', callId: second.callRef, tool: 'run_command', input: { command: 'npm run lint' } },
+      { seq: 6, at: now, runId: 'run-1', type: 'approval_requested', approvalId: 'approval-2', request: request('approval-2', 'npm run lint') },
+      { seq: 7, at: now, runId: 'run-1', type: 'approval_resolved', approvalId: 'approval-2', decision: 'deny' },
+      { seq: 8, at: now, runId: 'run-1', type: 'tool_completed', callId: second.callRef, presentation: second },
+    ],
+  };
+  const items = projectConversation(session).items;
+  assert.deepEqual(items.map((item) => item.kind), ['tool_batch', 'approval', 'approval']);
+  const batch = items[0];
+  if (batch?.kind === 'tool_batch') assert.deepEqual(batch.batch.members.map((member) => member.approval), [
+    { status: 'approved', addedToWhitelist: true },
+    { status: 'denied', addedToWhitelist: false },
+  ]);
 });
 
 test('history uses start order, ignores completion order, and matches live batching', () => {

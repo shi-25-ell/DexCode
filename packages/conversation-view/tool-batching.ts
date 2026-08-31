@@ -5,16 +5,17 @@ const MODIFICATION_TOOLS = new Set(['write_file', 'patch_file']);
 
 export type ToolSequenceInput<T extends Pick<ToolPresentation, 'callRef' | 'toolName'>, B> =
   | { kind: 'tool'; key: string; tool: T }
-  | { kind: 'boundary'; key: string; value: B };
+  | { kind: 'boundary'; key: string; value: B; transparentFor?: ToolBatchType[] };
 
 export type ToolSequenceOutput<T extends Pick<ToolPresentation, 'callRef' | 'toolName'>, B> =
   | { kind: 'tool_batch'; key: string; batch: { id: string; type: ToolBatchType; members: T[] } }
   | { kind: 'tool'; key: string; tool: T }
-  | { kind: 'boundary'; key: string; value: B };
+  | { kind: 'boundary'; key: string; value: B; transparentFor?: ToolBatchType[] };
 
 export function toolBatchType(toolName: string): ToolBatchType | undefined {
   if (INSPECTION_TOOLS.has(toolName)) return 'inspection';
   if (MODIFICATION_TOOLS.has(toolName)) return 'modification';
+  if (toolName === 'run_command') return 'command';
   return undefined;
 }
 
@@ -25,7 +26,7 @@ export function batchToolSequence<T extends Pick<ToolPresentation, 'callRef' | '
   let active: Extract<ToolSequenceOutput<T, B>, { kind: 'tool_batch' }> | undefined;
   for (const entry of entries) {
     if (entry.kind === 'boundary') {
-      active = undefined;
+      if (!active || !entry.transparentFor?.includes(active.batch.type)) active = undefined;
       result.push(entry);
       continue;
     }
@@ -70,6 +71,10 @@ export function toolBatchSummary(batch: Pick<ToolBatchPresentation, 'type' | 'me
     ))).size;
     const searches = batch.members.filter((member) => member.toolName === 'search_in_workspace').length;
     return [files ? `检查了 ${files} 个文件` : '', searches ? `搜索 ${searches} 次` : '', `${batch.members.length} 项操作`].filter(Boolean).join(' · ');
+  }
+  if (batch.type === 'command') {
+    const failed = batch.members.filter((member) => member.status === 'failed').length;
+    return `执行了 ${batch.members.length} 个命令 · 失败 ${failed} 个`;
   }
   const files = new Set(batch.members.flatMap((member) => {
     const path = member.fileChange?.path ?? member.target;

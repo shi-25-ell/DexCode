@@ -118,13 +118,42 @@ export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGr
   onStopAgent?(agentId: string): void;
 }) {
   const exactAgentRunIds = useMemo(() => new Set(run.activityOrder.flatMap((entry) => entry.kind === 'agent' ? [entry.agentRunId] : [])), [run.activityOrder]);
-  const displayOrder = useMemo(() => batchToolSequence(run.activityOrder.map((entry) => {
-    if (entry.kind === 'tool') {
-      const tool = run.toolsByCallId[entry.callId];
-      if (tool) return { kind: 'tool' as const, key: activityKey(entry), tool };
+  const displayOrder = useMemo(() => {
+    const approvalByCall = new Map<string, Extract<import('../types').ConversationItem, { kind: 'approval' }>>();
+    const callByApproval = new Map<string, string>();
+    let awaitingCommand: string | undefined;
+    for (const entry of run.activityOrder) {
+      if (entry.kind === 'tool') awaitingCommand = run.toolsByCallId[entry.callId]?.toolName === 'run_command' ? entry.callId : undefined;
+      else if (entry.kind === 'approval' && awaitingCommand) {
+        const approval = run.approvalsById[entry.approvalId];
+        if (approval && (approval.approvalKind === 'command' || approval.toolName === 'run_command')) {
+          approvalByCall.set(awaitingCommand, approval);
+          callByApproval.set(entry.approvalId, awaitingCommand);
+        }
+        awaitingCommand = undefined;
+      } else if (entry.kind !== 'approval') awaitingCommand = undefined;
     }
-    return { kind: 'boundary' as const, key: activityKey(entry), value: entry };
-  })), [run.activityOrder, run.toolsByCallId]);
+    return batchToolSequence(run.activityOrder.map((entry) => {
+      if (entry.kind === 'tool') {
+        const stored = run.toolsByCallId[entry.callId];
+        if (stored) {
+          const approval = approvalByCall.get(entry.callId);
+          const tool = stored.toolName === 'run_command' ? {
+            ...stored,
+            approval: approval ? {
+              status: approval.resolved === 'deny' ? 'denied' as const : approval.resolved ? 'approved' as const : 'pending' as const,
+              addedToWhitelist: approval.resolved === 'allow_whitelist',
+            } : { status: 'not_required' as const, addedToWhitelist: false },
+          } : stored;
+          return { kind: 'tool' as const, key: activityKey(entry), tool };
+        }
+      }
+      return {
+        kind: 'boundary' as const, key: activityKey(entry), value: entry,
+        ...(entry.kind === 'approval' && callByApproval.has(entry.approvalId) ? { transparentFor: ['command' as const] } : {}),
+      };
+    }));
+  }, [run.activityOrder, run.approvalsById, run.toolsByCallId]);
   return (
     <section className="run-activity" aria-label="当前运行" aria-live="polite">
       <div className={`run-phase ${run.phase}`} role="status">

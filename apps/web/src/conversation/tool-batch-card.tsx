@@ -1,5 +1,5 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
-import { ChevronDown, CircleAlert, Files, FolderSearch2 } from 'lucide-react';
+import { ChevronDown, CircleAlert, Files, FolderSearch2, TerminalSquare } from 'lucide-react';
 import { useState } from 'react';
 import { toolBatchStatus, toolBatchSummary } from '../../../../packages/conversation-view/tool-batching';
 import type { ToolBatchPresentation, ToolPresentation } from '../types';
@@ -11,6 +11,14 @@ const statusLabels = {
   failed: '全部失败',
   denied: '已拒绝',
   cancelled: '已取消',
+} as const;
+
+const commandStatusLabels: Record<ToolPresentation['status'], string> = {
+  queued: '等待执行', running: '执行中', succeeded: '成功', failed: '失败', denied: '已拒绝', cancelled: '已取消',
+};
+
+const approvalStatusLabels = {
+  not_required: '无需审批', pending: '等待审批', approved: '已批准', denied: '已拒绝',
 } as const;
 
 function FileOperation({ tool }: { tool: ToolPresentation }) {
@@ -38,14 +46,14 @@ function FileOperation({ tool }: { tool: ToolPresentation }) {
 export function ToolBatchCard({ batch }: { batch: ToolBatchPresentation }) {
   const [open, setOpen] = useState(false);
   const state = toolBatchStatus(batch);
-  const Icon = batch.type === 'inspection' ? FolderSearch2 : Files;
+  const Icon = batch.type === 'inspection' ? FolderSearch2 : batch.type === 'command' ? TerminalSquare : Files;
   const failures = batch.members.filter((member) => member.status === 'failed');
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen} className={`tool-card tool-batch-card ${state.status}`}>
-      <Collapsible.Trigger className="tool-card-trigger" aria-label={`${batch.type === 'inspection' ? '检查文件' : '修改文件'}，展开批次详情`}>
+      <Collapsible.Trigger className="tool-card-trigger" aria-label={`${batch.type === 'inspection' ? '检查文件' : batch.type === 'command' ? '执行命令' : '修改文件'}，展开批次详情`}>
         <span className="tool-icon"><Icon size={16} strokeWidth={1.8} /></span>
         <span className="tool-main">
-          <span className="tool-title-line"><strong>{batch.type === 'inspection' ? '检查文件' : '修改文件'}</strong></span>
+          <span className="tool-title-line"><strong>{batch.type === 'inspection' ? '检查文件' : batch.type === 'command' ? '执行命令' : '修改文件'}</strong></span>
           <span className="tool-summary">{toolBatchSummary(batch)}</span>
           {failures.length > 0 ? (
             <span className="batch-error-summaries">
@@ -68,6 +76,17 @@ export function ToolBatchCard({ batch }: { batch: ToolBatchPresentation }) {
                 <strong>{member.name}</strong>
                 {member.target ? <code>{member.target}</code> : <span />}
                 <span>{member.summary}</span>
+              </div>
+            ))}
+          </div>
+        ) : batch.type === 'command' ? (
+          <div className="batch-operation-list">
+            {batch.members.map((member) => (
+              <div className={`batch-command-row ${member.status}`} key={member.callRef}>
+                <code>{member.target ?? member.name}</code>
+                <span>{commandStatusLabels[member.status]}</span>
+                <span>{approvalStatusLabels[member.approval?.status ?? 'not_required']}</span>
+                <span>加入白名单：{member.approval?.addedToWhitelist ? '是' : '否'}</span>
               </div>
             ))}
           </div>

@@ -273,6 +273,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 .batch-inspection-row code { overflow: hidden; color: #475569; text-overflow: ellipsis; white-space: nowrap; }
 .batch-inspection-row > span:last-child { color: var(--muted); }
 .batch-inspection-row.failed { background: #fff1f2; color: #b91c1c; }
+.batch-command-row { display: grid; grid-template-columns: minmax(220px, 1fr) 80px 90px 120px; gap: 10px; align-items: baseline; padding: 8px; border-radius: 6px; background: #fff; font-size: 12px; }
+.batch-command-row code { overflow: hidden; color: #334155; text-overflow: ellipsis; white-space: nowrap; }
+.batch-command-row > span { color: var(--muted); }
+.batch-command-row.failed { background: #fff1f2; }
 .batch-operation { overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: #fff; }
 .batch-operation > button { display: grid; grid-template-columns: minmax(0, 1fr) auto auto 18px; gap: 10px; align-items: center; width: 100%; padding: 8px 10px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .batch-operation > button:disabled { cursor: default; }

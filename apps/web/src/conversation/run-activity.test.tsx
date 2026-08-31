@@ -24,6 +24,25 @@ function run(overrides: Partial<ActiveRunView> = {}): ActiveRunView {
 }
 
 describe('RunActivity', () => {
+  it('merges live commands while preserving separate approval controls', () => {
+    const command = (callRef: string, target: string) => ({ callRef, toolName: 'run_command', category: 'command' as const, name: '执行命令', target, status: 'queued' as const, summary: '准备执行' });
+    render(createElement(RunActivity, {
+      run: run({
+        toolsByCallId: { first: command('first', 'npm test'), second: command('second', 'npm run lint') },
+        approvalsById: {
+          'approval-1': { id: 'approval-1', kind: 'approval', approvalRef: 'approval-1', approvalKind: 'tool', toolName: 'run_command', effect: 'execute', title: '批准 npm test', reason: 'test', fingerprint: 'one', options: ['allow_once', 'allow_whitelist', 'deny'] },
+          'approval-2': { id: 'approval-2', kind: 'approval', approvalRef: 'approval-2', approvalKind: 'tool', toolName: 'run_command', effect: 'execute', title: '批准 npm run lint', reason: 'lint', fingerprint: 'two', options: ['allow_once', 'allow_whitelist', 'deny'] },
+        },
+        activityOrder: [
+          { kind: 'tool', callId: 'first' }, { kind: 'approval', approvalId: 'approval-1' },
+          { kind: 'tool', callId: 'second' }, { kind: 'approval', approvalId: 'approval-2' },
+        ],
+      }), needsResync: false,
+    }));
+    expect(screen.getByText('执行了 2 个命令 · 失败 0 个')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '允许一次' })).toHaveLength(2);
+  });
+
   it('renders one live batch per activity-order segment, including an invisible assistant boundary', () => {
     const read = (callRef: string) => ({ callRef, toolName: 'read_file', category: 'read' as const, name: '读取文件', target: `${callRef}.ts`, status: 'succeeded' as const, summary: '读取完成' });
     render(createElement(RunActivity, {

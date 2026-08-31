@@ -32,12 +32,13 @@ export type ToolPresentation = {
   summary: string;
   rawOutput?: string;
   truncated?: boolean;
+  approval?: { status: 'not_required' | 'pending' | 'approved' | 'denied'; addedToWhitelist: boolean };
   fileChange?: { path: string; kind: 'created' | 'modified'; additions: number; deletions: number; binary?: boolean; diff: string; truncated: boolean };
 };
 
 export type ToolBatchPresentation = {
   id: string;
-  type: 'inspection' | 'modification';
+  type: 'inspection' | 'modification' | 'command';
   members: ToolPresentation[];
 };
 

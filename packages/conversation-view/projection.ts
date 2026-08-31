@@ -131,7 +131,7 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
   type Boundary = ConversationItem | undefined;
   const sequence: Array<
     | { kind: 'tool'; key: string; tool: ToolPresentation }
-    | { kind: 'boundary'; key: string; value: Boundary }
+    | { kind: 'boundary'; key: string; value: Boundary; transparentFor?: import('../shared/types.ts').ToolBatchType[] }
   > = [];
   const pushItem = (item: ConversationItem) => sequence.push({ kind: 'boundary', key: item.id, value: item });
   const breakBatch = (key: string) => sequence.push({ kind: 'boundary', key, value: undefined });
@@ -157,6 +157,22 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
   }
   const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && ['compact_context', 'spawn_agent', 'wait_agent', 'followup_agent', 'stop_agent'].includes(record.tool) ? [record.callId] : []));
   const completedTools = new Map(records.flatMap((record) => record.type === 'tool_completed' ? [[record.callId, record] as const] : []));
+  const approvalDecisionById = new Map(records.flatMap((record) => record.type === 'approval_resolved' ? [[record.approvalId, record.decision] as const] : []));
+  const commandApprovalByCall = new Map<string, { approvalId: string; decision?: string }>();
+  const commandCallByApprovalId = new Map<string, string>();
+  let awaitingCommandApproval: string | undefined;
+  let approvalRunId: string | undefined;
+  for (const record of records) {
+    if ('runId' in record && record.runId !== approvalRunId) { approvalRunId = record.runId; awaitingCommandApproval = undefined; }
+    if (record.type === 'tool_started') awaitingCommandApproval = record.tool === 'run_command' ? record.callId : undefined;
+    else if (record.type === 'approval_requested' && awaitingCommandApproval && record.request.toolName === 'run_command') {
+      const decision = approvalDecisionById.get(record.approvalId);
+      commandApprovalByCall.set(awaitingCommandApproval, { approvalId: record.approvalId, ...(decision ? { decision } : {}) });
+      commandCallByApprovalId.set(record.approvalId, awaitingCommandApproval);
+      awaitingCommandApproval = undefined;
+    } else if (record.type === 'message' && record.message.role === 'assistant') awaitingCommandApproval = undefined;
+    else if (record.type === 'tool_completed') awaitingCommandApproval = undefined;
+  }
   let currentRunId: string | undefined;
   for (const record of records) {
     if ('runId' in record && record.runId !== currentRunId) {
@@ -190,7 +206,15 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
       } else {
         const completed = completedTools.get(record.callId);
         if (completed) {
-          const tool = readableStoredPresentation(completed.presentation, record);
+          const stored = readableStoredPresentation(completed.presentation, record);
+          const approval = commandApprovalByCall.get(record.callId);
+          const tool = record.tool === 'run_command' ? {
+            ...stored,
+            approval: approval ? {
+              status: approval.decision === 'deny' ? 'denied' as const : approval.decision ? 'approved' as const : 'pending' as const,
+              addedToWhitelist: approval.decision === 'allow_whitelist',
+            } : { status: 'not_required' as const, addedToWhitelist: false },
+          } : stored;
           sequence.push({ kind: 'tool', key: `tool-${tool.callRef}`, tool });
         } else breakBatch(`unfinished-tool-boundary-${record.seq}`);
       }
@@ -210,7 +234,7 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
       if (existing >= 0) sequence[existing] = { kind: 'boundary', key: item.id, value: item };
       else pushItem(item);
     } else if (record.type === 'approval_requested') {
-      pushItem({
+      const item: ConversationItem = {
         id: `approval-${record.approvalId}`,
         kind: 'approval',
         approvalRef: record.approvalId,
@@ -222,6 +246,10 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
         reason: record.request.reason,
         fingerprint: record.request.fingerprint,
         options: record.request.options,
+      };
+      sequence.push({
+        kind: 'boundary', key: item.id, value: item,
+        ...(commandCallByApprovalId.has(record.approvalId) ? { transparentFor: ['command' as const] } : {}),
       });
     } else if (record.type === 'approval_resolved') {
       const existing = sequence.findIndex((entry) => entry.kind === 'boundary' && entry.value?.kind === 'approval' && entry.value.approvalRef === record.approvalId);
