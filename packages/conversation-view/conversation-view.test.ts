@@ -198,9 +198,10 @@ test('projection restores Context Cards and provider-calibrated request usage fr
     activeTaskId: null,
     ledger: [
       { seq: 1, at: now, runId: 'run-context', type: 'message', message: { role: 'user', content: 'long task' } },
-      { seq: 2, at: now, runId: 'run-context', type: 'context_compaction_started', operationRef: 'context-op' },
-      { seq: 3, at: now, runId: 'run-context', type: 'context_compaction_completed', presentation: { operationRef: 'context-op', status: 'completed', beforeTokens: 4_000, afterTokens: 1_000, breakdown, archivedMessages: 12 } },
-      { seq: 4, at: now, runId: 'run-context', type: 'context_usage_observed', manifestId: 'manifest-1', usage: { usedTokens: 1_100, contextWindowTokens: 10_000, hardLimitTokens: 8_000, percentage: 11, source: 'provider', timing: 'last_request', asOfTurn: 2, asOfAttempt: 2, breakdown, breakdownEstimated: true } },
+      { seq: 2, at: now, runId: 'run-context', type: 'context_compaction_completed', presentation: { operationRef: 'context-cheap', status: 'completed', beforeTokens: 4_500, afterTokens: 4_000, breakdown, archivedMessages: 12 } },
+      { seq: 3, at: now, runId: 'run-context', type: 'context_compaction_started', operationRef: 'context-op' },
+      { seq: 4, at: now, runId: 'run-context', type: 'context_compaction_completed', presentation: { operationRef: 'context-op', status: 'completed', beforeTokens: 4_000, afterTokens: 1_000, breakdown, summarizedMessages: 12 }, summaryRecordId: 'summary-1' },
+      { seq: 5, at: now, runId: 'run-context', type: 'context_usage_observed', manifestId: 'manifest-1', usage: { usedTokens: 1_100, contextWindowTokens: 10_000, hardLimitTokens: 8_000, percentage: 11, source: 'provider', timing: 'last_request', asOfTurn: 2, asOfAttempt: 2, breakdown, breakdownEstimated: true } },
     ],
   };
   const view = projectConversation(session);

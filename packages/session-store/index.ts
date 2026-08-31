@@ -823,7 +823,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
           ? [
               ...(session.ledger ?? []),
               { seq, at: new Date().toISOString(), runId: input.runId, type: 'context_prepare_committed', manifest: input.manifest },
-              ...(input.activity ? [{
+              ...(input.activity && input.summaryRecord ? [{
                 seq: seq + 1,
                 at: new Date().toISOString(),
                 runId: input.runId,

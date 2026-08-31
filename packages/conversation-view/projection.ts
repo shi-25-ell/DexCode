@@ -119,6 +119,7 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
     } else if (record.type === 'context_compaction_started') {
       items.push({ id: `context-${record.operationRef}`, kind: 'context', context: { operationRef: record.operationRef, status: 'running' } });
     } else if (record.type === 'context_compaction_completed') {
+      if (!record.summaryRecordId && (record.presentation.summarizedMessages ?? 0) === 0) continue;
       const existing = items.findIndex((item) => item.kind === 'context' && item.context.operationRef === record.presentation.operationRef);
       const item = { id: `context-${record.presentation.operationRef}`, kind: 'context' as const, context: record.presentation };
       if (existing >= 0) items[existing] = item;

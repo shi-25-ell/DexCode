@@ -83,6 +83,120 @@ test('Session repository commits one terminal report and preserves ledger order'
   }
 });
 
+test('Session repository records a user-visible compaction only when a new summary is committed', async () => {
+  const repository = createSessionRepository({ projectId: `test-context-presentation-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const runId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const breakdown = { systemPrompt: 2, workspaceCode: 0, recentConversation: 3, toolResults: 0, projectMemory: 0, managedMemory: 0, toolDefinitions: 1, other: 1 };
+    const activity = {
+      operationRef: 'context-cheap',
+      layers: ['middle_archive'] as const,
+      beforeTokens: 12,
+      afterTokens: 10,
+      beforeBreakdown: breakdown,
+      afterBreakdown: breakdown,
+      externalizedToolResults: 0,
+      archivedMessages: 4,
+      archivedConversationSegments: 2,
+      compactedToolResults: 0,
+      summarizedMessages: 0,
+      retainedConversationSegments: 0,
+      retainedMessageCount: 0,
+    };
+    await repository.beginRun({ sessionId: session.sessionId, runId, userMessage: { role: 'user', content: 'test' }, context: generalContext });
+    await repository.commitContext({
+      sessionId: session.sessionId,
+      runId,
+      manifest: {
+        version: 2,
+        id: 'manifest-cheap',
+        runId,
+        turn: 1,
+        attempt: 1,
+        createdAt: now,
+        requestDigest: 'digest-cheap',
+        requestSerializedChars: 40,
+        estimatedInputTokens: 10,
+        tokenSource: 'estimated',
+        maxOutputTokens: 1_000,
+        reserveTokens: 500,
+        breakdown,
+        layers: [...activity.layers],
+        activity: { ...activity, layers: [...activity.layers] },
+        artifactRefs: [],
+        includedToolResultIds: [],
+      },
+      activity: { ...activity, layers: [...activity.layers] },
+    });
+
+    const summaryActivity = {
+      ...activity,
+      operationRef: 'context-summary',
+      layers: ['summary'] as const,
+      afterTokens: 7,
+      archivedMessages: 0,
+      archivedConversationSegments: 0,
+      summarizedMessages: 4,
+      retainedConversationSegments: 1,
+      retainedMessageCount: 2,
+    };
+    const summaryRecord = {
+      version: 2 as const,
+      id: 'summary-1',
+      runId,
+      turn: 2,
+      strategyVersion: 'structured-summary-v2' as const,
+      sourceDigest: 'source-digest',
+      coveredMessageCount: 4,
+      summary: 'summary',
+      retainedTail: [],
+      retainedTailDigest: 'tail-digest',
+      tokensBefore: 12,
+      tokensAfter: 7,
+      summaryModel: 'test-model',
+      createdAt: now,
+      artifactRefs: [],
+    };
+    await repository.commitContext({
+      sessionId: session.sessionId,
+      runId,
+      manifest: {
+        version: 2,
+        id: 'manifest-summary',
+        runId,
+        turn: 2,
+        attempt: 2,
+        createdAt: now,
+        requestDigest: 'digest-summary',
+        requestSerializedChars: 28,
+        estimatedInputTokens: 7,
+        tokenSource: 'estimated',
+        maxOutputTokens: 1_000,
+        reserveTokens: 500,
+        breakdown,
+        layers: [...summaryActivity.layers],
+        activity: { ...summaryActivity, layers: [...summaryActivity.layers] },
+        summaryRecordId: summaryRecord.id,
+        artifactRefs: [],
+        includedToolResultIds: [],
+      },
+      activity: { ...summaryActivity, layers: [...summaryActivity.layers] },
+      summaryRecord,
+    });
+
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.equal(loaded?.ledger?.filter((record) => record.type === 'context_prepare_committed').length, 2);
+    const visible = loaded?.ledger?.filter((record) => record.type === 'context_compaction_completed') ?? [];
+    assert.equal(visible.length, 1);
+    assert.equal(visible[0]?.type === 'context_compaction_completed' ? visible[0].presentation.operationRef : undefined, 'context-summary');
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('Session repository durably orders approval request before its resolution', async () => {
   const repository = createSessionRepository({ projectId: `test-approval-${crypto.randomUUID()}` });
   const projectDir = dirname(repository.sessionsDir);

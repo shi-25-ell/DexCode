@@ -113,6 +113,53 @@ function prepared(input: PrepareContextInput): PreparedContext {
   };
 }
 
+function preparedWithActivity(input: PrepareContextInput, summarized: boolean): PreparedContext {
+  const base = prepared(input);
+  const activity: NonNullable<PreparedContext['activity']> = {
+    operationRef: `context-${input.turn}-${input.attempt}`,
+    layers: [summarized ? 'summary' : 'middle_archive'],
+    beforeTokens: 12,
+    afterTokens: 7,
+    beforeBreakdown: base.manifest.breakdown,
+    afterBreakdown: base.manifest.breakdown,
+    externalizedToolResults: 0,
+    archivedMessages: summarized ? 0 : 4,
+    archivedConversationSegments: summarized ? 0 : 2,
+    compactedToolResults: 0,
+    summarizedMessages: summarized ? 4 : 0,
+    retainedConversationSegments: summarized ? 1 : 0,
+    retainedMessageCount: summarized ? 2 : 0,
+  };
+  const summaryRecord: NonNullable<PreparedContext['summaryRecord']> = {
+    version: 2,
+    id: `summary-${input.turn}-${input.attempt}`,
+    runId: input.runId,
+    turn: input.turn,
+    strategyVersion: 'structured-summary-v2',
+    sourceDigest: 'source-digest',
+    coveredMessageCount: 4,
+    summary: 'summary',
+    retainedTail: [],
+    retainedTailDigest: 'tail-digest',
+    tokensBefore: 12,
+    tokensAfter: 7,
+    summaryModel: 'test-model',
+    createdAt: new Date().toISOString(),
+    artifactRefs: [],
+  };
+  return {
+    ...base,
+    manifest: {
+      ...base.manifest,
+      layers: activity.layers,
+      activity,
+      ...(summarized ? { summaryRecordId: summaryRecord.id } : {}),
+    },
+    activity,
+    ...(summarized ? { summaryRecord } : {}),
+  };
+}
+
 function contextRuntime(engine: ContextEngine) {
   return {
     engine,
@@ -591,7 +638,11 @@ test('active compaction waits for the full tool batch and is not shown as a norm
   const { host } = toolHost(timeline);
   const forceFlags: Array<boolean | undefined> = [];
   const engine: ContextEngine = {
-    async prepare(input) { forceFlags.push(input.forceSummary); timeline.push(`prepare-${input.turn}`); return prepared(input); },
+    async prepare(input) {
+      forceFlags.push(input.forceSummary);
+      timeline.push(`prepare-${input.turn}`);
+      return preparedWithActivity(input, input.forceSummary === true);
+    },
     async recoverFromOverflow(input) { return prepared({ ...input, forceSummary: true }); },
     async recordProviderUsage() {},
   };
@@ -620,6 +671,9 @@ test('active compaction waits for the full tool batch and is not shown as a norm
   assert.deepEqual(forceFlags, [false, true]);
   assert.equal(timeline.indexOf('outcome-write-after-compact') < timeline.indexOf('prepare-2'), true);
   assert.equal(events.some((event) => event.type === 'tool_view' && event.presentation.callRef === 'compact-hidden'), false);
+  const contextEvents = events.filter((event) => event.type === 'context_activity');
+  assert.equal(contextEvents.length, 1);
+  assert.equal(contextEvents[0]?.type === 'context_activity' ? contextEvents[0].presentation.summarizedMessages : 0, 4);
 });
 
 test('sequential tools in one model turn authorize against live state independently', async () => {

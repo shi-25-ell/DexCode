@@ -539,7 +539,7 @@ export function createExecutor(
             latestContextUsage = prepared.usage;
             if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: prepared.usage });
             else onEvent({ type: 'context_usage', ...prepared.usage });
-            if (prepared.activity) {
+            if (prepared.activity && prepared.summaryRecord) {
               const contextPresentation = {
                   operationRef: prepared.activity.operationRef,
                   status: 'completed',
