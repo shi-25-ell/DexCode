@@ -85,6 +85,26 @@ function projectLedger(records: SessionLedgerRecord[]): ConversationItem[] {
       const item = { id: `context-${record.operationRef}`, kind: 'context' as const, context: { operationRef: record.operationRef, status: 'failed' as const, reason: record.reason } };
       if (existing >= 0) items[existing] = item;
       else items.push(item);
+    } else if (record.type === 'approval_requested') {
+      items.push({
+        id: `approval-${record.approvalId}`,
+        kind: 'approval',
+        approvalRef: record.approvalId,
+        approvalKind: 'tool',
+        toolName: record.request.toolName,
+        effect: record.request.effect,
+        title: record.request.title,
+        ...(record.request.target ? { target: record.request.target } : {}),
+        reason: record.request.reason,
+        fingerprint: record.request.fingerprint,
+        options: record.request.options,
+      });
+    } else if (record.type === 'approval_resolved') {
+      const existing = items.findIndex((item) => item.kind === 'approval' && item.approvalRef === record.approvalId);
+      if (existing >= 0) {
+        const item = items[existing];
+        if (item?.kind === 'approval') items[existing] = { ...item, resolved: record.decision };
+      }
     } else if (record.type === 'run_terminal' && record.report.error) {
       items.push({ id: `error-${record.seq}`, kind: 'error', title: '本次运行未完成', message: record.report.error.message });
     }

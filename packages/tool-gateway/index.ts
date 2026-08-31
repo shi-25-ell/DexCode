@@ -1,10 +1,18 @@
 import { readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { TreeNode, WorkspaceFile } from '../workspace-manager/index.ts';
 import type { ToolInfo } from '../shared/types.ts';
-import { createMcpServer, type McpServer } from '../mcp-server/index.ts';
-import { validateCommand } from './command-safety.ts';
+import { createMcpServer, type McpJsonRpcRequest, type McpJsonRpcResponse, type McpServer } from '../mcp-server/index.ts';
+import { isTrustedReadonlyCommand, matchWhitelistEntry, normalizeCommand, validateCommand } from './command-safety.ts';
 import { createCommandWhitelistStore } from './command-whitelist-store.ts';
+import type {
+  ApprovalEffect,
+  ApprovalOrigin,
+  ApprovalSubject,
+  ToolApprovalRequest,
+} from '../shared/types.ts';
+import { createApprovalFingerprint, createApprovalPolicy, type ToolApprovalHook } from './approval-policy.ts';
+import type { ApprovalModeStore } from './approval-mode-store.ts';
 import {
   executeCommand,
   type CommandConfirmHook,
@@ -17,6 +25,9 @@ import { createToolCallLogStore } from './tool-call-log.ts';
 export type { CommandConfirmHook, CommandConfirmDecision, CommandConfirmRequest } from './run-command.ts';
 export type { WhitelistEntry, CommandRisk } from './command-safety.ts';
 export type { CommandWhitelistStore } from './command-whitelist-store.ts';
+export { createApprovalModeStore, isApprovalMode, type ApprovalModeStore } from './approval-mode-store.ts';
+export { createApprovalPolicy, createApprovalFingerprint, type ApprovalPolicy } from './approval-policy.ts';
+export type { ToolApprovalHook } from './approval-policy.ts';
 
 type WorkspaceService = {
   rootDir: string;
@@ -47,6 +58,14 @@ function buildInputSchema(properties: Record<string, unknown>, required: string[
 type RunCommandContext = {
   onCommandConfirm?: CommandConfirmHook;
   signal?: AbortSignal;
+  approvalGranted?: boolean;
+};
+
+export type AgentToolExecutionContext = {
+  origin: ApprovalOrigin;
+  onApproval?: ToolApprovalHook;
+  signal?: AbortSignal;
+  executeExternal?: (name: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
 };
 
 function isWithinRoot(root: string, target: string): boolean {
@@ -280,9 +299,14 @@ function buildPromptDefinitions() {
   ];
 }
 
-export function createCodingToolHost(workspaceService: WorkspaceService) {
+export function createCodingToolHost(
+  workspaceService: WorkspaceService,
+  options: { approvalModeStore?: Pick<ApprovalModeStore, 'getMode'> } = {},
+) {
   const whitelistStore = createCommandWhitelistStore(workspaceService.projectDir);
   const cwd = () => workspaceService.getRootDir();
+  const approvalMode = options.approvalModeStore ?? { getMode: () => 'allowlist' as const };
+  const approvalPolicy = createApprovalPolicy();
 
   async function runCommandSafe(
     command: string,
@@ -300,9 +324,9 @@ export function createCodingToolHost(workspaceService: WorkspaceService) {
       };
     }
 
-    if (!validation.needsConfirmation) {
+    if (!validation.needsConfirmation || ctx.approvalGranted) {
       const result = await executeCommand(validation.normalizedCommand, cwd(), validation.timeoutMs, ctx.signal);
-      return { ...result, risk: validation.risk, whitelisted: true };
+      return { ...result, risk: validation.risk, whitelisted: validation.whitelisted };
     }
 
     if (!ctx.onCommandConfirm) {
@@ -458,7 +482,7 @@ export function createCodingToolHost(workspaceService: WorkspaceService) {
     return mcpServer.callTool(name, args);
   }
 
-  return {
+  const host = {
     readFile: wrapWithStats('read_file', '读取工作区中的文件内容', async (path: string) => {
       const rootDir = workspaceService.getRootDir();
       const absPath = await safeExistingPath(rootDir, String(path));
@@ -511,4 +535,177 @@ export function createCodingToolHost(workspaceService: WorkspaceService) {
     },
     mcp: mcpServer,
   };
+
+  const EFFECTS: Record<string, ApprovalEffect> = {
+    read_file: 'read',
+    search_in_workspace: 'read',
+    read_lints: 'read',
+    diff_file: 'read',
+    list_workspace: 'read',
+    list_versions: 'read',
+    write_file: 'write',
+    patch_file: 'write',
+    create_snapshot: 'write',
+    restore_snapshot: 'write',
+    run_command: 'execute',
+    ask_user: 'interactive',
+  };
+
+  async function approvalSubject(
+    toolName: string,
+    input: Record<string, unknown>,
+    origin: ApprovalOrigin,
+  ): Promise<ApprovalSubject> {
+    let normalizedInput: Record<string, unknown> = { ...input };
+    let effect = EFFECTS[toolName] ?? (toolName.startsWith('mcp__') ? 'external' : 'external');
+    let summary = `执行 ${toolName}`;
+    let command: string | undefined;
+    let matchedRule: string | undefined;
+    let hardDeniedReason: string | undefined;
+
+    if (toolName === 'run_command') {
+      command = normalizeCommand(String(input.command ?? ''));
+      normalizedInput = { command };
+      const entries = await whitelistStore.list();
+      const validation = validateCommand(command, entries);
+      if (!validation.allowed) hardDeniedReason = validation.reason;
+      const match = entries.find((entry) => matchWhitelistEntry(command!, entry));
+      matchedRule = match?.id;
+      if (!matchedRule && isTrustedReadonlyCommand(command)) effect = 'read';
+      summary = validation.reason;
+    } else if (toolName === 'write_file' || toolName === 'patch_file') {
+      const path = String(input.path ?? '').trim().replace(/\\/g, '/');
+      normalizedInput = { ...input, path };
+      const payloadLength = String(toolName === 'write_file' ? input.content ?? '' : input.patch ?? '').length;
+      summary = toolName === 'write_file'
+        ? `写入 ${path}（内容 ${payloadLength} 字符）`
+        : `修改 ${path}（补丁 ${payloadLength} 字符）`;
+      if (!path || !await safeMutationPath(cwd(), path)) hardDeniedReason = '目标路径超出工作区或经过不安全的链接';
+    } else if (toolName.startsWith('mcp__')) {
+      summary = `调用外部工具 ${toolName.replace(/^mcp__/, '').replace('__', ' · ')}`;
+    }
+
+    const fingerprint = createApprovalFingerprint({ toolName, effect, normalizedInput });
+    return {
+      origin,
+      toolName,
+      effect,
+      workspaceRef: workspaceService.projectId,
+      summary,
+      normalizedInput,
+      fingerprint,
+      ...(command ? { command } : {}),
+      ...(matchedRule ? { matchedRule } : {}),
+      ...(hardDeniedReason ? { hardDeniedReason } : {}),
+    };
+  }
+
+  function approvalRequest(subject: ApprovalSubject, options: ToolApprovalRequest['options'], reason: string): ToolApprovalRequest {
+    const path = subject.normalizedInput && typeof subject.normalizedInput === 'object'
+      ? String((subject.normalizedInput as Record<string, unknown>).path ?? '')
+      : '';
+    const target = subject.command
+      || path
+      || (subject.toolName.startsWith('mcp__') ? subject.toolName.replace(/^mcp__/, '').replace('__', ' · ') : '');
+    return {
+      version: 1,
+      toolName: subject.toolName,
+      effect: subject.effect,
+      title: subject.effect === 'write' ? '批准文件修改' : subject.effect === 'execute' ? '批准命令执行' : '批准外部工具调用',
+      ...(target ? { target } : {}),
+      reason: subject.summary && subject.summary !== reason ? `${reason}；${subject.summary}` : reason,
+      fingerprint: subject.fingerprint,
+      options,
+    };
+  }
+
+  async function executeAgentTool(
+    toolName: string,
+    input: Record<string, unknown>,
+    context: AgentToolExecutionContext,
+  ): Promise<unknown> {
+    if (!toolName.startsWith('mcp__')) {
+      const validationError = mcpServer.validateToolCall(toolName, input);
+      if (validationError) return { status: 'blocked', error: validationError };
+    }
+    const subject = await approvalSubject(toolName, input, context.origin);
+    const decision = approvalPolicy.authorize(subject, approvalMode.getMode());
+    if (decision.outcome === 'deny') return { status: 'blocked', error: decision.reason };
+    if (decision.outcome === 'ask') {
+      if (!context.onApproval || context.origin === 'mcp_http') {
+        return { status: 'denied', error: '该操作需要用户批准，但当前没有可用的批准通道' };
+      }
+      const response = await context.onApproval(approvalRequest(subject, decision.options, decision.reason));
+      if (response.fingerprint !== subject.fingerprint) {
+        return { status: 'denied', error: '批准 fingerprint 与待执行操作不匹配' };
+      }
+      if (!decision.options.includes(response.decision)) {
+        return { status: 'denied', error: '批准决定不适用于当前操作' };
+      }
+      if (response.decision === 'deny') return { status: 'denied', error: '用户拒绝执行该操作' };
+      if (response.decision === 'allow_whitelist') {
+        if (toolName !== 'run_command' || !subject.command) {
+          return { status: 'denied', error: '只有命令可以加入白名单' };
+        }
+        await whitelistStore.addFromCommand(subject.command, 'exact');
+      }
+    }
+
+    const args = subject.normalizedInput as Record<string, unknown>;
+    switch (toolName) {
+      case 'read_file': return host.readFile(String(args.path ?? ''));
+      case 'write_file': return host.writeFile(String(args.path ?? ''), String(args.content ?? ''));
+      case 'patch_file': return host.patchFile(String(args.path ?? ''), String(args.patch ?? ''));
+      case 'search_in_workspace': return host.searchInWorkspace(String(args.query ?? ''), typeof args.path === 'string' ? args.path : undefined);
+      case 'run_command': return host.runCommand(String(args.command ?? ''), { approvalGranted: true, signal: context.signal });
+      case 'read_lints': return host.readLints(typeof args.path === 'string' ? args.path : undefined);
+      case 'diff_file': return host.diffFile(String(args.path ?? ''), typeof args.snapshotId === 'string' ? args.snapshotId : undefined);
+      case 'list_workspace': return host.listWorkspace();
+      case 'list_versions': return host.listVersions();
+      case 'create_snapshot': return host.createSnapshot(typeof args.name === 'string' ? args.name : undefined, typeof args.description === 'string' ? args.description : undefined);
+      case 'restore_snapshot': return host.restoreSnapshot(String(args.snapshotId ?? ''));
+      default:
+        if (toolName.startsWith('mcp__') && context.executeExternal) {
+          return context.executeExternal(toolName, args, context.signal);
+        }
+        return { status: 'denied', error: `未知工具默认拒绝：${toolName}` };
+    }
+  }
+
+  async function mcpJsonRpc(request: McpJsonRpcRequest): Promise<McpJsonRpcResponse | null> {
+    if (request.method !== 'tools/call') return mcpServer.jsonRpc(request);
+    const params = request.params && typeof request.params === 'object' && !Array.isArray(request.params)
+      ? request.params as Record<string, unknown>
+      : {};
+    const args = params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments)
+      ? params.arguments as Record<string, unknown>
+      : {};
+    const name = String(params.name ?? '');
+    const result = await executeAgentTool(name, args, { origin: 'mcp_http' });
+    const failed = result && typeof result === 'object'
+      && ('error' in result || ['blocked', 'denied', 'failed'].includes(String((result as Record<string, unknown>).status ?? '')));
+    return failed
+      ? { jsonrpc: '2.0', id: request.id ?? null, error: { code: -32000, message: String((result as Record<string, unknown>).error ?? 'Tool call failed'), data: result } }
+      : { jsonrpc: '2.0', id: request.id ?? null, result: { success: true, tool: name, data: result } };
+  }
+
+  return { ...host, executeAgentTool, mcpJsonRpc };
+}
+
+async function safeMutationPath(root: string, requested: string): Promise<boolean> {
+  const lexical = resolve(root, requested);
+  if (!isWithinRoot(root, lexical)) return false;
+  let cursor = lexical;
+  while (isWithinRoot(root, cursor)) {
+    try {
+      const [realRoot, realCursor] = await Promise.all([realpath(root), realpath(cursor)]);
+      return isWithinRoot(realRoot, realCursor);
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT') return false;
+      const parent = dirname(cursor);
+      if (parent === cursor) return false;
+      cursor = parent;
+    }
+  }
+  return false;
 }

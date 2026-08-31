@@ -1,4 +1,4 @@
-import type { ContextBreakdown, ContextPresentation, ContextUsageSource, ContextUsageTiming, ToolPresentation } from '../shared/types.ts';
+import type { ApprovalEffect, ApprovalOption, ContextBreakdown, ContextPresentation, ContextUsageSource, ContextUsageTiming, ToolPresentation } from '../shared/types.ts';
 
 export type ConversationState = 'idle' | 'running' | 'waiting' | 'failed';
 
@@ -30,6 +30,7 @@ export type ConversationItem =
   | { id: string; kind: 'assistant'; content: string }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
+  | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'tool'; toolName: string; effect: ApprovalEffect; title: string; target?: string; reason: string; fingerprint: string; options: ApprovalOption[]; resolved?: ApprovalOption }
   | { id: string; kind: 'error'; title: string; message: string };
 
 export type ConversationViewSnapshot = {

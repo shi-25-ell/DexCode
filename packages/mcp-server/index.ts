@@ -113,10 +113,16 @@ export function createMcpServer(options: {
   const resourceMap = new Map((options.resources ?? []).map((resource) => [resource.name, resource] as const));
   const promptMap = new Map((options.prompts ?? []).map((prompt) => [prompt.name, prompt] as const));
 
+  function validateToolCall(name: string, args: Record<string, unknown>): string | null {
+    const tool = toolMap.get(name);
+    if (!tool) return `Tool not found: ${name}`;
+    return validateSchema(args, tool.inputSchema);
+  }
+
   async function callTool(name: string, args: Record<string, unknown> = {}): Promise<McpCallResult> {
     const tool = toolMap.get(name);
     if (!tool) return { success: false, tool: name, error: `Tool not found: ${name}` };
-    const validationError = validateSchema(args, tool.inputSchema);
+    const validationError = validateToolCall(name, args);
     if (validationError) return { success: false, tool: name, error: validationError };
     try {
       const data = await tool.handler(args);
@@ -210,6 +216,7 @@ export function createMcpServer(options: {
 
   return {
     listTools,
+    validateToolCall,
     listResources,
     listPrompts,
     callTool,

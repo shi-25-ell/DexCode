@@ -4,12 +4,13 @@ import { dirname, extname, join } from 'node:path';
 import { createCodingAgent } from '../../packages/agent-core/index.ts';
 import { createContextManager } from '../../packages/context-builder/index.ts';
 import { createModelClient } from '../../packages/llm-client/index.ts';
-import { createCodingToolHost } from '../../packages/tool-gateway/index.ts';
+import { createApprovalModeStore, createCodingToolHost, isApprovalMode } from '../../packages/tool-gateway/index.ts';
 import { createWorkspaceRegistry, createWorkspaceService, type WorkspaceRecord } from '../../packages/workspace-manager/index.ts';
 import { createSessionRepository } from '../../packages/session-store/index.ts';
-import type { AgentEvent, PendingConfirm, PendingCommandConfirm, Session, SessionScope } from '../../packages/shared/types.ts';
+import type { AgentEvent, ApprovalOption, PendingConfirm, PendingCommandConfirm, PendingToolApproval, Session, SessionScope } from '../../packages/shared/types.ts';
 import { validateCommand } from '../../packages/tool-gateway/command-safety.ts';
 import type { CommandConfirmHook } from '../../packages/tool-gateway/run-command.ts';
+import type { ToolApprovalHook } from '../../packages/tool-gateway/index.ts';
 import type { McpJsonRpcRequest } from '../../packages/mcp-server/index.ts';
 import { createExternalMcpRegistry, type ExternalMcpServerConfig } from '../../packages/mcp-client/index.ts';
 import { createExternalMcpConfigStore } from '../../packages/mcp-client/config-store.ts';
@@ -75,6 +76,16 @@ type WhitelistPayload = {
   label?: string;
 };
 
+type ApprovalModePayload = {
+  mode?: unknown;
+};
+
+type ToolApprovalPayload = {
+  approvalId?: string;
+  decision?: ApprovalOption;
+  fingerprint?: string;
+};
+
 type CodingToolHost = ReturnType<typeof createCodingToolHost>;
 type WorkspaceService = ReturnType<typeof createWorkspaceService>;
 type CodingAgent = ReturnType<typeof createCodingAgent>;
@@ -132,7 +143,48 @@ async function parseBody<T>(req: IncomingMessage): Promise<T> {
 // ── 挂起确认表（内存）──
 const pendingConfirms = new Map<string, PendingConfirm>();
 const pendingCommandConfirms = new Map<string, PendingCommandConfirm>();
+const pendingToolApprovals = new Map<string, PendingToolApproval>();
 const activeConversationRuns = new Map<string, AbortController>();
+
+function createToolApprovalHook(
+  sessionId: string,
+  taskId: string,
+  onEvent: (event: AgentEvent) => void,
+): ToolApprovalHook {
+  return async (request) => {
+    const approvalId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const durableRequest = { ...request, approvalId };
+    await sessionRepository.recordApprovalRequested({
+      sessionId,
+      runId: taskId,
+      approvalId,
+      request: durableRequest,
+    });
+
+    const response = await new Promise<Parameters<PendingToolApproval['resolve']>[0]>((resolve, reject) => {
+      pendingToolApprovals.set(approvalId, {
+        approvalId,
+        taskId,
+        sessionId,
+        request: durableRequest,
+        createdAt: Date.now(),
+        resolve,
+        reject,
+      });
+      onEvent({ type: 'task_status', taskId, status: 'waiting_confirm', note: '等待工具批准' });
+      onEvent({ ...durableRequest, type: 'approval_request', taskId, approvalId });
+
+      setTimeout(() => {
+        if (pendingToolApprovals.has(approvalId)) {
+          pendingToolApprovals.delete(approvalId);
+          reject(new Error(`工具批准超时：${approvalId}`));
+        }
+      }, CONFIRM_TIMEOUT_MS);
+    });
+    onEvent({ type: 'task_status', taskId, status: 'executing', note: '工具批准已处理' });
+    return response;
+  };
+}
 
 function createCommandConfirmHook(
   sessionId: string,
@@ -214,6 +266,9 @@ function createConfirmHook(
 // ── 模块级初始化 ──
 const modelClient = createModelClient();
 const sessionRepository: SessionRepository = createSessionRepository();
+const approvalModeStore = await createApprovalModeStore({
+  file: join(process.cwd(), 'workspaces', 'approval-settings.json'),
+});
 const workspaceRegistry = createWorkspaceRegistry({
   registryFile: join(process.cwd(), 'workspaces', 'workspace-registry.json'),
 });
@@ -290,7 +345,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     stateDir,
   });
   await nextWorkspaceService.loadFromDisk();
-  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService);
+  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService, { approvalModeStore });
   const nextContextManager = createContextManager(nextCodingToolHost);
   const nextSkillRegistry = createSkillRegistry({ workspaceRoot: workspace.canonicalRootPath });
   await nextSkillRegistry.loadAll();
@@ -454,6 +509,27 @@ export function startRuntimeServer() {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
     try {
+    if (url.pathname === '/api/capabilities' && req.method === 'GET') {
+      sendJson(res, 200, { capabilities: capabilityRegistry.list() });
+      return;
+    }
+
+    if (url.pathname === '/api/approval-mode' && req.method === 'GET') {
+      sendJson(res, 200, {
+        ...approvalModeStore.getState(),
+        ...(approvalModeStore.getDiagnostic() ? { diagnostic: approvalModeStore.getDiagnostic() } : {}),
+      });
+      return;
+    }
+
+    if (url.pathname === '/api/approval-mode' && req.method === 'PUT') {
+      const { mode } = await parseBody<ApprovalModePayload>(req);
+      if (!isApprovalMode(mode)) throw new HttpError(400, '非法批准模式');
+      const state = await approvalModeStore.setMode(mode);
+      sendJson(res, 200, state);
+      return;
+    }
+
     const requestedWorkspaceRef = String(req.headers['x-workspace-ref'] ?? url.searchParams.get('workspaceRef') ?? '').trim();
     const requestRuntime = requestedWorkspaceRef
       ? await runtimeForWorkspaceRef(requestedWorkspaceRef)
@@ -463,11 +539,6 @@ export function startRuntimeServer() {
     const skillRegistry = requestRuntime.skillRegistry;
     const codingAgent = requestRuntime.codingAgent;
     const requestWorkspaceScope = workspaceScope(requestRuntime);
-
-    if (url.pathname === '/api/capabilities' && req.method === 'GET') {
-      sendJson(res, 200, { capabilities: capabilityRegistry.list() });
-      return;
-    }
 
     if (url.pathname === '/api/workspaces/resolve' && req.method === 'POST') {
       const { path } = await parseBody<{ path?: string }>(req);
@@ -639,6 +710,7 @@ export function startRuntimeServer() {
           {
             onConfirm: createConfirmHook(session.sessionId, runId, onEvent),
             onCommandConfirm: createCommandConfirmHook(session.sessionId, runId, onEvent),
+            onApproval: createToolApprovalHook(session.sessionId, runId, onEvent),
           },
           { runId, signal: controller.signal, prestarted, clientRequestId },
         );
@@ -728,7 +800,7 @@ export function startRuntimeServer() {
 
     if (url.pathname === '/mcp' && req.method === 'POST') {
       const parsed = await parseBody<McpJsonRpcRequest>(req);
-      const response = await codingToolHost.mcp.jsonRpc(parsed);
+      const response = await codingToolHost.mcpJsonRpc(parsed);
       if (response === null) {
         res.writeHead(204);
         res.end();
@@ -1199,6 +1271,9 @@ export function startRuntimeServer() {
         sendJson(res, 400, { error: 'pattern is required' });
         return;
       }
+      if (parsed.matchType && !['exact', 'prefix', 'command'].includes(parsed.matchType)) {
+        throw new HttpError(400, '非法白名单匹配类型');
+      }
       const entry = await codingToolHost.commandWhitelist.add({
         pattern: parsed.pattern.trim(),
         matchType: parsed.matchType ?? 'exact',
@@ -1294,6 +1369,7 @@ export function startRuntimeServer() {
       const taskId = `task-${Date.now()}`;
       const confirmHook = createConfirmHook(session.sessionId, taskId, writeEvent);
       const commandConfirmHook = createCommandConfirmHook(session.sessionId, taskId, writeEvent);
+      const approvalHook = createToolApprovalHook(session.sessionId, taskId, writeEvent);
 
       try {
         await sessionRuntime.codingAgent.runTask(
@@ -1301,7 +1377,7 @@ export function startRuntimeServer() {
           prompt ?? '',
           selectedFile ?? null,
           writeEvent,
-          { onConfirm: confirmHook, onCommandConfirm: commandConfirmHook },
+          { onConfirm: confirmHook, onCommandConfirm: commandConfirmHook, onApproval: approvalHook },
           { runId: taskId, signal: runController.signal },
         );
       } catch (error: unknown) {
@@ -1334,6 +1410,35 @@ export function startRuntimeServer() {
     }
 
     // ── POST /api/agent/command-confirm ──
+    if (url.pathname === '/api/agent/approval' && req.method === 'POST') {
+      const { approvalId, decision, fingerprint } = await parseBody<ToolApprovalPayload>(req);
+      if (!approvalId || !decision || !fingerprint) {
+        throw new HttpError(400, 'approvalId、decision 和 fingerprint 为必填项');
+      }
+      if (!['allow_once', 'allow_whitelist', 'deny'].includes(decision)) {
+        throw new HttpError(400, '非法批准决定');
+      }
+      const pending = pendingToolApprovals.get(approvalId);
+      if (!pending) throw new HttpError(404, '批准请求不存在或已过期');
+      if (pending.request.fingerprint !== fingerprint) {
+        throw new HttpError(409, '批准 fingerprint 与待执行操作不匹配');
+      }
+      if (!pending.request.options.includes(decision)) {
+        throw new HttpError(400, '批准决定不适用于当前操作');
+      }
+      await sessionRepository.recordApprovalResolved({
+        sessionId: pending.sessionId,
+        runId: pending.taskId,
+        approvalId,
+        decision,
+      });
+      pendingToolApprovals.delete(approvalId);
+      pending.resolve({ decision, fingerprint });
+      sendJson(res, 200, { ok: true, decision });
+      return;
+    }
+
+    // ── POST /api/agent/command-confirm（兼容旧事件）──
     if (url.pathname === '/api/agent/command-confirm' && req.method === 'POST') {
       const { confirmId, decision } = await parseBody<CommandConfirmPayload>(req);
       if (!confirmId || !decision) {

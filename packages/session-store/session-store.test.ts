@@ -83,6 +83,36 @@ test('Session repository commits one terminal report and preserves ledger order'
   }
 });
 
+test('Session repository durably orders approval request before its resolution', async () => {
+  const repository = createSessionRepository({ projectId: `test-approval-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const runId = crypto.randomUUID();
+    await repository.beginRun({ sessionId: session.sessionId, runId, userMessage: { role: 'user', content: 'write' }, context: generalContext });
+    await repository.recordApprovalRequested({
+      sessionId: session.sessionId,
+      runId,
+      approvalId: 'approval-1',
+      request: {
+        version: 1,
+        approvalId: 'approval-1',
+        toolName: 'write_file',
+        effect: 'write',
+        title: '批准文件修改',
+        reason: '只读模式需要批准此副作用',
+        fingerprint: 'fingerprint-1',
+        options: ['allow_once', 'deny'],
+      },
+    });
+    await repository.recordApprovalResolved({ sessionId: session.sessionId, runId, approvalId: 'approval-1', decision: 'allow_once' });
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.deepEqual(loaded?.ledger?.slice(-2).map((record) => record.type), ['approval_requested', 'approval_resolved']);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('a new repository instance recovers an interrupted Run exactly once', async () => {
   const projectId = `test-recovery-${crypto.randomUUID()}`;
   const firstRepository = createSessionRepository({ projectId });

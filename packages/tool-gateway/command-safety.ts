@@ -8,6 +8,7 @@ export type WhitelistEntry = {
   matchType: WhitelistMatchType;
   label?: string;
   addedAt: string;
+  source?: 'builtin' | 'user';
 };
 
 export type CommandValidation = {
@@ -25,9 +26,10 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 
 /** 只读诊断命令（仅 read_lints 等内部调用，不经过用户确认） */
 export const TRUSTED_READONLY_COMMANDS = [
-  /^npx\s+tsc\s+--noEmit\b/i,
-  /^npx\s+eslint\b/i,
-  /^npm\s+run\s+lint\b/i,
+  /^git\s+status(?:\s+(?:--short|--porcelain(?:=v[12])?|--branch|-s|-b))*$/i,
+  /^git\s+branch\s+--show-current$/i,
+  /^git\s+rev-parse\s+(?:HEAD|--show-toplevel|--is-inside-work-tree)$/i,
+  /^(?:node|npm|git|rg)\s+--version$/i,
 ];
 
 const HIGH_RISK_SUBSTRINGS = [
@@ -82,10 +84,12 @@ export function getCommandBase(command: string): string {
 
 export function isTrustedReadonlyCommand(command: string): boolean {
   const normalized = normalizeCommand(command);
-  return TRUSTED_READONLY_COMMANDS.some((re) => re.test(normalized));
+  if (TRUSTED_READONLY_COMMANDS.some((re) => re.test(normalized))) return true;
+  return /^rg(?:\s|$)/i.test(normalized)
+    && !/(?:^|\s)--(?:pre|pre-glob|config)(?:=|\s|$)/i.test(normalized);
 }
 
-function matchWhitelistEntry(command: string, entry: WhitelistEntry): boolean {
+export function matchWhitelistEntry(command: string, entry: WhitelistEntry): boolean {
   const normalized = normalizeCommand(command);
   const pattern = entry.pattern.trim();
   if (!pattern) return false;
@@ -94,7 +98,7 @@ function matchWhitelistEntry(command: string, entry: WhitelistEntry): boolean {
     case 'exact':
       return normalized === pattern;
     case 'prefix':
-      return normalized.startsWith(pattern);
+      return normalized === pattern || normalized.startsWith(`${pattern} `);
     case 'command':
       return getCommandBase(normalized) === pattern.toLowerCase();
     default:
@@ -208,21 +212,5 @@ function riskReason(risk: CommandRisk, command: string): string {
 
 export function suggestWhitelistPattern(command: string): Pick<WhitelistEntry, 'pattern' | 'matchType' | 'label'> {
   const normalized = normalizeCommand(command);
-  const base = getCommandBase(normalized);
-  const parts = normalized.split(/\s+/);
-
-  if (parts.length <= 1) {
-    return { pattern: normalized, matchType: 'exact', label: normalized };
-  }
-
-  if (/^(npm|yarn|pnpm)\s+run\s+\S+$/i.test(normalized)) {
-    const prefix = parts.slice(0, 3).join(' ');
-    return { pattern: prefix, matchType: 'prefix', label: `${prefix} *` };
-  }
-
-  if (/^(npm|yarn|pnpm)\s+(install|i|test|build|lint)\b/i.test(normalized)) {
-    return { pattern: `${parts[0]} ${parts[1]}`, matchType: 'prefix', label: `${parts[0]} ${parts[1]} *` };
-  }
-
-  return { pattern: base, matchType: 'command', label: `命令: ${base}` };
+  return { pattern: normalized, matchType: 'exact', label: normalized };
 }

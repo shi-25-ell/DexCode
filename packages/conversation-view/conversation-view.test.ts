@@ -133,3 +133,51 @@ test('projection restores Context Cards and provider-calibrated request usage fr
     breakdownEstimated: true,
   });
 });
+
+test('projection restores generic approval cards and their resolved state', () => {
+  const now = new Date().toISOString();
+  const session: Session = {
+    sessionId: 'session-approval-view',
+    scope: { kind: 'workspace', workspaceId: 'workspace-test' },
+    createdAt: now,
+    updatedAt: now,
+    messages: [{ role: 'user', content: '修改文件' }],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [
+      {
+        seq: 1,
+        at: now,
+        runId: 'run-approval',
+        type: 'approval_requested',
+        approvalId: 'approval-1',
+        request: {
+          version: 1,
+          approvalId: 'approval-1',
+          toolName: 'write_file',
+          effect: 'write',
+          title: '批准文件修改',
+          target: 'src/app.ts',
+          reason: '只读模式需要批准此副作用',
+          fingerprint: 'fingerprint-1',
+          options: ['allow_once', 'deny'],
+        },
+      },
+      { seq: 2, at: now, runId: 'run-approval', type: 'approval_resolved', approvalId: 'approval-1', decision: 'allow_once' },
+    ],
+  };
+  assert.deepEqual(projectConversation(session).items, [{
+    id: 'approval-approval-1',
+    kind: 'approval',
+    approvalRef: 'approval-1',
+    approvalKind: 'tool',
+    toolName: 'write_file',
+    effect: 'write',
+    title: '批准文件修改',
+    target: 'src/app.ts',
+    reason: '只读模式需要批准此副作用',
+    fingerprint: 'fingerprint-1',
+    options: ['allow_once', 'deny'],
+    resolved: 'allow_once',
+  }]);
+});

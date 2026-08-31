@@ -1,8 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConversationItem } from '../types';
-import { conversationReducer } from './conversation-page';
+import { ApprovalCard, conversationReducer } from './conversation-page';
 import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
@@ -92,5 +92,37 @@ describe('conversationReducer', () => {
     fireEvent.click(screen.getByRole('button', { name: /展开整理详情/ }));
     expect(screen.getByText(/18 条历史消息已归档/)).toBeInTheDocument();
     expect(screen.queryByText(/已生成对话摘要/)).not.toBeInTheDocument();
+  });
+
+  it('submits generic tool approval with the bound fingerprint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const resolved = vi.fn();
+    render(createElement(ApprovalCard, {
+      item: {
+        id: 'approval-1',
+        kind: 'approval',
+        approvalRef: 'approval-1',
+        approvalKind: 'tool',
+        toolName: 'write_file',
+        effect: 'write',
+        title: '批准文件修改',
+        target: 'src/app.ts',
+        reason: '只读模式需要批准此副作用',
+        fingerprint: 'fingerprint-1',
+        options: ['allow_once', 'deny'],
+      },
+      workspaceRef: 'workspace-1',
+      onResolve: resolved,
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: '允许一次' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/agent/approval', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ approvalId: 'approval-1', decision: 'allow_once', fingerprint: 'fingerprint-1' }),
+    })));
+    expect(resolved).toHaveBeenCalledWith('allow_once');
   });
 });

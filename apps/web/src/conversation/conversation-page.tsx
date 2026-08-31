@@ -94,26 +94,37 @@ function ContextLabel({ usage, running }: { usage: ContextUsage; running: boolea
   return <span title={`${detail} · ${timing} · ${source}${usage.breakdownEstimated ? ' · 构成估算' : ''}`}>上下文 {usage.percentage}%{estimated ? ' · 估算' : ''}</span>;
 }
 
-function ApprovalCard({ item, workspaceRef, onResolve }: {
+function approvalLabel(value: string): string {
+  if (value === 'deny') return '已拒绝';
+  if (value === 'allow_whitelist') return '已加入白名单';
+  if (value === 'allow_once' || value === 'allow') return '允许一次';
+  return value;
+}
+
+export function ApprovalCard({ item, workspaceRef, onResolve }: {
   item: Extract<ConversationItem, { kind: 'approval' }>;
   workspaceRef?: string;
   onResolve: (answer: string) => void;
 }) {
   const decide = async (answer: string) => {
     if (item.resolved) return;
+    const tool = item.approvalKind === 'tool';
     const command = item.approvalKind === 'command';
-    await apiJson(command ? '/api/agent/command-confirm' : '/api/agent/confirm', {
+    await apiJson(tool ? '/api/agent/approval' : command ? '/api/agent/command-confirm' : '/api/agent/confirm', {
       method: 'POST',
       workspaceRef,
-      body: JSON.stringify(command ? { confirmId: item.approvalRef, decision: answer } : { confirmId: item.approvalRef, answer }),
+      body: JSON.stringify(tool
+        ? { approvalId: item.approvalRef, decision: answer, fingerprint: item.fingerprint }
+        : command ? { confirmId: item.approvalRef, decision: answer } : { confirmId: item.approvalRef, answer }),
     });
     onResolve(answer);
   };
   return (
     <section className="approval-card">
       <div><strong>{item.title}</strong>{item.target ? <code>{item.target}</code> : null}</div>
+      {item.reason ? <p>{item.reason}</p> : null}
       <div className="approval-actions">
-        {item.resolved ? <span>已选择：{item.resolved}</span> : item.options.map((option) => <button key={option} onClick={() => void decide(option)}>{option === 'deny' ? '拒绝' : option === 'allow_whitelist' ? '允许并加入白名单' : option === 'allow_once' || option === 'allow' ? '允许一次' : option}</button>)}
+        {item.resolved ? <span>{approvalLabel(item.resolved)}</span> : item.options.map((option) => <button key={option} onClick={() => void decide(option)}>{option === 'deny' ? '拒绝' : option === 'allow_whitelist' ? '允许并加入白名单' : option === 'allow_once' || option === 'allow' ? '允许一次' : option}</button>)}
       </div>
     </section>
   );
@@ -194,6 +205,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     else if (event.type === 'task_status') dispatch({ type: 'status', status: event.status === 'waiting_confirm' ? 'waiting' : event.status === 'error' ? 'failed' : event.status === 'done' || event.status === 'aborted' ? 'idle' : 'running' });
     else if (event.type === 'confirm_request') dispatch({ type: 'approval', item: { id: `approval-${event.confirmId}`, kind: 'approval', approvalRef: event.confirmId, approvalKind: 'question', title: event.question, options: event.options?.length ? event.options : ['确认', '取消'] } });
     else if (event.type === 'command_confirm_request') dispatch({ type: 'approval', item: { id: `approval-${event.confirmId}`, kind: 'approval', approvalRef: event.confirmId, approvalKind: 'command', title: event.reason || '需要确认命令', target: event.command, options: ['allow_once', 'allow_whitelist', 'deny'] } });
+    else if (event.type === 'approval_request') dispatch({ type: 'approval', item: { id: `approval-${event.approvalId}`, kind: 'approval', approvalRef: event.approvalId, approvalKind: 'tool', toolName: event.toolName, effect: event.effect, title: event.title, target: event.target, reason: event.reason, fingerprint: event.fingerprint, options: event.options } });
     else if (event.type === 'error') dispatch({ type: 'error', message: event.message });
   };
 

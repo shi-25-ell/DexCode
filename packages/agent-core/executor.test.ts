@@ -275,3 +275,34 @@ test('active compaction waits for the full tool batch and is not shown as a norm
   assert.equal(timeline.indexOf('outcome-write-after-compact') < timeline.indexOf('prepare-2'), true);
   assert.equal(events.some((event) => event.type === 'tool_view' && event.presentation.callRef === 'compact-hidden'), false);
 });
+
+test('sequential tools in one model turn authorize against live state independently', async () => {
+  const item = toolHost();
+  let mode = 'read_only';
+  const observedModes: string[] = [];
+  const host = {
+    ...item.host,
+    executeAgentTool: async (name: string, args: Record<string, unknown>) => {
+      observedModes.push(mode);
+      if (observedModes.length === 1) mode = 'full_access';
+      if (name === 'write_file') return item.host.writeFile(String(args.path), String(args.content));
+      return { ok: true };
+    },
+  };
+  const model = scriptedModel([
+    {
+      content: '',
+      reasoning: '',
+      toolCalls: [
+        { id: 'write-1', name: 'write_file', arguments: { path: 'a.ts', content: 'first' } },
+        { id: 'write-2', name: 'write_file', arguments: { path: 'a.ts', content: 'second' } },
+      ],
+      finishReason: 'tool_calls',
+    },
+    { content: 'done', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ]);
+  const result = await createExecutor(host).runReActLoop(model, [], () => {});
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(observedModes, ['read_only', 'full_access']);
+  assert.equal(item.read(), 'second');
+});

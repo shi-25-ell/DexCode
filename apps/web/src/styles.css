@@ -276,6 +276,21 @@ body.resizing { cursor: col-resize; user-select: none; }
 .settings-feedback { margin: 14px 0; padding: 18px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--muted); text-align: center; font-size: 12px; }
 .settings-feedback.error { border-color: #fecaca; background: var(--red-soft); color: var(--red); }
 .settings-action-feedback { margin: -10px 0 16px; color: var(--green); text-align: right; font-size: 11px; }
+.approval-settings { display: grid; gap: 34px; }
+.approval-section + .approval-section { padding-top: 30px; border-top: 1px solid var(--border); }
+.approval-mode-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; border: 0; }
+.approval-mode-option { display: flex; align-items: flex-start; gap: 11px; min-height: 126px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: #fff; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, background .15s ease; }
+.approval-mode-option:hover { border-color: #bfdbfe; }
+.approval-mode-option:focus-within { outline: 2px solid #93c5fd; outline-offset: 2px; }
+.approval-mode-option.selected { border-color: #60a5fa; background: #eff6ff; box-shadow: inset 0 0 0 1px #bfdbfe; }
+.approval-mode-option input { margin: 3px 0 0; accent-color: var(--blue); }
+.approval-mode-option span { display: grid; gap: 8px; }
+.approval-mode-option strong { color: var(--text); font-size: 14px; }
+.approval-mode-option small { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.approval-save-state, .approval-current, .approval-notice { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.approval-notice { padding: 10px 12px; border-radius: 7px; background: var(--subtle); }
+.whitelist-warning { margin: -8px 0 16px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .skill-detail-grid { display: grid; gap: 5px; margin-top: 8px; overflow-wrap: anywhere; }
 .mcp-tool-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .mcp-tool-list span { padding: 4px 7px; border-radius: 5px; background: var(--purple-soft); color: #6d28d9; }
@@ -342,6 +357,8 @@ body.resizing { cursor: col-resize; user-select: none; }
   .tool-status { display: none; }
   .inline-settings-form { grid-template-columns: 1fr; }
   .whitelist-form { grid-template-columns: 1fr; }
+  .approval-mode-options { grid-template-columns: 1fr; }
+  .approval-mode-option { min-height: 0; }
 }
 
 @media (max-width: 560px) {

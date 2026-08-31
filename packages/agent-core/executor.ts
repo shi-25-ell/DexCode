@@ -17,6 +17,7 @@ import type {
 } from '../shared/types.ts';
 import type { ExternalMcpTool } from '../mcp-client/index.ts';
 import type { CommandConfirmHook } from '../tool-gateway/run-command.ts';
+import type { AgentToolExecutionContext, ToolApprovalHook } from '../tool-gateway/index.ts';
 import { enrichToolResult } from '../tool-gateway/tool-fallback.ts';
 import type {
   SkillActivationResult,
@@ -42,6 +43,7 @@ export type CodingToolHost = {
   listVersions: () => unknown;
   createSnapshot: (name?: string, description?: string) => unknown;
   restoreSnapshot: (snapshotId: string) => unknown;
+  executeAgentTool?: (toolName: string, args: Record<string, unknown>, context: AgentToolExecutionContext) => Promise<unknown>;
   isToolEnabled?: (name: string) => boolean;
 };
 
@@ -60,7 +62,7 @@ type SkillRegistry = {
 };
 
 export type ConfirmHook = (question: string, options?: string[]) => Promise<string>;
-export type ExecutorHooks = { onConfirm?: ConfirmHook; onCommandConfirm?: CommandConfirmHook };
+export type ExecutorHooks = { onConfirm?: ConfirmHook; onCommandConfirm?: CommandConfirmHook; onApproval?: ToolApprovalHook };
 export type ExecutorSemanticHooks = {
   assistantCommitted(message: AssistantMessage): Promise<void>;
   toolStarted(call: ToolCall): Promise<void>;
@@ -282,6 +284,7 @@ export function createExecutor(
     ): Promise<LoopResult> {
       const onConfirm = typeof hooks === 'function' ? hooks : hooks?.onConfirm;
       const onCommandConfirm = typeof hooks === 'object' ? hooks?.onCommandConfirm : undefined;
+      const onApproval = typeof hooks === 'object' ? hooks?.onApproval : undefined;
       const controller = options.signal ? undefined : new AbortController();
       const signal = options.signal ?? controller!.signal;
       const runId = options.runId ?? crypto.randomUUID();
@@ -549,7 +552,24 @@ export function createExecutor(
             } else {
               const fn = toolFns[toolName];
               if (fn) {
-                if (toolName === 'run_command' && onCommandConfirm) {
+                if (codingToolHost.executeAgentTool) {
+                  const execute = () => codingToolHost.executeAgentTool!(toolName, args, {
+                    origin: 'agent',
+                    onApproval,
+                    signal,
+                  });
+                  if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
+                    const captured = await captureFileDiff(codingToolHost.readFile, args.path, execute);
+                    toolResult = captured.result;
+                    fileDiff = captured.diff;
+                    if (captured.diff.before !== captured.diff.after) {
+                      fileChanges.push(captured.diff);
+                      filesModified.push(args.path);
+                    }
+                  } else {
+                    toolResult = await execute();
+                  }
+                } else if (toolName === 'run_command' && onCommandConfirm) {
                   toolResult = await codingToolHost.runCommand(String(args.command ?? ''), { onCommandConfirm, signal });
                 } else if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
                   const captured = await captureFileDiff(codingToolHost.readFile, args.path, () => fn(args));
@@ -561,7 +581,14 @@ export function createExecutor(
                   toolResult = await fn(args);
                 }
               } else if (toolName.startsWith('mcp__') && externalMcpRegistry) {
-                if (!onConfirm) {
+                if (codingToolHost.executeAgentTool) {
+                  toolResult = await codingToolHost.executeAgentTool(toolName, args, {
+                    origin: 'agent',
+                    onApproval,
+                    signal,
+                    executeExternal: (name, input, executionSignal) => externalMcpRegistry.callTool(name, input, executionSignal),
+                  });
+                } else if (!onConfirm) {
                   toolResult = { status: 'denied', error: 'external MCP tool requires an approval channel' };
                 } else {
                   onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });

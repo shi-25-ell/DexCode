@@ -1,4 +1,4 @@
-export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'whitelist' | 'snapshots' | 'project-knowledge';
+export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'snapshots' | 'project-knowledge';
 
 export type CapabilityDefinition = {
   id: CapabilityId;
@@ -12,7 +12,7 @@ const DEFAULT_CAPABILITIES: readonly CapabilityDefinition[] = [
   { id: 'mcp', label: 'MCP', route: '/settings/mcp', icon: 'network', workspaceRequired: false },
   { id: 'tools', label: '工具', route: '/settings/tools', icon: 'wrench', workspaceRequired: true },
   { id: 'skills', label: 'Skill', route: '/settings/skills', icon: 'sparkles', workspaceRequired: true },
-  { id: 'whitelist', label: '白名单', route: '/settings/whitelist', icon: 'shield', workspaceRequired: true },
+  { id: 'approval', label: '批准模式', route: '/settings/approval', icon: 'shield', workspaceRequired: false },
   { id: 'snapshots', label: '快照', route: '/settings/snapshots', icon: 'camera', workspaceRequired: true },
   { id: 'project-knowledge', label: '项目知识', route: '/settings/project-knowledge', icon: 'book', workspaceRequired: true },
 ];

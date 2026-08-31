@@ -10,7 +10,7 @@ import { ProjectKnowledgePanel } from './project-knowledge-panel';
 import { SkillsPanel } from './skills-panel';
 import { SnapshotsPanel } from './snapshots-panel';
 import { ToolsPanel } from './tools-panel';
-import { WhitelistPanel } from './whitelist-panel';
+import { ApprovalModePanel } from './approval-mode-panel';
 
 type CapabilityPanelProps = { workspaceRef?: string };
 
@@ -18,7 +18,7 @@ const CAPABILITY_PANELS: Record<CapabilityId, ComponentType<CapabilityPanelProps
   mcp: () => <McpPanel />,
   tools: ({ workspaceRef }) => <ToolsPanel workspaceRef={workspaceRef!} />,
   skills: ({ workspaceRef }) => <SkillsPanel workspaceRef={workspaceRef!} />,
-  whitelist: ({ workspaceRef }) => <WhitelistPanel workspaceRef={workspaceRef!} />,
+  approval: ({ workspaceRef }) => <ApprovalModePanel workspaceRef={workspaceRef} />,
   snapshots: ({ workspaceRef }) => <SnapshotsPanel workspaceRef={workspaceRef!} />,
   'project-knowledge': ({ workspaceRef }) => <ProjectKnowledgePanel workspaceRef={workspaceRef!} />,
 };

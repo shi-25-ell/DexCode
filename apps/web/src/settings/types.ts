@@ -53,7 +53,9 @@ export type SkillImportReport = {
   conflicts: string[];
 };
 
-export type WhitelistEntry = { id: string; pattern: string; matchType: 'exact' | 'prefix' | 'command'; label?: string; addedAt: string };
+export type WhitelistEntry = { id: string; pattern: string; matchType: 'exact' | 'prefix' | 'command'; label?: string; addedAt: string; source?: 'builtin' | 'user' };
+export type ApprovalMode = 'read_only' | 'allowlist' | 'full_access';
+export type ApprovalModeState = { version: 1; mode: ApprovalMode; revision: number; updatedAt: string; diagnostic?: string };
 export type Snapshot = { id: string; name: string; description: string; createdAt: string };
 export type McpServer =
   | { name: string; type: 'http'; url: string; enabled?: boolean; headers?: Record<string, string> }

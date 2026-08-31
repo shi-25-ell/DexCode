@@ -1,6 +1,9 @@
 export type ConversationScope = { kind: 'general' } | { kind: 'workspace'; workspaceRef: string };
 
-export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'whitelist' | 'snapshots' | 'project-knowledge';
+export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'snapshots' | 'project-knowledge';
+export type ApprovalMode = 'read_only' | 'allowlist' | 'full_access';
+export type ApprovalEffect = 'read' | 'write' | 'execute' | 'external' | 'interactive';
+export type ApprovalOption = 'allow_once' | 'allow_whitelist' | 'deny';
 
 export type Capability = {
   id: CapabilityId;
@@ -36,7 +39,7 @@ export type ConversationItem =
   | { id: string; kind: 'assistant'; content: string }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
-  | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command'; title: string; target?: string; options: string[]; resolved?: string }
+  | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command' | 'tool'; title: string; target?: string; reason?: string; toolName?: string; effect?: ApprovalEffect; fingerprint?: string; options: string[]; resolved?: string }
   | { id: string; kind: 'error'; title: string; message: string };
 
 export type ContextUsage = {
@@ -103,6 +106,7 @@ export type StreamEvent =
   | { type: 'task_status'; status: string; taskId: string; note?: string }
   | { type: 'confirm_request'; confirmId: string; question: string; options?: string[] }
   | { type: 'command_confirm_request'; confirmId: string; command: string; cwd: string; risk: string; reason: string }
+  | { type: 'approval_request'; taskId: string; approvalId: string; toolName: string; effect: ApprovalEffect; title: string; target?: string; reason: string; fingerprint: string; options: ApprovalOption[] }
   | { type: 'error'; message: string }
   | { type: 'result'; result: unknown }
   | { type: 'reasoning_chunk'; chunk: string }

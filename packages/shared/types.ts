@@ -260,6 +260,8 @@ export type SessionLedgerRecord =
   | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage }
   | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string; input?: Record<string, unknown> }
   | { seq: number; at: string; runId: string; type: 'tool_completed'; callId: string; presentation: ToolPresentation }
+  | { seq: number; at: string; runId: string; type: 'approval_requested'; approvalId: string; request: ToolApprovalRequest }
+  | { seq: number; at: string; runId: string; type: 'approval_resolved'; approvalId: string; decision: ApprovalOption }
   | { seq: number; at: string; runId: string; type: 'context_committed'; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }
   | { seq: number; at: string; runId: string; type: 'context_prepare_committed'; manifest: ContextManifestV2 }
   | { seq: number; at: string; runId: string; type: 'context_compaction_started'; operationRef: string }
@@ -400,6 +402,54 @@ export type ErrorEvent = {
 
 export type CommandRisk = 'low' | 'medium' | 'high';
 
+export type ApprovalMode = 'read_only' | 'allowlist' | 'full_access';
+
+export type ApprovalModeState = {
+  version: 1;
+  mode: ApprovalMode;
+  revision: number;
+  updatedAt: string;
+};
+
+export type ApprovalOrigin = 'agent' | 'mcp_http' | 'user_ui';
+export type ApprovalEffect = 'read' | 'write' | 'execute' | 'external' | 'interactive';
+export type ApprovalOption = 'allow_once' | 'allow_whitelist' | 'deny';
+
+export type ApprovalSubject = {
+  origin: ApprovalOrigin;
+  toolName: string;
+  effect: ApprovalEffect;
+  workspaceRef?: string;
+  summary: string;
+  normalizedInput: unknown;
+  fingerprint: string;
+  command?: string;
+  matchedRule?: string;
+  hardDeniedReason?: string;
+};
+
+export type ApprovalDecision =
+  | { outcome: 'allow'; reason: string; matchedRule?: string }
+  | { outcome: 'ask'; reason: string; options: ApprovalOption[] }
+  | { outcome: 'deny'; reason: string };
+
+export type ToolApprovalRequest = {
+  version: 1;
+  approvalId?: string;
+  toolName: string;
+  effect: ApprovalEffect;
+  title: string;
+  target?: string;
+  reason: string;
+  fingerprint: string;
+  options: ApprovalOption[];
+};
+
+export type ToolApprovalResponse = {
+  decision: ApprovalOption;
+  fingerprint: string;
+};
+
 export type ConfirmRequestEvent = {
   type: 'confirm_request';
   taskId: string;
@@ -416,6 +466,18 @@ export type CommandConfirmRequestEvent = {
   cwd: string;
   risk: CommandRisk;
   reason: string;
+};
+
+export type ToolApprovalRequestEvent = ToolApprovalRequest & {
+  type: 'approval_request';
+  taskId: string;
+  approvalId: string;
+};
+
+export type ToolApprovalResolvedEvent = {
+  type: 'approval_resolved';
+  approvalId: string;
+  decision: ApprovalOption;
 };
 
 export type ConfirmResolvedEvent = {
@@ -458,6 +520,8 @@ export type AgentEvent =
   | ErrorEvent
   | ConfirmRequestEvent
   | CommandConfirmRequestEvent
+  | ToolApprovalRequestEvent
+  | ToolApprovalResolvedEvent
   | ConfirmResolvedEvent
   | TaskStatusEvent
   | SessionEvent
@@ -486,5 +550,15 @@ export type PendingCommandConfirm = {
   reason: string;
   createdAt: number;
   resolve: (decision: 'allow_once' | 'allow_whitelist' | 'deny') => void;
+  reject: (reason: Error) => void;
+};
+
+export type PendingToolApproval = {
+  approvalId: string;
+  taskId: string;
+  sessionId: string;
+  request: ToolApprovalRequest;
+  createdAt: number;
+  resolve: (response: ToolApprovalResponse) => void;
   reject: (reason: Error) => void;
 };
