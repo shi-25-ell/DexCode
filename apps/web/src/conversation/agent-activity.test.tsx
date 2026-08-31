@@ -30,7 +30,7 @@ describe('AgentTranscript', () => {
       }],
     };
 
-    render(<AgentTranscript detail={detail} />);
+    const { rerender } = render(<AgentTranscript detail={detail} />);
 
     const tool = screen.getByText('读取文件');
     const heading = screen.getByRole('heading', { level: 2, name: '发现' });
@@ -40,5 +40,8 @@ describe('AgentTranscript', () => {
     expect(screen.getByText('检查项目')).toBeInTheDocument();
     expect(screen.queryByText('## 发现')).not.toBeInTheDocument();
     expect(screen.getAllByText('读取文件')).toHaveLength(1);
+
+    rerender(<AgentTranscript detail={{ ...detail, agent: { ...detail.agent, status: 'running' } }} />);
+    expect(screen.getByRole('status')).toHaveTextContent('正在思考…');
   });
 });

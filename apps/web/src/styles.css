@@ -164,6 +164,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .agent-transcript-stream .tool-title-line { gap: 6px; }
 .agent-transcript-stream .tool-title-line code { max-width: 150px; }
 .agent-transcript-stream .tool-output pre { max-height: 320px; font-size: 11px; }
+.agent-thinking { display: flex; align-items: center; gap: 7px; min-height: 36px; margin: 8px 0; color: #64748b; font-size: 12px; }
+.agent-thinking svg { color: var(--blue); animation: run-spin 900ms linear infinite; }
 .agent-transcript-empty { color: #758078; font-size: 12px; }
 .header-title-wrap { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .header-title-wrap h1 { overflow: hidden; margin: 0; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }

@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Collapsible from '@radix-ui/react-collapsible';
-import { Bot, ChevronDown, ChevronRight, Square, X } from 'lucide-react';
+import { Bot, ChevronDown, ChevronRight, LoaderCircle, Square, X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { getAgentDetail } from '../api';
@@ -82,6 +82,12 @@ function fallbackToolPresentation(tool: AgentToolView | undefined, input: { call
 
 export function AgentTranscript({ detail }: { detail: AgentDetail }) {
   const detailTools = detail.tools ?? [];
+  const hasRunningTool = detailTools.some((tool) => tool.status === 'running');
+  const activityLabel = detail.agent.status === 'stopping'
+    ? '正在停止…'
+    : detail.agent.status === 'running' && !hasRunningTool
+      ? '正在思考…'
+      : undefined;
   const tools = new Map(detailTools.map((tool) => [tool.callId, tool]));
   const renderedTools = new Set<string>();
   const entries: ReactNode[] = [];
@@ -111,7 +117,12 @@ export function AgentTranscript({ detail }: { detail: AgentDetail }) {
   });
   for (const tool of detailTools) appendTool(tool.callId, tool.name, `tool-${tool.callId}`);
 
-  return <div className="agent-transcript-stream">{entries.length > 0 ? entries : <p className="agent-transcript-empty">尚无对话内容</p>}</div>;
+  return (
+    <div className="agent-transcript-stream">
+      {entries.length > 0 ? entries : activityLabel ? null : <p className="agent-transcript-empty">尚无对话内容</p>}
+      {activityLabel ? <div className="agent-thinking" role="status"><LoaderCircle size={15} />{activityLabel}</div> : null}
+    </div>
+  );
 }
 
 export function AgentDrawer({ open, onOpenChange, tree, scope, sessionId, selectedAgentId, onSelect, onStop }: {

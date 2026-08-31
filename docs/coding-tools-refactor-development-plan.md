@@ -11,14 +11,15 @@
 
 ## 2. 已确认决策
 
-本次改造以以下六项决定为准：
+本次改造以以下七项决定为准：
 
 1. 新增并补齐 `find`、`ls`：`find` 按 glob 递归查找路径，`ls` 只列出一个目录的直接子项；保留 `list_workspace`，但将它改为类似 `ls -R` 的递归项目结构概览，不再返回扁平的文件及内容集合。
 2. 使用正式的 `grep` 完全替换 `search_in_workspace`，按磁盘真实内容执行搜索；旧工具名不保留 alias 或 legacy adapter。
 3. 重构 `run_command` 的内部执行方式，保留其外部工具身份、参数和后台任务协议；Windows 默认提供真正的 PowerShell 语义，并在启动时探测可选 Bash。
 4. 保留 `patch_file` 工具名和外围调用链，模型可见参数升级为结构化编辑语义；除精确目标编辑外，增加带命中数断言的 `replace_all`。
 5. 删除 `read_lints`、`ask_user`、`diff_file`；同时取消 `list_versions`、`create_snapshot`、`restore_snapshot` 的全部工具注册并停止维护其工具契约。六个旧工具都要清理定义、执行、批准、展示、策略、测试、文档和历史兼容入口，不能留下仍可调用的旁路。快照底层实现与历史数据留到后续专项中物理删除。
-6. 同步修改所有受影响的现行文档；历史文档不得继续把已经删除或已经改变的能力描述成当前事实。
+6. 对新增、替换、重构和删除工具执行前后端完整链路适配，逐层验证工具分类、批次展示、批准、事件协议、会话回放、工具卡、设置页和日志；不能把“后端可以调用”当作完成。
+7. 同步修改所有受影响的现行文档；历史文档不得继续把已经删除或已经改变的能力描述成当前事实。
 
 本计划中的工具名称是稳定的公开标识。内部类名、模块边界和实现文件可以重构，但不能为了实现方便额外制造一组近义工具。
 
@@ -127,6 +128,59 @@ type PatchFileInput =
 - UI 展示所需的稳定元数据。
 
 Agent executor 和 Tool Gateway 可以有不同 transport adapter，但同名工具不能再出现一个入口支持参数、另一个入口不支持，或同名返回完全不同数据形态的情况。
+
+### 4.5 前后端完整链路适配
+
+本次不是纯内部重构：新增 `find`、`ls`、`grep`，替换一个旧搜索工具，改变 `list_workspace` 和 `patch_file` 的参数/结果语义，并下线六个工具。因此每项变更都必须沿实际数据流逐层检查：
+
+```text
+权威工具 registry / schema
+        -> Agent 可见工具与 ToolPolicy
+        -> Executor / Tool Gateway / approval effect
+        -> RunEvent / Session ledger / SSE / terminal snapshot
+        -> conversation-view projection / tool presentation
+        -> 前端实时状态 / 历史回放 / 工具卡 / 批次卡
+        -> 设置页 / 测试 preset / 工具日志 / 错误与 fallback
+```
+
+不能只搜索后端注册名，也不能只以 TypeScript 编译通过作为适配完成。实施时先读取当前实现，再按具体语义调整所有硬编码集合、switch、union、label、icon、summary、target 提取和输出策略。
+
+当前前端/展示链路已经存在按工具名和语义分类的逻辑，至少要重新核对：
+
+- `packages/conversation-view/tool-presentation.ts` 中的工具名称、category、target、成功摘要、raw output 和 file diff 策略。
+- `packages/conversation-view/tool-batching.ts` 中 inspection/modification/command 的工具集合、批次边界和批次摘要。
+- `packages/shared/types.ts`、`apps/web/src/types.ts` 中 `ToolPresentation`、category、`ToolBatchType` 和序列化类型。
+- `packages/run-protocol` 中实时 `tool_started/tool_progress/tool_finished`、ledger `tool_completed` 和 terminal snapshot 的一致性。
+- `apps/web/src/conversation` 中单工具卡、批次卡、Run activity、实时 presentation、批准卡和历史回放。
+- `apps/web/src/settings/tools-panel.tsx` 中工具列表、启用状态、测试参数 preset 和结果展示。
+- Tool Gateway 的工具日志、fallback、批准摘要、fingerprint 和 safe display/output truncation。
+
+目标分类必须由工具语义决定，并通过测试固定，不能仅根据名称前缀猜测。当前目标至少满足：
+
+| 工具 | 展示语义 | 建议批次语义 | 关键展示内容 |
+|---|---|---|---|
+| `read_file` | read | inspection | 路径、行数、截断 |
+| `find` | search/read | inspection | pattern、path、命中数、截断 |
+| `ls` | read | inspection | 目录、条目数、截断 |
+| `list_workspace` | read | inspection | 根目录、节点数、截断原因 |
+| `grep` | search | inspection | pattern、path/glob、匹配数、截断 |
+| `write_file` | file mutation | modification | 路径、created/updated、diff |
+| `patch_file` | file mutation | modification | path、mode、编辑/替换数、diff |
+| `run_command` | command | command | shell、脚本摘要、状态、批准 |
+| `read_command_output` | command control/read | 根据现有交互单独验证 | task ID、增量/最终状态 |
+| `stop_command` | command control | 根据现有交互单独验证 | task ID、停止结果 |
+
+上表中的 category 名称可以服从当前稳定协议，但语义映射和批次行为必须满足表意。尤其需要处理：
+
+- `grep` 取代旧搜索名后进入 inspection 批次，批次摘要按新参数 `pattern/path/glob` 计算。
+- `find`、`ls`、`list_workspace` 不应因为没有文件正文而落入 `other`。
+- `patch_file` 展示和批准摘要从旧 `patch` 字符串改为判别式 mode；`replace_all` 不得泄露过量原文，但要显示 expected/actual occurrences。
+- 下线工具从实时分类集合、设置 preset 和新调用展示中移除。
+- 已持久化的历史事件仍可能包含旧 tool name 或 `snapshot` 等旧 category。取消执行注册不等于破坏历史阅读；回放必须使用兼容的 legacy/generic presentation，绝不能重新执行旧工具。
+- 实时事件、刷新后的 Session replay 和 terminal snapshot 对同一次工具调用必须得到相同 category、名称、摘要、状态和批次归属。
+- 批次归类变化不能吞掉 approval 卡、assistant boundary、失败详情、文件 diff 或命令后台状态。
+
+如果展示层必须维护映射，优先从共享工具元数据生成，而不是在后端、conversation-view 和 Web 各自复制名单。无法统一生成的历史兼容逻辑应明确隔离并用 replay fixture 固定。
 
 ## 5. `find` 设计
 
@@ -614,7 +668,7 @@ packages/tool-gateway/
 ### 阶段 0：基线与契约锁定
 
 1. 重新确认分支、HEAD、工作区和现有未提交修改。
-2. 对当前工具列表、schema、effect、host 方法、UI 展示和文档引用建立检索清单。
+2. 对当前工具列表、schema、effect、host 方法、RunEvent、ledger、conversation projection、前端分类/批次/工具卡、设置 preset、日志和文档引用建立端到端检索清单。
 3. 为 `run_command` 现有输入、返回、后台任务和批准事件补充 characterization tests。
 4. 为 `patch_file` 外围工具身份、批准事件和旧参数调用补充 characterization tests。
 5. 记录 Agent 与 MCP 对 `list_workspace` 及旧内容搜索工具的当前差异，先锁定目标契约再改代码。
@@ -676,7 +730,19 @@ packages/tool-gateway/
 
 退出条件：六个下线工具和被替换的旧搜索名字都明确返回 unknown/unsupported tool，不能触发隐藏执行；批准链路仍通过测试；已有快照数据未被删除或改写。
 
-### 阶段 6：文档迁移与总体验收
+### 阶段 6：前后端展示与协议适配
+
+1. 为目标 10 个工具建立“registry -> execution -> effect -> event -> presentation -> batch -> Web”适配矩阵，逐项标记代码位置和测试。
+2. 更新共享 ToolPresentation/category 元数据、工具 descriptor、target/summary 和 safe output 策略。
+3. 更新 inspection/modification/command 批次映射和摘要，覆盖 `find`、`ls`、`list_workspace`、`grep`、新版 `patch_file` 及命令控制工具。
+4. 从实时展示和设置页移除六个下线工具及旧搜索名字，同时为已有历史事件保留只读 legacy/generic renderer。
+5. 更新 Tool Gateway 批准摘要、fingerprint、工具日志和错误/fallback，使新参数与用户看到的内容一致。
+6. 更新前端工具卡、批次卡、Run activity、设置测试 preset、类型和相关 CSS/图标；不存在的工具不能留下空白卡或错误分类。
+7. 用同一组 fixture 对比实时事件、terminal snapshot 和 Session replay，验证 category、summary、status、approval、diff 和批次边界一致。
+
+退出条件：目标 10 个工具都有明确展示和批次行为；七个旧名字不能产生新调用，但历史记录仍可安全阅读；前后端不存在硬编码名单漂移。
+
+### 阶段 7：文档迁移与总体验收
 
 1. 更新 README 的工具表、命令示例和限制说明。
 2. 更新系统设计、核心实现方案和工具链文档。
@@ -749,7 +815,22 @@ packages/tool-gateway/
 - fallback 不引用不存在的能力。
 - ToolPolicy 的模型可见过滤和执行过滤同时生效。
 
-### 15.6 仓库级命令
+### 15.6 前后端协议、展示与批次
+
+- 目标 10 个工具逐项验证 descriptor、category、中文名称、target、summary、raw output 和 truncated。
+- `find`、`ls`、`list_workspace`、`grep`、`read_file` 进入正确 inspection 批次，摘要不会引用旧工具名或旧参数。
+- `write_file`、两种 mode 的 `patch_file` 进入 modification 批次，文件数、操作数、additions/deletions 与实际 diff 一致。
+- `run_command` 的批准、前台、后台、失败和停止状态不因批次合并丢失；`read_command_output`、`stop_command` 的是否批处理按确认后的语义固定。
+- assistant message、approval、context、Run 切换和不可见 boundary 对各类批次的切分/透明规则符合产品语义。
+- 新 `patch_file` 参数在批准卡、工具卡、日志和 replay 中正确展示 mode、path、expected/actual occurrences，不再读取旧 `patch` 字段。
+- 六个下线工具和旧搜索名字不出现在新工具列表、设置 preset、descriptor 活跃映射或批次集合中。
+- 包含旧名字和旧 `snapshot` category 的历史 ledger 可以渲染为 legacy/generic 卡片，不进入执行路径、不崩溃、不污染当前工具列表。
+- 同一 fixture 经实时 RunEvent、terminal snapshot 和 Session replay 投影后，工具顺序、状态、category、summary、approval、diff 和批次成员一致。
+- 工具失败、拒绝、取消、结果截断和未知工具均有可读展示，不出现空白卡、错误图标、无限展开或未转义原始输出。
+- Tool Gateway registry、前端工具设置页和测试 preset 使用同一目标工具集合；新增/删除工具后不存在孤立开关或不可调用测试按钮。
+- Web 单元测试、conversation-view 测试、run-protocol 测试和前端构建共同覆盖该矩阵，不能只更新 snapshot 让测试通过。
+
+### 15.7 仓库级命令
 
 ```powershell
 npm run lint
@@ -810,6 +891,9 @@ npm run build:web
 3. 只读子 Agent 能看见并执行新的目录读取工具与 `grep`，但不能获得未授权的进程或写入能力。
 4. 历史会话中的未知旧工具调用失败可解释，不造成 Runtime 崩溃。
 5. 全仓库文档不再把旧行为当作当前事实。
+6. 目标 10 个工具在后端 registry、Run 协议、conversation-view、前端类型、展示映射、批次映射、设置页和日志中均有一致适配。
+7. 实时展示、terminal snapshot 和刷新后的历史回放对同一工具序列产生相同的顺序、状态、category、summary、diff、approval 和批次归属。
+8. 六个下线工具和旧搜索名字不能发起新调用；包含它们的历史记录仍能安全展示，执行下线与历史可读性互不混淆。
 
 ### 17.3 质量验收
 
@@ -835,6 +919,9 @@ npm run build:web
 | 取消快照工具注册时误删用户快照 | 本次只断开工具入口，不删除目录、索引或 Workspace 内部方法 |
 | 冻结的快照实现被其他路径重新暴露 | capability/route 检索、底层调用监测、旧 tool call 拒绝测试 |
 | 同名 Agent/MCP 工具继续异义 | 权威 registry，加 transport parity tests |
+| 后端工具变更后前端硬编码名单未同步 | 建立 10 个目标工具的端到端适配矩阵，覆盖 presentation、batch、settings 和 replay |
+| 删除展示 category 导致历史会话无法回放 | 执行注册与历史 renderer 分离，保留隔离的 legacy/generic 展示契约 |
+| 批次归类吞掉批准、失败或 diff | 使用实时/terminal/replay 共用 fixture 验证边界和成员信息 |
 | 并发 patch 覆盖 | per-file mutation queue、临界区内重读校验与原子写入 |
 
 ## 19. 实施边界
@@ -854,3 +941,11 @@ npm run build:web
 - 为已取消注册的三项快照工具继续提供兼容 alias、迁移 adapter 或新功能维护。
 
 若实施中发现必须突破上述边界，先补充证据并与用户重新确认，不在编码过程中自行扩大范围。
+
+## 20. 实施执行提示
+
+后续依据本文实施时，必须遵守以下提示：
+
+> 这次工具改造包含新增、替换、语义重构和取消注册，不是只改后端实现。开始编码前，先从当前源码重新生成完整工具与消费者清单，建立目标 10 个工具以及七个旧名字的端到端适配矩阵。对每个工具逐层核对模型 schema、ToolPolicy、Executor、Tool Gateway、approval effect、日志、RunEvent、Session ledger、SSE、terminal snapshot、conversation-view projection、前端类型、工具展示、批次归类、批准卡、设置页测试 preset、实时状态和历史回放。任何按工具名硬编码的集合、switch、union、label、icon、summary、target 提取、输出截断或 fallback 都必须根据新语义重新判断，不能机械改名。新增工具必须在前后端完整可见且展示正确；下线工具必须不能发起新调用，但历史记录仍要安全可读；改变参数或返回结构的工具必须同步修改批准 fingerprint、展示摘要、批次统计和 replay fixture。只有后端执行、实时展示、刷新后回放、批次边界、批准流程、设置页和文档全部一致，并通过对应的协议、conversation-view、Web 与全仓测试，才算完成。
+
+实施者不得假定本文列出的前端文件名和分类集合在编码时仍完全相同。由于仓库可能存在并行修改，每次编辑前都要重新检查分支、HEAD、工作区 diff 和实际消费者；保留无关用户改动，不覆盖正在进行的前端工作。
