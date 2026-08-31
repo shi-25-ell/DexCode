@@ -11,6 +11,7 @@ import {
   type AgentRunRecord,
   type AgentTreeSnapshot,
   type StoredAgentRunResult,
+  DEFAULT_AGENT_DEFINITION_NAME,
 } from './contracts.ts';
 import { AgentManagerError, agentErrorResult } from './errors.ts';
 import { createHash } from 'node:crypto';
@@ -156,7 +157,7 @@ export function createAgentManager(options: {
     return handle;
   };
 
-  async function spawnRaw(input: { task: string; agent: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext) {
+  async function spawnRaw(input: { task: string; agent?: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext) {
     requireEnabled();
     if (caller.callerAgentId && limits.maxDepth <= 1) throw new AgentManagerError('depth_exceeded', 'Child agents cannot spawn recursively');
     const existing = await loadTree(caller.sessionId);
@@ -164,10 +165,11 @@ export function createAgentManager(options: {
     if (replay?.agentRunId) return { agent_id: replay.agentId, agent_run_id: replay.agentRunId, status: 'running', replayed: true };
     if ((existing?.agents.length ?? 0) >= limits.maxAgentsPerSession) throw new AgentManagerError('capacity_exceeded', 'Session child-agent capacity is exhausted');
     if (handles.size >= limits.maxConcurrentAgents) throw new AgentManagerError('capacity_exceeded', 'Concurrent child-agent capacity is exhausted');
-    const resolved = options.definitions.resolve(input.agent);
+    const requestedDefinition = input.agent?.trim() || DEFAULT_AGENT_DEFINITION_NAME;
+    const resolved = options.definitions.resolve(requestedDefinition);
     if (!resolved) {
       const available = options.definitions.list().map((definition) => definition.name).sort();
-      throw new AgentManagerError('definition_not_found', `Agent definition not found: ${input.agent}. Available agents: ${available.join(', ') || 'none'}`);
+      throw new AgentManagerError('definition_not_found', `Agent definition not found: ${requestedDefinition}. Available agents: ${available.join(', ') || 'none'}`);
     }
     const contextMode = input.contextMode ?? resolved.definition.defaultContextMode;
     if (!resolved.definition.allowedContextModes.includes(contextMode)) throw new AgentManagerError('context_mode_forbidden', `Context mode ${contextMode} is not allowed`);

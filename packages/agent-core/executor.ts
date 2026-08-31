@@ -816,7 +816,8 @@ export function createExecutor(
               };
               if (toolName === 'spawn_agent') {
                 toolResult = await orchestration.spawn({
-                  task: String(args.task), agent: String(args.agent),
+                  task: String(args.task),
+                  ...(typeof args.agent === 'string' ? { agent: args.agent } : {}),
                   ...(typeof args.context_mode === 'string' ? { contextMode: args.context_mode as 'fresh' | 'fork' } : {}),
                   ...(typeof args.name === 'string' ? { name: args.name } : {}),
                   ...(typeof args.isolation === 'string' ? { isolation: args.isolation as 'shared' | 'worktree' } : {}),

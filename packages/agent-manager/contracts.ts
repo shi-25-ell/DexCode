@@ -143,9 +143,11 @@ export type AgentCallerContext = {
   forkSnapshot: ChatMessage[];
 };
 
+export const DEFAULT_AGENT_DEFINITION_NAME = 'general-purpose';
+
 export interface AgentOrchestrationPort {
   definitions?(): Array<{ name: string; description: string }>;
-  spawn(input: { task: string; agent: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext): Promise<unknown>;
+  spawn(input: { task: string; agent?: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext): Promise<unknown>;
   wait(input: { agentIds: string[]; mode?: 'any' | 'all'; timeoutMs?: number }, caller: AgentCallerContext): Promise<unknown>;
   followup(input: { agentId: string; task: string }, caller: AgentCallerContext): Promise<unknown>;
   stop(input: { agentId: string; reason?: string }, caller: AgentCallerContext): Promise<unknown>;
@@ -175,7 +177,7 @@ export function assertValidAgentDefinition(definition: AgentDefinition): void {
 export function validateOrchestrationToolInput(name: AgentOrchestrationToolName, args: Record<string, unknown>): string | undefined {
   if (name === 'spawn_agent') {
     if (typeof args.task !== 'string' || !args.task.trim()) return 'task is required';
-    if (typeof args.agent !== 'string' || !args.agent.trim()) return 'agent is required';
+    if (args.agent !== undefined && (typeof args.agent !== 'string' || !args.agent.trim())) return 'agent must be a non-empty string when provided';
     if (args.context_mode !== undefined && args.context_mode !== 'fresh' && args.context_mode !== 'fork') return 'context_mode must be fresh or fork';
     if (args.isolation !== undefined && args.isolation !== 'shared' && args.isolation !== 'worktree') return 'isolation must be shared or worktree';
   } else if (name === 'wait_agent') {

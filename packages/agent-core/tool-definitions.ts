@@ -1,3 +1,5 @@
+import { DEFAULT_AGENT_DEFINITION_NAME } from '../agent-manager/contracts.ts';
+
 /** Agent 可见的本地工具定义（含详细描述，减少 LLM 误用） */
 
 export const LOCAL_TOOL_DEFINITIONS = [
@@ -295,11 +297,12 @@ export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
     type: 'function' as const,
     function: {
       name: 'spawn_agent',
-      description: 'Start a persistent child agent asynchronously for a bounded task.',
+      description: `Start a persistent child agent asynchronously for a bounded task. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`,
       parameters: {
-        type: 'object', additionalProperties: false, required: ['task', 'agent'],
+        type: 'object', additionalProperties: false, required: ['task'],
         properties: {
-          task: { type: 'string', minLength: 1 }, agent: { type: 'string', minLength: 1 },
+          task: { type: 'string', minLength: 1 },
+          agent: { type: 'string', minLength: 1, default: DEFAULT_AGENT_DEFINITION_NAME, description: `Optional specialized agent type. Omit to use ${DEFAULT_AGENT_DEFINITION_NAME}.` },
           context_mode: { type: 'string', enum: ['fresh', 'fork'] }, name: { type: 'string' },
           isolation: { type: 'string', enum: ['shared', 'worktree'] },
         },
@@ -347,12 +350,12 @@ export function agentOrchestrationToolDefinitions(agents: Array<{ name: string; 
     ...tool,
     function: {
       ...tool.function,
-      description: `Start a persistent child agent asynchronously for a bounded task. Available agent definitions: ${descriptions}`,
+      description: `Start a persistent child agent asynchronously for a bounded task. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}. Available agent definitions: ${descriptions}`,
       parameters: {
         ...tool.function.parameters,
         properties: {
           ...tool.function.parameters.properties,
-          agent: { type: 'string', enum: names, description: `Available agent definitions: ${descriptions}` },
+          agent: { type: 'string', enum: names, default: DEFAULT_AGENT_DEFINITION_NAME, description: `Optional specialized agent type. Omit to use ${DEFAULT_AGENT_DEFINITION_NAME}. Available agent definitions: ${descriptions}` },
         },
       },
     },
