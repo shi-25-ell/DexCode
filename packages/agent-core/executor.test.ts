@@ -114,6 +114,33 @@ test('streams text deltas and completes a no-tool Run', async () => {
   assert.deepEqual(events.find((event) => (event as { type?: string }).type === 'chunk'), { type: 'chunk', chunk: 'done' });
 });
 
+test('settles an in-flight model request as aborted without inventing a final answer', async () => {
+  const { host } = toolHost();
+  const controller = new AbortController();
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const model: ModelClient = {
+    model: 'abort-script',
+    baseUrl: 'memory://abort-script',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+    async *streamMessage(_messages, options): AsyncIterable<ModelEvent> {
+      yield { version: 1, type: 'turn_started', attemptId: 'attempt-abort' };
+      markStarted();
+      if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener('abort', () => resolve(), { once: true }));
+      throw new DOMException('Aborted', 'AbortError');
+    },
+  };
+  const run = createExecutor(host).runReActLoop(model, [], () => {}, undefined, { signal: controller.signal });
+  await started;
+  controller.abort();
+  const result = await run;
+
+  assert.equal(result.status, 'aborted');
+  assert.equal(result.terminationReason, 'user_abort');
+  assert.equal(result.finalContent, '');
+  assert.equal(result.finalMessageId, undefined);
+});
+
 test('keeps legacy reasoning and text streams separate while committing the complete assistant turn', async () => {
   const { host } = toolHost();
   const events: AgentEvent[] = [];
