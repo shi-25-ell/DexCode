@@ -26,6 +26,8 @@ describe('Approval mode settings', () => {
     renderPanel();
 
     expect(await screen.findByRole('radio', { name: /白名单模式/ })).toBeChecked();
+    expect(screen.getByText('当前模式：白名单模式')).toBeInTheDocument();
+    expect(screen.queryByText(/revision/i)).not.toBeInTheDocument();
     expect(screen.getByText('选择项目后管理命令白名单')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('radio', { name: /完全访问/ }));
 

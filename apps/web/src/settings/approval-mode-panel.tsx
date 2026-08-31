@@ -44,7 +44,7 @@ export function ApprovalModePanel({ workspaceRef }: { workspaceRef?: string }) {
       {save.isPending ? <p className="approval-save-state">正在保存全局模式…</p> : null}
       {save.error ? <SettingsFeedback error={save.error} /> : null}
       {query.data?.diagnostic ? <SettingsFeedback error={new Error(query.data.diagnostic)} /> : null}
-      {query.data ? <p className="approval-current">当前模式：{MODE_OPTIONS.find((option) => option.mode === query.data?.mode)?.title} · revision {query.data.revision}</p> : null}
+      {query.data ? <p className="approval-current">当前模式：{MODE_OPTIONS.find((option) => option.mode === query.data?.mode)?.title}</p> : null}
     </section>
     <WhitelistPanel workspaceRef={workspaceRef} inactive={query.data?.mode === 'full_access'} />
   </div>;
