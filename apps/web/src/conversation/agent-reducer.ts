@@ -5,6 +5,7 @@ export const initialAgentActivityState: AgentActivityState = { tree: null, lastS
 
 export type AgentActivityAction =
   | { type: 'hydrate'; tree: AgentTreeSnapshot | null }
+  | { type: 'replace'; tree: AgentTreeSnapshot | null }
   | { type: 'event'; envelope: AgentActivityEnvelope }
   | { type: 'reset' };
 
@@ -17,6 +18,7 @@ function upsert<T extends { [key: string]: unknown }>(items: T[], key: keyof T, 
 
 export function agentActivityReducer(state: AgentActivityState, action: AgentActivityAction): AgentActivityState {
   if (action.type === 'reset') return initialAgentActivityState;
+  if (action.type === 'replace') return { ...state, tree: action.tree, needsResync: false };
   if (action.type === 'hydrate') {
     // The snapshot request and the activity stream run independently. A snapshot
     // that started earlier may resolve after newer stream events; applying it

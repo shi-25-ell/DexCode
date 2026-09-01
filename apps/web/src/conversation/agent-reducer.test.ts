@@ -30,4 +30,10 @@ describe('agent activity reducer', () => {
       needsResync: false,
     });
   });
+
+  it('force-replaces optimistic running state with the authoritative stop snapshot', () => {
+    const running = { ...initialAgentActivityState, lastSeq: 4, tree: { version: 1 as const, sessionId: 'session-a', rootAgentId: 'root', revision: 4, agents: [], runs: [] } };
+    const stopped = { version: 1 as const, sessionId: 'session-a', rootAgentId: 'root', revision: 5, agents: [], runs: [], control: { halted: true } };
+    expect(agentActivityReducer(running, { type: 'replace', tree: stopped })).toEqual({ tree: stopped, lastSeq: 4, needsResync: false });
+  });
 });

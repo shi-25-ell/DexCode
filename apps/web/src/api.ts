@@ -267,6 +267,22 @@ export async function streamQueueResume(input: { scope: ConversationScope; sessi
   parser.reset({ consume: true });
 }
 
+export async function stopConversationSession(scope: ConversationScope, sessionId: string): Promise<{
+  ok: true;
+  stopped: boolean;
+  stoppedMain: boolean;
+  stoppedAgents: number;
+  pendingNotificationsConsumed: number;
+  activeRun: { runId: string; phase: string } | null;
+  agents: AgentTreeSnapshot | null;
+}> {
+  return apiJson(`/api/conversations/${encodeURIComponent(sessionId)}/commands?${scopeQuery(scope)}`, {
+    method: 'POST',
+    workspaceRef: scopeWorkspaceRef(scope),
+    body: JSON.stringify({ action: 'stop_all' }),
+  });
+}
+
 export async function getAgentTree(scope: ConversationScope, sessionId: string): Promise<AgentTreeSnapshot | null> {
   return (await apiJson<{ agents: AgentTreeSnapshot | null }>(`/api/session/${encodeURIComponent(sessionId)}/agents`, {
     workspaceRef: scopeWorkspaceRef(scope),

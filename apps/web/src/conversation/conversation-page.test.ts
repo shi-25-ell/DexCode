@@ -1,12 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import type { ConversationItem } from '../types';
+import type { AgentTreeSnapshot, ConversationItem } from '../types';
 import { ApprovalCard } from './approval-card';
 import { assistantResponseCopyText, groupConversationHistory, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
-import { shouldShowConversationLoading, terminalTitle, toolCallIdsRequiringPresentationSettlement } from './conversation-page';
+import { hasActiveConversationWork, shouldShowConversationLoading, terminalTitle, toolCallIdsRequiringPresentationSettlement } from './conversation-page';
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-id' });
 
@@ -15,6 +15,19 @@ describe('conversation presentation', () => {
     expect(terminalTitle('limited', 'model_turn_limit')).toBe('模型回合数达到限制');
     expect(terminalTitle('limited', 'model_attempt_limit')).toBe('模型尝试次数达到限制');
     expect(terminalTitle('limited', 'output_token_limit')).toBe('单次模型输出达到长度限制');
+    expect(terminalTitle('limited', 'total_token_limit')).toBe('累计令牌达到限制');
+    expect(terminalTitle('limited', 'orchestration_stalled')).toBe('多智能体编排因无进展已停止');
+  });
+
+  it('keeps session controls active for a backend Main Run or a background Child Run', () => {
+    const idle: AgentTreeSnapshot = { version: 1, sessionId: 'session-a', rootAgentId: 'root', revision: 1, agents: [], runs: [] };
+    const childRunning: AgentTreeSnapshot = {
+      ...idle,
+      runs: [{ agentRunId: 'agent-run-1', agentId: 'agent-1', invokedByRunId: 'main-1', trigger: 'spawn', status: 'running', input: 'work', startedAt: '' }],
+    };
+    expect(hasActiveConversationWork({ agents: idle })).toBe(false);
+    expect(hasActiveConversationWork({ agents: childRunning })).toBe(true);
+    expect(hasActiveConversationWork({ activeRun: { runId: 'main-2' }, agents: idle })).toBe(true);
   });
 
   it('keeps the optimistic timeline visible while a new draft Session is materializing', () => {

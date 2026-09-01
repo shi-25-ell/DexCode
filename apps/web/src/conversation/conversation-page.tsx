@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Square } from 'lucide-react';
 import { Fragment, type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getAgentTree, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopChildAgent, stopConversationRun, streamAgentActivity, streamConversation, streamQueueResume } from '../api';
+import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getAgentTree, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopChildAgent, stopConversationRun, stopConversationSession, streamAgentActivity, streamConversation, streamQueueResume } from '../api';
 import type { RunEventEnvelope } from '../../../../packages/run-protocol/contracts';
 import { AppShell } from '../shell/app-shell';
 import type { AgentTreeSnapshot, ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueItem, QueueMutationOutcome } from '../types';
@@ -122,7 +122,13 @@ export function terminalTitle(status: string, reason: string): string {
   if (reason === 'model_turn_limit') return '模型回合数达到限制';
   if (reason === 'model_attempt_limit') return '模型尝试次数达到限制';
   if (reason === 'output_token_limit') return '单次模型输出达到长度限制';
+  if (reason === 'total_token_limit') return '累计令牌达到限制';
+  if (reason === 'orchestration_stalled') return '多智能体编排因无进展已停止';
   return status === 'limited' ? '运行达到限制' : '运行未完成';
+}
+
+export function hasActiveConversationWork(input: { activeRun?: unknown; agents?: AgentTreeSnapshot | null }): boolean {
+  return Boolean(input.activeRun) || Boolean(input.agents?.runs.some((run) => run.status === 'running'));
 }
 
 function ContextLabel({ usage, running }: { usage: ContextUsage; running: boolean }) {
@@ -163,6 +169,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueueItem[]>([]);
   const [presentedSteerIds, setPresentedSteerIds] = useState<Set<string>>(() => new Set());
   const [queueNotice, setQueueNotice] = useState('');
+  const [stopping, setStopping] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef<string | null>(null);
   const clientRequestIdRef = useRef<string | null>(null);
@@ -187,7 +194,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     queryKey: ['conversation', scope, conversationRef],
     queryFn: () => getConversation(scope, conversationRef!),
     enabled: Boolean(conversationRef),
-    refetchInterval: (query) => query.state.data?.activeRun || agentWakePolling ? 1_000 : false,
+    refetchInterval: (query) => hasActiveConversationWork({ activeRun: query.state.data?.activeRun, agents: query.state.data?.agents }) || agentWakePolling ? 1_000 : false,
   });
   const meta = useQuery({
     queryKey: ['meta', workspaceRef],
@@ -199,6 +206,9 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     queryFn: () => getAgentTree(scope, conversationRef!),
     enabled: scope.kind === 'workspace' && Boolean(conversationRef) && meta.data?.multiAgentEnabled === true,
   });
+  const agentTree = agentState.tree ?? snapshot.data?.agents ?? null;
+  const sessionHasActiveWork = Boolean(state.activeRun || streamingRef.current)
+    || hasActiveConversationWork({ activeRun: snapshot.data?.activeRun, agents: agentTree });
   const loadingConversation = shouldShowConversationLoading({
     hasConversationRef: Boolean(conversationRef),
     hasSnapshot: Boolean(snapshot.data),
@@ -445,7 +455,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     event?.preventDefault();
     const content = prompt.trim();
     if (!content || queueBusyRef.current.has('enqueue')) return;
-    if ((state.activeRun || streamingRef.current) && conversationRef) {
+    if (sessionHasActiveWork && conversationRef) {
       const optimisticId = `optimistic-${crypto.randomUUID()}`;
       const delivery = deliveryForFollowUp(followUpBehavior);
       const now = new Date().toISOString();
@@ -524,22 +534,31 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   };
 
   const stop = async () => {
-    if (!queueState.activeRunId) {
+    if (stopping) return;
+    setStopping(true);
+    setQueueNotice('正在停止主 Agent 和全部子 Agent…');
+    controllerRef.current?.abort('Session stop requested');
+    try {
+      if (conversationRef) {
+        const result = await stopConversationSession(scope, conversationRef);
+        agentDispatch({ type: 'replace', tree: result.agents });
+        setAgentWakePolling(false);
+        setQueueNotice(result.activeRun ? '停止命令已发送，正在等待运行退出。' : '已停止当前会话的全部运行。');
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['conversation', scope, conversationRef] }),
+          queryClient.invalidateQueries({ queryKey: ['agents', scope, conversationRef] }),
+          queryClient.invalidateQueries({ queryKey: ['conversations', scope] }),
+        ]);
+        return;
+      }
       const runRef = runIdRef.current ?? clientRequestIdRef.current;
       if (!runRef) return;
-      try {
-        await stopConversationRun(scope, runRef);
-      } catch (error) {
-        setQueueNotice(error instanceof Error ? error.message : '停止失败');
-        controllerRef.current?.abort();
-      }
-      return;
-    }
-    try {
-      await stopConversationRun(scope, queueState.activeRunId);
+      await stopConversationRun(scope, runRef);
+      setQueueNotice('已发送停止命令。');
     } catch (error) {
       setQueueNotice(error instanceof Error ? error.message : '停止失败');
-      controllerRef.current?.abort();
+    } finally {
+      setStopping(false);
     }
   };
 
@@ -632,7 +651,6 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     ...optimisticQueueItems,
   ], [optimisticQueueItems, presentedSteerIds, queueState.items]);
   const timelineGroups = useMemo(() => groupConversationHistory(timeline), [timeline]);
-  const agentTree = agentState.tree ?? snapshot.data?.agents ?? null;
   const agentGroups = useMemo(() => groupAgentTimeline(agentTree), [agentTree]);
   const activeAgentGroups = useMemo(() => state.activeRun
     ? agentGroups.filter((group) => group.sourceRunId === state.activeRun!.runId && group.sourceTurn !== undefined)
@@ -781,13 +799,13 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             }}
             placeholder="继续输入…"
             aria-label="发送消息"
-            disabled={loadingConversation}
+            disabled={loadingConversation || stopping}
             rows={3}
           />
           <div className="composer-actions">
-            {state.activeRun || streamingRef.current
+            {sessionHasActiveWork || stopping
               ? <>
-                  <button type="button" className="send-button stop" onClick={() => void stop()} aria-label="停止"><Square size={14} fill="currentColor" /></button>
+                  <button type="button" className="send-button stop" onClick={() => void stop()} aria-label={stopping ? '正在停止' : '停止全部运行'} disabled={stopping}><Square size={14} fill="currentColor" /></button>
                   <button type="submit" className="send-button" disabled={!prompt.trim() || queueBusy.has('enqueue')} aria-label="发送后续消息"><ArrowUp size={18} /></button>
                 </>
               : <button type="submit" className="send-button" disabled={!prompt.trim()} aria-label="发送"><ArrowUp size={18} /></button>}

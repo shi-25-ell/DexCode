@@ -121,7 +121,15 @@ export type AgentRunView = {
   usage?: { totalTokens: number };
   result?: { finalContent: string; terminationReason: string; toolsUsed: string[]; filesModified: string[]; usage?: { totalTokens: number }; error?: { code: string; message: string } };
 };
-export type AgentTreeSnapshot = { version: 1; sessionId: string; rootAgentId: string; revision: number; agents: AgentRecordView[]; runs: AgentRunView[] };
+export type AgentTreeSnapshot = {
+  version: 1;
+  sessionId: string;
+  rootAgentId: string;
+  revision: number;
+  agents: AgentRecordView[];
+  runs: AgentRunView[];
+  control?: { halted: boolean; haltedAt?: string; haltedReason?: string; resumedAt?: string };
+};
 export type AgentTranscriptMessage =
   | { role: 'system' | 'user'; content: string }
   | { role: 'assistant'; content: string | null; tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> }
