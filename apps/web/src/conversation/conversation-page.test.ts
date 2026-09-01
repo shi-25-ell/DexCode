@@ -6,7 +6,7 @@ import { ApprovalCard } from './approval-card';
 import { assistantResponseCopyText, groupConversationHistory, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
-import { shouldShowConversationLoading, terminalTitle } from './conversation-page';
+import { shouldShowConversationLoading, terminalTitle, toolCallIdsRequiringPresentationSettlement } from './conversation-page';
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-id' });
 
@@ -24,6 +24,15 @@ describe('conversation presentation', () => {
       snapshotPending: true,
       materializingDraft: true,
     })).toBe(false);
+  });
+
+  it('does not wait for hidden orchestration tools before presenting a Steer message', () => {
+    expect(toolCallIdsRequiringPresentationSettlement([
+      { callId: 'read-1', name: 'read_artifact' },
+      { callId: 'spawn-1', name: 'spawn_agent' },
+      { callId: 'wait-1', name: 'wait_agent' },
+      { callId: 'context-1', name: 'compact_context' },
+    ])).toEqual(['read-1']);
   });
 
   it('collapses committed process items behind each final answer and copies only the final answer', () => {

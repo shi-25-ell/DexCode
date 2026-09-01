@@ -39,6 +39,20 @@ type PageAction =
 
 type ConversationStreamToken = { identity: string };
 
+const TOOLS_WITHOUT_PRESENTATION_FINISH = new Set([
+  'compact_context',
+  'spawn_agent',
+  'wait_agent',
+  'followup_agent',
+  'stop_agent',
+]);
+
+export function toolCallIdsRequiringPresentationSettlement(toolCalls: ReadonlyArray<{ callId: string; name: string }>): string[] {
+  return toolCalls
+    .filter((call) => !TOOLS_WITHOUT_PRESENTATION_FINISH.has(call.name))
+    .map((call) => call.callId);
+}
+
 function ConversationTimelineItem({ item, status, workspaceRef, agentTree, onOpenAgent, onStopAgent }: {
   item: ConversationItem;
   status: RunPresentation['status'];
@@ -355,7 +369,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     } else if (event.type === 'assistant_message_started' || event.type === 'assistant_message_reset' || event.type === 'assistant_content_delta') {
       transcriptStableRef.current = false;
     } else if (event.type === 'assistant_message_committed') {
-      unsettledToolCallsRef.current = new Set(event.message.toolCalls.map((call) => call.callId));
+      unsettledToolCallsRef.current = new Set(toolCallIdsRequiringPresentationSettlement(event.message.toolCalls));
       transcriptStableRef.current = unsettledToolCallsRef.current.size === 0;
       presentSteersAfterEvent = transcriptStableRef.current;
     } else if (event.type === 'tool_started') {
