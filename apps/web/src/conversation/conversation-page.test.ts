@@ -206,16 +206,16 @@ describe('conversation presentation', () => {
     expect(screen.queryByText(/operationId|digest/)).not.toBeInTheDocument();
   });
 
-  it('shows a Skill card only for activate_skill', () => {
+  it('shows a Skill card for the content-loading read and hides bookkeeping actions', () => {
     const { rerender } = render(createElement(ToolCard, { tool: {
       callRef: 'skill-read', toolName: 'read_skill', category: 'skill', name: '使用 Skill', target: 'codebase-design', status: 'succeeded', summary: '已加载能力说明',
     } }));
-    expect(screen.queryByText('codebase-design')).not.toBeInTheDocument();
+    expect(screen.getByText('codebase-design')).toBeInTheDocument();
 
     rerender(createElement(ToolCard, { tool: {
       callRef: 'skill-activate', toolName: 'activate_skill', category: 'skill', name: '使用 Skill', target: 'codebase-design', status: 'succeeded', summary: '已加载能力说明',
     } }));
-    expect(screen.getByText('codebase-design')).toBeInTheDocument();
+    expect(screen.queryByText('codebase-design')).not.toBeInTheDocument();
 
     rerender(createElement(ToolCard, { tool: {
       callRef: 'skill-deactivate', toolName: 'deactivate_skill', category: 'skill', name: '停用 Skill', target: 'codebase-design', status: 'succeeded', summary: '执行完成',
