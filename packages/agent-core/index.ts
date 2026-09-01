@@ -607,19 +607,39 @@ export function createCodingAgent(
           return registry;
         })())
       : undefined;
+    const contextOwner = { kind: 'agent' as const, sessionId: input.sessionId, agentId: input.agent.agentId };
+    const persistenceHooks: AgentPersistenceHooks = contextEngine && contextPolicy ? {
+      ...input.persistenceHooks,
+      contextPrepared: (prepared) => sessionRepository.commitContext({
+        sessionId: input.sessionId,
+        runId: input.run.agentRunId,
+        manifest: prepared.manifest,
+        ...(prepared.summaryRecord ? { summaryRecord: prepared.summaryRecord } : {}),
+        ...(prepared.activity ? { activity: prepared.activity } : {}),
+      }).then(() => undefined),
+    } : input.persistenceHooks;
     return runtime.runAgent({
       identity: { runId: input.run.agentRunId, parentRunId: input.run.invokedByRunId, profile: 'child', origin: 'orchestrated' },
       messages: pairedMessages(input.messages),
       systemSections: sections,
       persistence: 'child',
-      persistenceHooks: input.persistenceHooks,
+      persistenceHooks,
       budget: input.agent.definitionSnapshot.budget,
       signal: input.signal,
       productSessionId: input.sessionId,
       toolPolicy: { ...input.agent.definitionSnapshot.toolPolicy, allowOrchestration: false },
       toolHost: childToolHost,
       skillRegistry: childSkillRegistry,
-      contextPolicy: { mode: 'isolated' },
+      contextPolicy: contextEngine && contextPolicy ? {
+        mode: 'managed',
+        engine: contextEngine,
+        sessionId: input.sessionId,
+        contextOwner,
+        activeRequest: input.run.input,
+        policy: contextPolicy,
+        readArtifact: (artifactInput) => sessionRepository.readContextArtifact({ sessionId: input.sessionId, ...artifactInput }),
+        managedMemoryRefs: preparedMemory.refs,
+      } : { mode: 'isolated' },
       metadata: { sessionId: input.sessionId, agentId: input.agent.agentId },
     });
   }

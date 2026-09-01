@@ -10,6 +10,7 @@ import type {
   ContextArtifactRef,
   ContextManifest,
   ContextManifestV2,
+  ContextOwner,
   ContextPresentation,
   ContextSummaryRecord,
   ContextUsageSnapshot,
@@ -42,6 +43,14 @@ import {
 } from './journal-types.ts';
 
 export type { Session, TaskSummary, ChatMessage };
+
+function assertContextRunAccess(session: Session, runId: string, contextOwner?: ContextOwner): void {
+  if (contextOwner?.sessionId !== undefined && contextOwner.sessionId !== session.sessionId) {
+    throw new Error('Context owner does not match the Session');
+  }
+  if (contextOwner?.kind === 'agent') return;
+  if (session.activeTaskId !== runId) throw new Error(`Run is not active: ${runId}`);
+}
 
 export function createSessionRepository(options: { projectId?: string } = {}) {
   const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
@@ -808,7 +817,11 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
-      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      const contextOwner = input.manifest.version === 2 ? input.manifest.contextOwner : undefined;
+      assertContextRunAccess(session, input.runId, contextOwner);
+      if (input.summaryRecord && JSON.stringify(input.summaryRecord.contextOwner) !== JSON.stringify(contextOwner)) {
+        throw new Error('Context summary owner does not match its manifest');
+      }
       const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
       return saveUnlocked({
         ...session,
@@ -823,12 +836,13 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         ledger: input.manifest.version === 2
           ? [
               ...(session.ledger ?? []),
-              { seq, at: new Date().toISOString(), runId: input.runId, type: 'context_prepare_committed', manifest: input.manifest },
+              { seq, at: new Date().toISOString(), runId: input.runId, type: 'context_prepare_committed', manifest: input.manifest, ...(contextOwner ? { contextOwner } : {}) },
               ...(input.activity && input.summaryRecord ? [{
                 seq: seq + 1,
                 at: new Date().toISOString(),
                 runId: input.runId,
                 type: 'context_compaction_completed' as const,
+                ...(contextOwner ? { contextOwner } : {}),
                 presentation: {
                   operationRef: input.activity.operationRef,
                   status: 'completed' as const,
@@ -858,11 +872,11 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function beginContextCompaction(input: { sessionId: string; runId: string; operationRef: string }): Promise<void> {
+  async function beginContextCompaction(input: { sessionId: string; runId: string; operationRef: string; contextOwner?: ContextOwner }): Promise<void> {
     await withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
-      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      assertContextRunAccess(session, input.runId, input.contextOwner);
       const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
       await saveUnlocked({
         ...session,
@@ -873,6 +887,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
           runId: input.runId,
           type: 'context_compaction_started',
           operationRef: input.operationRef,
+          ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}),
         }],
       });
     });
@@ -882,12 +897,13 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     sessionId: string;
     runId: string;
     operationRef: string;
+    contextOwner?: ContextOwner;
     reason: NonNullable<ContextPresentation['reason']>;
   }): Promise<void> {
     await withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
-      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      assertContextRunAccess(session, input.runId, input.contextOwner);
       const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
       await saveUnlocked({
         ...session,
@@ -899,6 +915,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
           type: 'context_compaction_failed',
           operationRef: input.operationRef,
           reason: input.reason,
+          ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}),
         }],
       });
     });
@@ -910,15 +927,17 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     manifestId: string;
     actualInputTokens: number;
     usage: ContextUsageSnapshot;
+    contextOwner?: ContextOwner;
   }): Promise<void> {
     await withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
-      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
       let found = false;
+      let manifestOwner: ContextOwner | undefined;
       const manifests = (session.contextManifests ?? []).map((manifest) => {
         if (manifest.version !== 2 || manifest.id !== input.manifestId) return manifest;
         found = true;
+        manifestOwner = manifest.contextOwner;
         return {
           ...manifest,
           actualInputTokens: input.actualInputTokens,
@@ -927,6 +946,8 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         } satisfies ContextManifestV2;
       });
       if (!found) throw new Error('Context manifest not found for provider usage');
+      assertContextRunAccess(session, input.runId, manifestOwner);
+      if (JSON.stringify(input.contextOwner) !== JSON.stringify(manifestOwner)) throw new Error('Context usage owner does not match its manifest');
       const seq = (session.ledger?.at(-1)?.seq ?? 0) + 1;
       await saveUnlocked({
         ...session,
@@ -940,6 +961,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
           manifestId: input.manifestId,
           actualInputTokens: input.actualInputTokens,
           usage: input.usage,
+          ...(manifestOwner ? { contextOwner: manifestOwner } : {}),
         }],
       });
     });
@@ -948,6 +970,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
   async function putContextArtifact(input: {
     sessionId: string;
     runId: string;
+    contextOwner?: ContextOwner;
     kind: ContextArtifactRef['kind'];
     sourceRef: string;
     content: string;
@@ -955,7 +978,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
-      if (session.activeTaskId !== input.runId) throw new Error(`Run is not active: ${input.runId}`);
+      assertContextRunAccess(session, input.runId, input.contextOwner);
       const digest = createHash('sha256').update(input.content).digest('hex');
       const id = `artifact-${createHash('sha256').update(`${input.sessionId}:${input.kind}:${digest}`).digest('hex').slice(0, 24)}`;
       const existing = session.contextArtifacts?.find((artifact) => artifact.id === id);

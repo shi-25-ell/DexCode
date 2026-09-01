@@ -281,6 +281,9 @@ test('projection restores Context Cards and provider-calibrated request usage fr
       { seq: 3, at: now, runId: 'run-context', type: 'context_compaction_started', operationRef: 'context-op' },
       { seq: 4, at: now, runId: 'run-context', type: 'context_compaction_completed', presentation: { operationRef: 'context-op', status: 'completed', beforeTokens: 4_000, afterTokens: 1_000, breakdown, summarizedMessages: 12 }, summaryRecordId: 'summary-1' },
       { seq: 5, at: now, runId: 'run-context', type: 'context_usage_observed', manifestId: 'manifest-1', usage: { usedTokens: 1_100, contextWindowTokens: 10_000, hardLimitTokens: 8_000, percentage: 11, source: 'provider', timing: 'last_request', asOfTurn: 2, asOfAttempt: 2, breakdown, breakdownEstimated: true } },
+      { seq: 6, at: now, runId: 'agent-run-context', type: 'context_compaction_started', operationRef: 'child-context-op', contextOwner: { kind: 'agent', sessionId: 'session-context-view', agentId: 'agent-a' } },
+      { seq: 7, at: now, runId: 'agent-run-context', type: 'context_compaction_completed', presentation: { operationRef: 'child-context-op', status: 'completed', beforeTokens: 8_000, afterTokens: 2_000, breakdown, summarizedMessages: 20 }, summaryRecordId: 'child-summary', contextOwner: { kind: 'agent', sessionId: 'session-context-view', agentId: 'agent-a' } },
+      { seq: 8, at: now, runId: 'agent-run-context', type: 'context_usage_observed', manifestId: 'child-manifest', usage: { usedTokens: 2_000, contextWindowTokens: 10_000, percentage: 20, source: 'provider', timing: 'last_request', breakdown, breakdownEstimated: true }, contextOwner: { kind: 'agent', sessionId: 'session-context-view', agentId: 'agent-a' } },
     ],
   };
   const view = projectConversation(session);

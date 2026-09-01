@@ -4,6 +4,7 @@ import type {
   ContextActivity,
   ContextArtifactRef,
   ContextManifest,
+  ContextOwner,
   ContextPresentation,
   ContextSummaryRecord,
   ContextUsageSnapshot,
@@ -106,11 +107,12 @@ export interface SessionRepository {
     summaryRecord?: ContextSummaryRecord;
     activity?: ContextActivity;
   }): Promise<Session>;
-  beginContextCompaction(input: { sessionId: string; runId: string; operationRef: string }): Promise<void>;
+  beginContextCompaction(input: { sessionId: string; runId: string; operationRef: string; contextOwner?: ContextOwner }): Promise<void>;
   failContextCompaction(input: {
     sessionId: string;
     runId: string;
     operationRef: string;
+    contextOwner?: ContextOwner;
     reason: NonNullable<ContextPresentation['reason']>;
   }): Promise<void>;
   recordContextProviderUsage(input: {
@@ -119,10 +121,12 @@ export interface SessionRepository {
     manifestId: string;
     actualInputTokens: number;
     usage: ContextUsageSnapshot;
+    contextOwner?: ContextOwner;
   }): Promise<void>;
   putContextArtifact(input: {
     sessionId: string;
     runId: string;
+    contextOwner?: ContextOwner;
     kind: ContextArtifactRef['kind'];
     sourceRef: string;
     content: string;

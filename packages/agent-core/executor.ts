@@ -143,6 +143,7 @@ export type ReActLoopOptions = {
   context?: {
     engine: ContextEngine;
     sessionId: string;
+    contextOwner?: import('../shared/types.ts').ContextOwner;
     activeRequest: string;
     systemSections: ContextSection[];
     policy: ContextPolicy;
@@ -523,6 +524,7 @@ export function createExecutor(
             const prepareInput = {
               sessionId: options.context.sessionId,
               runId,
+              ...(options.context.contextOwner ? { contextOwner: options.context.contextOwner } : {}),
               turn: modelTurnCount,
               attempt: modelAttemptCount,
               activeRequest: options.context.activeRequest,

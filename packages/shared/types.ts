@@ -146,6 +146,10 @@ export type ContextPresentation = {
   reason?: 'summary_failed' | 'cancelled' | 'invalid_summary' | 'interrupted' | 'persistence_failed';
 };
 
+export type ContextOwner =
+  | { kind: 'session'; sessionId: string }
+  | { kind: 'agent'; sessionId: string; agentId: string };
+
 export type RunReport = {
   version: 1;
   runId: string;
@@ -199,6 +203,7 @@ export type ContextManifestV2 = {
   version: 2;
   id: string;
   runId: string;
+  contextOwner?: ContextOwner;
   turn: number;
   attempt: number;
   createdAt: string;
@@ -236,6 +241,7 @@ export type ContextSummaryRecord = {
   version: 2;
   id: string;
   runId: string;
+  contextOwner?: ContextOwner;
   turn: number;
   strategyVersion: 'structured-summary-v2';
   sourceDigest: string;
@@ -337,11 +343,11 @@ export type SessionLedgerRecord =
   | { seq: number; at: string; runId: string; type: 'approval_requested'; approvalId: string; request: ToolApprovalRequest }
   | { seq: number; at: string; runId: string; type: 'approval_resolved'; approvalId: string; decision: ApprovalOption }
   | { seq: number; at: string; runId: string; type: 'context_committed'; manifest: ContextManifest; checkpoint?: CompactionCheckpoint }
-  | { seq: number; at: string; runId: string; type: 'context_prepare_committed'; manifest: ContextManifestV2; summaryRecord?: ContextSummaryRecord }
-  | { seq: number; at: string; runId: string; type: 'context_compaction_started'; operationRef: string }
-  | { seq: number; at: string; runId: string; type: 'context_compaction_completed'; presentation: ContextPresentation; summaryRecordId?: string }
-  | { seq: number; at: string; runId: string; type: 'context_compaction_failed'; operationRef: string; reason: NonNullable<ContextPresentation['reason']> }
-  | { seq: number; at: string; runId: string; type: 'context_usage_observed'; manifestId: string; actualInputTokens?: number; usage: ContextUsageSnapshot }
+  | { seq: number; at: string; runId: string; type: 'context_prepare_committed'; manifest: ContextManifestV2; summaryRecord?: ContextSummaryRecord; contextOwner?: ContextOwner }
+  | { seq: number; at: string; runId: string; type: 'context_compaction_started'; operationRef: string; contextOwner?: ContextOwner }
+  | { seq: number; at: string; runId: string; type: 'context_compaction_completed'; presentation: ContextPresentation; summaryRecordId?: string; contextOwner?: ContextOwner }
+  | { seq: number; at: string; runId: string; type: 'context_compaction_failed'; operationRef: string; reason: NonNullable<ContextPresentation['reason']>; contextOwner?: ContextOwner }
+  | { seq: number; at: string; runId: string; type: 'context_usage_observed'; manifestId: string; actualInputTokens?: number; usage: ContextUsageSnapshot; contextOwner?: ContextOwner }
   | { seq: number; at: string; runId: string; type: 'run_terminal'; report: RunReport; summary?: TaskSummary }
   | { seq: number; at: string; runId: string; type: 'recovery'; reason: 'interrupted' }
   | QueueLedgerRecord;

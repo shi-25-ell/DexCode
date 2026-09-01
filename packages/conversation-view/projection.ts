@@ -14,6 +14,10 @@ function sessionState(session: Session): ConversationState {
   return session.runReports?.at(-1)?.status === 'failed' ? 'failed' : 'idle';
 }
 
+function isAgentContextRecord(record: SessionLedgerRecord): boolean {
+  return 'contextOwner' in record && record.contextOwner?.kind === 'agent';
+}
+
 export function projectConversationListItem(session: Session): ConversationListItem {
   const firstUser = session.messages.find((message) => message.role === 'user');
   const latestUser = [...session.messages].reverse().find((message) => message.role === 'user');
@@ -28,11 +32,11 @@ export function projectConversationListItem(session: Session): ConversationListI
 }
 
 function contextUsage(session: Session, contextWindow?: number): ContextUsageView {
-  const observed = [...(session.ledger ?? [])].reverse().find((record) => record.type === 'context_usage_observed');
+  const observed = [...(session.ledger ?? [])].reverse().find((record) => record.type === 'context_usage_observed' && !isAgentContextRecord(record));
   if (observed?.type === 'context_usage_observed') return observed.usage;
   const reportUsage = session.runReports?.at(-1)?.latestContextUsage;
   if (reportUsage) return reportUsage;
-  const manifest = [...(session.contextManifests ?? [])].reverse().find((candidate) => candidate.version === 2);
+  const manifest = [...(session.contextManifests ?? [])].reverse().find((candidate) => candidate.version === 2 && candidate.contextOwner?.kind !== 'agent');
   if (manifest?.version === 2) {
     const usedTokens = manifest.actualInputTokens ?? manifest.estimatedInputTokens;
     const window = manifest.contextWindowTokens ?? contextWindow;
@@ -184,6 +188,7 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
   }
   let currentRunId: string | undefined;
   for (const record of records) {
+    if (isAgentContextRecord(record)) continue;
     if ('runId' in record && record.runId !== currentRunId) {
       if (currentRunId !== undefined) breakBatch(`run-boundary-${record.seq}`);
       currentRunId = record.runId;

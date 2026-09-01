@@ -1,6 +1,6 @@
 import type { ContextEngine, ContextSection } from '../context-engine/index.ts';
 import type { ModelClient } from '../llm-client/index.ts';
-import type { AgentEvent, ChatMessage, ContextPolicy, FileDiff, ToolCall, ToolPresentation, ToolResultMessage } from '../shared/types.ts';
+import type { AgentEvent, ChatMessage, ContextOwner, ContextPolicy, FileDiff, ToolCall, ToolPresentation, ToolResultMessage } from '../shared/types.ts';
 import type { RunEventPayload } from '../run-protocol/index.ts';
 import {
   createExecutor,
@@ -43,6 +43,7 @@ export type AgentContextPolicy =
       mode: 'managed';
       engine: ContextEngine;
       sessionId: string;
+      contextOwner?: ContextOwner;
       activeRequest: string;
       policy: ContextPolicy;
       readArtifact: (input: { ref: string; offset?: number; limit?: number }) => Promise<unknown>;
@@ -345,6 +346,7 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
             context: {
               engine: contextPolicy.engine,
               sessionId: contextPolicy.sessionId,
+              ...(contextPolicy.contextOwner ? { contextOwner: contextPolicy.contextOwner } : {}),
               activeRequest: contextPolicy.activeRequest,
               systemSections: sections,
               policy: contextPolicy.policy,

@@ -210,6 +210,42 @@ test('old tool results are compacted only after a prior manifest proves they wer
   assert.equal(prepared.activity?.compactedToolResults, 1);
 });
 
+test('Agent-owned preparation neither reuses Main context history nor loses its owner', async () => {
+  const { engine, state } = harness();
+  state.contextManifests?.push({
+    version: 2,
+    id: 'main-manifest',
+    runId: 'main-run',
+    turn: 1,
+    attempt: 1,
+    createdAt: now,
+    requestDigest: 'digest',
+    requestSerializedChars: 100,
+    estimatedInputTokens: 25,
+    tokenSource: 'estimated',
+    contextWindowTokens: 3_000,
+    maxOutputTokens: 300,
+    reserveTokens: 200,
+    hardLimitTokens: 2_500,
+    breakdown: { systemPrompt: 1, workspaceCode: 1, recentConversation: 1, toolResults: 20, projectMemory: 1, managedMemory: 0, toolDefinitions: 1, other: 0 },
+    layers: [],
+    artifactRefs: [],
+    includedToolResultIds: ['call-old'],
+  });
+  const owner = { kind: 'agent', sessionId: 'session-context-test', agentId: 'agent-a' } as const;
+  const prepared = await engine.prepare({
+    ...input([
+      { role: 'user', content: 'old request' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'call-old', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'call-old', name: 'read_file', content: 'o'.repeat(6_000) },
+      { role: 'user', content: '继续完成任务' },
+    ], policy({ contextWindowTokens: 3_000, maxOutputTokens: 300, reserveTokens: 200, targetRatio: 0.3, latestToolResultsToKeep: 0, latestToolBatchChars: 10_000, largeToolResultChars: 9_000 })),
+    contextOwner: owner,
+  } as Parameters<typeof engine.prepare>[0]);
+  assert.equal(prepared.activity?.compactedToolResults ?? 0, 0);
+  assert.deepEqual((prepared.manifest as ContextManifestV2 & { contextOwner?: unknown }).contextOwner, owner);
+});
+
 test('structured summary is cached with a retained tail and reused for later messages', async () => {
   const { engine, state, started, counter } = harness();
   const canonical = Array.from({ length: 5 }, (_, index) => [
