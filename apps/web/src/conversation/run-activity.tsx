@@ -13,6 +13,7 @@ import { ContextCard } from './context-card';
 import { draftReasoning, draftText, type ActiveRunView, type RunActivityEntry } from './run-presentation';
 import { ToolCard } from './tool-card';
 import { ToolBatchCard } from './tool-batch-card';
+import { UserMessage } from './user-message';
 import { batchToolSequence } from '../../../../packages/conversation-view/tool-batching';
 
 export const phaseLabels: Record<RunPhase, string> = {
@@ -68,6 +69,7 @@ function ReasoningDisclosure({ content, truncated, textStarted, startedAt, compl
 
 function activityKey(entry: RunActivityEntry): string {
   if (entry.kind === 'assistant') return `assistant:${entry.messageId}`;
+  if (entry.kind === 'user') return `user:${entry.itemId}`;
   if (entry.kind === 'tool') return `tool:${entry.callId}`;
   if (entry.kind === 'agent') return `agent:${entry.callId}`;
   if (entry.kind === 'approval') return `approval:${entry.approvalId}`;
@@ -75,6 +77,7 @@ function activityKey(entry: RunActivityEntry): string {
 }
 
 function RunActivityItem({ entry, run, workspaceRef }: { entry: RunActivityEntry; run: ActiveRunView; workspaceRef?: string }) {
+  if (entry.kind === 'user') return <UserMessage content={entry.content} />;
   if (entry.kind === 'assistant') {
     const committed = run.committedMessages.find((item) => item.kind === 'assistant' && (item.messageId === entry.messageId || item.id === entry.messageId));
     if (committed?.kind === 'assistant') return <AssistantMessage content={committed.content} showCopy={false} />;

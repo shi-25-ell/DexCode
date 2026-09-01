@@ -67,6 +67,15 @@ function descriptor(tool: string, args: Record<string, unknown>) {
   if (tool === 'read_skill' || tool === 'activate_skill' || tool === 'deactivate_skill') {
     return { category: 'skill' as const, name: tool === 'deactivate_skill' ? '停用 Skill' : '使用 Skill', target: String(args.name ?? 'Skill') };
   }
+  if (tool === 'spawn_agent') return { category: 'other' as const, name: '启动子 Agent', target: undefined };
+  if (tool === 'wait_agent') {
+    const agentCount = Array.isArray(args.agent_ids) ? args.agent_ids.length : 0;
+    const timeoutSeconds = typeof args.timeout_ms === 'number' ? Math.max(0, Math.round(args.timeout_ms / 1_000)) : 0;
+    const target = [agentCount ? `${agentCount} 个 Agent` : '', timeoutSeconds ? `最长 ${timeoutSeconds} 秒` : ''].filter(Boolean).join(' · ');
+    return { category: 'other' as const, name: '等待子 Agent', target: target || undefined };
+  }
+  if (tool === 'followup_agent') return { category: 'other' as const, name: '继续子 Agent', target: undefined };
+  if (tool === 'stop_agent') return { category: 'other' as const, name: '停止子 Agent', target: undefined };
   if (tool.startsWith('mcp__')) {
     const parts = tool.split('__').filter(Boolean);
     return { category: 'mcp' as const, name: '调用 MCP', target: parts.length > 1 ? parts.slice(1).join(' · ') : '外部工具' };
@@ -74,7 +83,7 @@ function descriptor(tool: string, args: Record<string, unknown>) {
   if (tool === 'create_snapshot' || tool === 'restore_snapshot' || tool === 'list_versions') {
     return { category: 'snapshot' as const, name: tool === 'restore_snapshot' ? '恢复快照' : tool === 'create_snapshot' ? '创建快照' : '查看快照', target: String(args.name ?? args.snapshotId ?? '当前项目') };
   }
-  return { category: 'other' as const, name: '调用工具', target: undefined };
+  return { category: 'other' as const, name: '调用工具', target: tool };
 }
 
 function successSummary(tool: string, result: unknown, status: ToolViewStatus): string {

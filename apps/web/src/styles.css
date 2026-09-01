@@ -71,10 +71,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .primary-button { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; }
 .inline-error { margin: 7px 2px 0; color: var(--red); font-size: 12px; }
 .workspace-suggestions { position: absolute; z-index: 50; top: calc(100% + 6px); right: 0; left: 0; max-height: 260px; margin: 0; padding: 5px; overflow-y: auto; list-style: none; border: 1px solid var(--border-strong); border-radius: 9px; background: #fff; box-shadow: 0 14px 32px rgba(15,23,42,0.12); }
-.workspace-suggestions li { display: grid; grid-template-columns: 18px minmax(0,1fr) auto; align-items: center; gap: 7px; min-height: 38px; padding: 6px 8px; border-radius: 6px; color: #4b5563; cursor: pointer; }
+.workspace-suggestions li { display: grid; grid-template-columns: 18px minmax(0,1fr) auto 24px; align-items: center; gap: 7px; min-height: 38px; padding: 6px 8px; border-radius: 6px; color: #4b5563; cursor: pointer; }
 .workspace-suggestions li:hover, .workspace-suggestions li.active { background: var(--blue-soft); color: #1d4ed8; }
 .workspace-suggestions li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .workspace-suggestions li small { color: #9ca3af; font-size: 10px; white-space: nowrap; }
+.workspace-form .workspace-suggestion-delete { display: inline-flex; width: 24px; height: 24px; padding: 0; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: #9ca3af; cursor: pointer; }
+.workspace-form .workspace-suggestion-delete:hover { background: #fee2e2; color: #dc2626; }
 .sidebar-history { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 72px; overflow: hidden; }
 .sidebar-section-heading { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; margin: 18px 5px 9px; color: #4b5563; font-size: 12px; font-weight: 620; }
 .conversation-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; }

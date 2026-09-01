@@ -35,6 +35,7 @@ export type AssistantDraftView = {
 
 export type RunActivityEntry =
   | { kind: 'assistant'; messageId: string }
+  | { kind: 'user'; itemId: string; content: string; delivery?: 'steer' }
   | { kind: 'tool'; callId: string }
   | { kind: 'agent'; callId: string; agentId: string; agentRunId: string; turn: number }
   | { kind: 'approval'; approvalId: string }
@@ -147,6 +148,7 @@ function createActiveRun(envelope: RunEventEnvelope): ActiveRunView {
 
 function activityKey(entry: RunActivityEntry): string {
   if (entry.kind === 'assistant') return `assistant:${entry.messageId}`;
+  if (entry.kind === 'user') return `user:${entry.itemId}`;
   if (entry.kind === 'tool') return `tool:${entry.callId}`;
   if (entry.kind === 'agent') return `agent:${entry.callId}`;
   if (entry.kind === 'approval') return `approval:${entry.approvalId}`;

@@ -41,6 +41,25 @@ test('tool presentation localizes Skill, MCP and file changes', () => {
   assert.equal(file.rawOutput, undefined);
 });
 
+test('tool presentation identifies Agent orchestration and unknown tools', () => {
+  const waiting = presentTool({
+    callRef: 'call-wait',
+    tool: 'wait_agent',
+    args: { agent_ids: ['agent-a', 'agent-b', 'agent-c'], mode: 'all', timeout_ms: 60_000 },
+    result: { timed_out: true },
+  });
+  assert.equal(waiting.name, '等待子 Agent');
+  assert.equal(waiting.target, '3 个 Agent · 最长 60 秒');
+
+  const followup = presentTool({ callRef: 'call-followup', tool: 'followup_agent', args: { agent_id: 'agent-a', task: '继续' }, result: { status: 'running' } });
+  assert.equal(followup.name, '继续子 Agent');
+  assert.equal(followup.target, undefined);
+
+  const unknown = presentTool({ callRef: 'call-unknown', tool: 'custom_future_tool', result: { ok: true } });
+  assert.equal(unknown.name, '调用工具');
+  assert.equal(unknown.target, 'custom_future_tool');
+});
+
 test('file presentation creates exact non-contiguous hunks and marks new files', () => {
   const modified = presentTool({
     callRef: 'call-multi-hunk',
