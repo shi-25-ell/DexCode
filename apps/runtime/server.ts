@@ -415,8 +415,11 @@ const environmentMcpConfigs: ExternalMcpServerConfig[] = (() => {
 let externalMcpConfigs = await externalMcpConfigStore.read(environmentMcpConfigs);
 const externalMcpRegistry = createExternalMcpRegistry(externalMcpConfigs.filter((config) => config.enabled !== false));
 const templateGenerator = createTemplateGenerator();
+const dexcodeUserRoot = join(process.env.USERPROFILE ?? process.cwd(), '.dexcode');
+const globalSkillsRoot = join(dexcodeUserRoot, 'skills');
+const globalSkillImportTarget = { targetRoot: globalSkillsRoot, targetLabel: '~/.dexcode/skills' };
 const globalAgentDefinitions = createAgentDefinitionRegistry({
-  userRoot: join(process.env.USERPROFILE ?? process.cwd(), '.dexcode', 'agents'),
+  userRoot: join(dexcodeUserRoot, 'agents'),
 });
 await globalAgentDefinitions.reload();
 const capabilityRegistry = createCapabilityRegistry({
@@ -485,7 +488,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
   await nextWorkspaceService.loadFromDisk();
   const nextCodingToolHost = createCodingToolHost(nextWorkspaceService, { approvalModeStore, shell: commandShellOptions });
   const nextContextManager = createContextManager(nextCodingToolHost);
-  const nextSkillRegistry = createSkillRegistry({ workspaceRoot: workspace.canonicalRootPath });
+  const nextSkillRegistry = createSkillRegistry({ workspaceRoot: workspace.canonicalRootPath, userSkillsRoot: globalSkillsRoot });
   await nextSkillRegistry.loadAll();
   const nextManagedMemory = createManagedMemorySystem({
     workspaceId: workspace.workspaceId,
@@ -1791,15 +1794,18 @@ export function startRuntimeServer() {
 
     if (url.pathname === '/api/skills/import/preview' && req.method === 'POST') {
       const parsed = await parseBody<SkillImportRequest>(req);
-      const result = await previewSkillImport(workspaceService.getRootDir(), parsed);
+      const result = await previewSkillImport(workspaceService.getRootDir(), parsed, globalSkillImportTarget);
       sendJson(res, result.ok ? 200 : 400, result);
       return;
     }
 
     if (url.pathname === '/api/skills/import' && req.method === 'POST') {
       const parsed = await parseBody<SkillImportRequest>(req);
-      const result = await importSkill(workspaceService.getRootDir(), parsed);
-      if (result.ok) await skillRegistry.reload();
+      const result = await importSkill(workspaceService.getRootDir(), parsed, globalSkillImportTarget);
+      if (result.ok) {
+        const registries = new Set([...workspaceRuntimes.values()].map((runtime) => runtime.skillRegistry));
+        await Promise.all([...registries].map((registry) => registry.reload()));
+      }
       sendJson(res, result.ok ? 200 : 400, result.ok ? { ...result, skills: skillRegistry.listSkills() } : result);
       return;
     }

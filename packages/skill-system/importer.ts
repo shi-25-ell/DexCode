@@ -14,6 +14,11 @@ export type SkillImportRequest = {
   overwrite?: boolean;
 };
 
+export type SkillImportTarget = {
+  targetRoot: string;
+  targetLabel?: string;
+};
+
 export type SkillImportReport = {
   recognized: boolean;
   format: string;
@@ -83,6 +88,8 @@ async function listScriptFiles(path: string): Promise<string[]> {
 async function buildReport(options: {
   mode: SkillImportMode;
   workspaceRoot: string;
+  targetRoot: string;
+  targetLabel: string;
   skillFilePath: string;
   sourceRoot?: string;
   content: string;
@@ -96,8 +103,8 @@ async function buildReport(options: {
   const allowImplicitInvocation = parsed.frontmatter.allowImplicitInvocation ?? !parsed.frontmatter.disableModelInvocation;
   const userInvocable = parsed.frontmatter.userInvocable ?? true;
   const capabilities = inferCapabilities(options.content, parsed.frontmatter.allowedTools ?? []);
-  const targetPath = join('.aicoding', 'skills', name);
-  const targetAbs = resolve(join(options.workspaceRoot, targetPath));
+  const targetPath = `${options.targetLabel.replace(/[\\/]+$/, '')}/${name}`.replaceAll('\\', '/');
+  const targetAbs = resolve(join(options.targetRoot, name));
   const warnings: string[] = [];
   const conflicts: string[] = [];
   const sourceRoot = options.sourceRoot ?? dirname(options.skillFilePath);
@@ -124,13 +131,15 @@ async function buildReport(options: {
   };
 }
 
-export async function previewSkillImport(workspaceRoot: string, request: SkillImportRequest): Promise<SkillImportPreviewResult> {
+export async function previewSkillImport(workspaceRoot: string, request: SkillImportRequest, target?: SkillImportTarget): Promise<SkillImportPreviewResult> {
   const mode = request.mode;
   if (mode !== 'local_path' && mode !== 'workspace_path' && mode !== 'inline_markdown') {
     return { ok: false, error: 'Invalid import mode' };
   }
 
   const root = resolve(workspaceRoot);
+  const targetRoot = resolve(target?.targetRoot ?? join(root, '.aicoding', 'skills'));
+  const targetLabel = target?.targetLabel ?? '.aicoding/skills';
 
   if (mode === 'inline_markdown') {
     const content = request.content ?? '';
@@ -141,6 +150,8 @@ export async function previewSkillImport(workspaceRoot: string, request: SkillIm
     const report = await buildReport({
       mode,
       workspaceRoot: root,
+      targetRoot,
+      targetLabel,
       skillFilePath,
       content,
       requestedName: virtualName,
@@ -168,6 +179,8 @@ export async function previewSkillImport(workspaceRoot: string, request: SkillIm
   const report = await buildReport({
     mode,
     workspaceRoot: root,
+    targetRoot,
+    targetLabel,
     skillFilePath,
     sourceRoot,
     content,
@@ -177,17 +190,18 @@ export async function previewSkillImport(workspaceRoot: string, request: SkillIm
   return { ok: true, report, sourceRoot, content };
 }
 
-export async function importSkill(workspaceRoot: string, request: SkillImportRequest) {
+export async function importSkill(workspaceRoot: string, request: SkillImportRequest, target?: SkillImportTarget) {
   if (!request.confirm) return { ok: false, error: 'confirm is required' };
-  const preview = await previewSkillImport(workspaceRoot, request);
+  const preview = await previewSkillImport(workspaceRoot, request, target);
   if (!preview.ok) return preview;
   if (preview.report.conflicts.length > 0 && !request.overwrite) {
     return { ok: false, error: preview.report.conflicts[0], report: preview.report };
   }
 
-  const targetAbs = resolve(join(workspaceRoot, preview.report.targetPath));
-  if (!isInside(targetAbs, resolve(join(workspaceRoot, '.aicoding', 'skills')))) {
-    return { ok: false, error: 'target path is outside .aicoding/skills' };
+  const targetRoot = resolve(target?.targetRoot ?? join(workspaceRoot, '.aicoding', 'skills'));
+  const targetAbs = resolve(join(targetRoot, preview.report.name));
+  if (!isInside(targetAbs, targetRoot)) {
+    return { ok: false, error: 'target path is outside the Skill import root' };
   }
 
   await mkdir(dirname(targetAbs), { recursive: true });

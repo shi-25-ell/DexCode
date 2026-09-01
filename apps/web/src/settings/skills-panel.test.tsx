@@ -19,6 +19,7 @@ describe('Skill settings actions', () => {
     render(<QueryClientProvider client={client}><SkillsPanel workspaceRef="workspace-1" /></QueryClientProvider>);
 
     expect(await screen.findByRole('button', { name: '重新扫描' })).toBeInTheDocument();
+    expect(screen.getByText(/安装到全局目录，可供所有项目使用/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '刷新' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导入 Skill' })).toBeInTheDocument();
 

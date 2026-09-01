@@ -14,6 +14,7 @@ type RegistryOptions = {
   workspaceRoot: string;
   projectId?: string;
   configPath?: string;
+  userSkillsRoot?: string;
 };
 
 const builtinSkillsRoot = join(process.cwd(), 'packages', 'skill-system', 'builtin-skills');
@@ -44,6 +45,7 @@ function isInside(child: string, parent: string): boolean {
 
 export function createSkillRegistry(options: RegistryOptions) {
   let workspaceRoot = resolve(options.workspaceRoot);
+  const userSkillsRoot = resolve(options.userSkillsRoot ?? join(process.env.USERPROFILE ?? process.cwd(), '.dexcode', 'skills'));
   const projectId = options.projectId ?? 'demo-project';
   const configPath = options.configPath ?? join(process.cwd(), 'workspaces', projectId, 'skill-config.json');
   let skills = new Map<string, SkillDefinition>();
@@ -55,6 +57,7 @@ export function createSkillRegistry(options: RegistryOptions) {
 
     const roots = [
       { root: builtinSkillsRoot, source: 'builtin' as const },
+      { root: userSkillsRoot, source: 'user' as const },
       { root: join(workspaceRoot, '.aicoding', 'skills'), source: 'project' as const },
       { root: join(workspaceRoot, '.claude', 'skills'), source: 'project' as const },
       { root: join(workspaceRoot, '.agents', 'skills'), source: 'project' as const },
