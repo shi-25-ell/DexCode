@@ -6,7 +6,7 @@ import { ApprovalCard } from './approval-card';
 import { assistantResponseCopyText, groupConversationHistory, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
-import { hasActiveConversationWork, shouldShowConversationLoading, terminalTitle, toolCallIdsRequiringPresentationSettlement } from './conversation-page';
+import { hasActiveConversationWork, shouldQueueConversationSubmission, shouldShowConversationLoading, terminalTitle, toolCallIdsRequiringPresentationSettlement } from './conversation-page';
 import { abortStreamOnPageHide } from './stream-lifecycle';
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-id' });
@@ -29,6 +29,21 @@ describe('conversation presentation', () => {
     expect(hasActiveConversationWork({ agents: idle })).toBe(false);
     expect(hasActiveConversationWork({ agents: childRunning })).toBe(true);
     expect(hasActiveConversationWork({ activeRun: { runId: 'main-2' }, agents: idle })).toBe(true);
+  });
+
+  it('starts a new Main Run when only background Child Runs remain', () => {
+    const childRunning: AgentTreeSnapshot = {
+      version: 1,
+      sessionId: 'session-a',
+      rootAgentId: 'root',
+      revision: 1,
+      agents: [],
+      runs: [{ agentRunId: 'agent-run-1', agentId: 'agent-1', invokedByRunId: 'main-1', trigger: 'spawn', status: 'running', input: 'work', startedAt: '' }],
+    };
+
+    expect(hasActiveConversationWork({ agents: childRunning })).toBe(true);
+    expect(shouldQueueConversationSubmission({ localStreamActive: false })).toBe(false);
+    expect(shouldQueueConversationSubmission({ localStreamActive: false, authoritativeActiveRun: { runId: 'main-2' } })).toBe(true);
   });
 
   it('keeps the optimistic timeline visible while a new draft Session is materializing', () => {

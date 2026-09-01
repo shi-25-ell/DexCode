@@ -132,6 +132,14 @@ export function hasActiveConversationWork(input: { activeRun?: unknown; agents?:
   return Boolean(input.activeRun) || Boolean(input.agents?.runs.some((run) => run.status === 'running'));
 }
 
+export function shouldQueueConversationSubmission(input: {
+  presentedActiveRun?: unknown;
+  authoritativeActiveRun?: unknown;
+  localStreamActive: boolean;
+}): boolean {
+  return input.localStreamActive || Boolean(input.presentedActiveRun ?? input.authoritativeActiveRun);
+}
+
 function ContextLabel({ usage, running }: { usage: ContextUsage; running: boolean }) {
   if (usage.percentage === undefined) return <span>{running && usage.source === 'unknown' ? '上下文计算中' : '上下文未知'}</span>;
   const detail = usage.usedTokens !== undefined && usage.contextWindowTokens !== undefined
@@ -208,8 +216,12 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     enabled: scope.kind === 'workspace' && Boolean(conversationRef) && meta.data?.multiAgentEnabled === true,
   });
   const agentTree = agentState.tree ?? snapshot.data?.agents ?? null;
-  const sessionHasActiveWork = Boolean(state.activeRun || streamingRef.current)
-    || hasActiveConversationWork({ activeRun: snapshot.data?.activeRun, agents: agentTree });
+  const mainHasActiveWork = shouldQueueConversationSubmission({
+    presentedActiveRun: state.activeRun,
+    authoritativeActiveRun: snapshot.data?.activeRun,
+    localStreamActive: streamingRef.current,
+  });
+  const sessionHasActiveWork = mainHasActiveWork || hasActiveConversationWork({ agents: agentTree });
   const loadingConversation = shouldShowConversationLoading({
     hasConversationRef: Boolean(conversationRef),
     hasSnapshot: Boolean(snapshot.data),
@@ -489,8 +501,8 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const content = prompt.trim();
-    if (!content || queueBusyRef.current.has('enqueue')) return;
-    if (sessionHasActiveWork && conversationRef) {
+    if (!content || (mainHasActiveWork && queueBusyRef.current.has('enqueue'))) return;
+    if (mainHasActiveWork && conversationRef) {
       const optimisticId = `optimistic-${crypto.randomUUID()}`;
       const delivery = deliveryForFollowUp(followUpBehavior);
       const now = new Date().toISOString();
@@ -841,13 +853,18 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             {sessionHasActiveWork || stopping
               ? <>
                   <button type="button" className="send-button stop" onClick={() => void stop()} aria-label={stopping ? '正在停止' : '停止全部运行'} disabled={stopping}><Square size={14} fill="currentColor" /></button>
-                  <button type="submit" className="send-button" disabled={!prompt.trim() || queueBusy.has('enqueue')} aria-label="发送后续消息"><ArrowUp size={18} /></button>
+                  <button
+                    type="submit"
+                    className="send-button"
+                    disabled={!prompt.trim() || (mainHasActiveWork && queueBusy.has('enqueue'))}
+                    aria-label={mainHasActiveWork ? '发送后续消息' : '发送'}
+                  ><ArrowUp size={18} /></button>
                 </>
               : <button type="submit" className="send-button" disabled={!prompt.trim()} aria-label="发送"><ArrowUp size={18} /></button>}
           </div>
           <div className="composer-footer">
             <span className="model-name"><i />{meta.data?.model.displayName ?? '模型信息加载中'}</span>
-            <label className="follow-up-setting">
+            {mainHasActiveWork ? <label className="follow-up-setting">
               后续消息
               <select
                 value={followUpBehavior}
@@ -860,7 +877,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
                 <option value="queue">下一轮处理</option>
                 <option value="steer">调整当前方向</option>
               </select>
-            </label>
+            </label> : null}
             <span className={`context-usage ${contextLevel}`}>
               <i><b style={{ width: `${Math.min(100, Math.max(0, effectiveUsage.percentage ?? 0))}%` }} /></i>
               <ContextLabel usage={effectiveUsage} running={state.status === 'running' || state.status === 'waiting'} />
