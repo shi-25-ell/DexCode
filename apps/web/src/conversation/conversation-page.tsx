@@ -37,6 +37,8 @@ type PageAction =
   | { type: 'run_event'; event: RunEventEnvelope }
   | { type: 'error'; message: string };
 
+type ConversationStreamToken = { identity: string };
+
 function ConversationTimelineItem({ item, status, workspaceRef, agentTree, onOpenAgent, onStopAgent }: {
   item: ConversationItem;
   status: RunPresentation['status'];
@@ -165,6 +167,8 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const scopeIdentity = scope.kind === 'workspace' ? `workspace:${scope.workspaceRef}` : 'general';
   const conversationIdentity = `${scopeIdentity}:${conversationRef ?? 'draft'}`;
   const previousConversationIdentityRef = useRef(conversationIdentity);
+  const currentConversationIdentityRef = useRef(conversationIdentity);
+  const activeStreamTokenRef = useRef<ConversationStreamToken | null>(null);
   const snapshot = useQuery({
     queryKey: ['conversation', scope, conversationRef],
     queryFn: () => getConversation(scope, conversationRef!),
@@ -192,12 +196,19 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     const previousIdentity = previousConversationIdentityRef.current;
     const materializedCurrentDraft = previousIdentity === `${scopeIdentity}:draft`
       && Boolean(conversationRef)
-      && streamingRef.current;
+      && streamingRef.current
+      && activeStreamTokenRef.current?.identity === conversationIdentity;
     previousConversationIdentityRef.current = conversationIdentity;
+    currentConversationIdentityRef.current = conversationIdentity;
     stickToBottom.current = true;
     setAtBottom(true);
 
     if (!materializedCurrentDraft && (previousIdentity !== conversationIdentity || !conversationRef)) {
+      activeStreamTokenRef.current = null;
+      streamingRef.current = false;
+      controllerRef.current = null;
+      runIdRef.current = null;
+      clientRequestIdRef.current = null;
       queueDispatch({ type: 'session_reset' });
       queuedItemsRef.current.clear();
       pendingSteersRef.current.clear();
@@ -208,6 +219,19 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       agentDispatch({ type: 'reset' });
       setAgentDrawerOpen(false);
       setSelectedAgentId(undefined);
+      if (conversationRef) {
+        dispatch({ type: 'hydrate', snapshot: {
+          ref: conversationRef,
+          title: '加载会话…',
+          state: 'idle',
+          updatedAt: '',
+          items: [],
+          queuedItems: [],
+          queuePaused: false,
+          revision: 0,
+          contextUsage: { source: 'unknown', timing: 'next_request' },
+        } });
+      }
     }
     if (!conversationRef) {
       dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], queuedItems: [], queuePaused: false, revision: 0, contextUsage: { source: 'unknown', timing: 'next_request' } } });
@@ -303,9 +327,27 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     presentPendingSteers();
   };
 
-  const handleStreamEvent = (envelope: RunEventEnvelope) => {
-    runIdRef.current = envelope.runId;
+  const handleStreamEvent = (envelope: RunEventEnvelope, token: ConversationStreamToken) => {
     const event = envelope.event;
+    if (event.type === 'run_started' && event.isNew) {
+      const wasVisible = activeStreamTokenRef.current === token
+        && currentConversationIdentityRef.current === token.identity;
+      token.identity = `${scopeIdentity}:${event.sessionId}`;
+      if (wasVisible) {
+        currentConversationIdentityRef.current = token.identity;
+        const next = scope.kind === 'general'
+          ? `/c/${encodeURIComponent(event.sessionId)}`
+          : `/w/${encodeURIComponent(scope.workspaceRef)}/c/${encodeURIComponent(event.sessionId)}`;
+        navigate(next, { replace: true });
+      }
+    }
+    if (activeStreamTokenRef.current !== token || currentConversationIdentityRef.current !== token.identity) {
+      if (event.type === 'run_finished') {
+        queryClient.setQueryData<ConversationSnapshot>(['conversation', scope, event.conversation.ref], event.conversation as ConversationSnapshot);
+      }
+      return;
+    }
+    runIdRef.current = envelope.runId;
     let presentSteersAfterEvent = false;
     if (event.type === 'run_started') {
       transcriptStableRef.current = false;
@@ -324,12 +366,6 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
         transcriptStableRef.current = true;
         presentSteersAfterEvent = true;
       }
-    }
-    if (event.type === 'run_started' && event.isNew) {
-      const next = scope.kind === 'general'
-        ? `/c/${encodeURIComponent(event.sessionId)}`
-        : `/w/${encodeURIComponent(scope.workspaceRef)}/c/${encodeURIComponent(event.sessionId)}`;
-      navigate(next, { replace: true });
     }
     if (event.type === 'queue_item_added' || event.type === 'queue_item_updated') {
       queuedItemsRef.current.set(event.item.itemId, event.item);
@@ -440,6 +476,8 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     runIdRef.current = null;
     dispatch({ type: 'begin', content, clientRequestId });
     const controller = new AbortController();
+    const streamToken: ConversationStreamToken = { identity: conversationIdentity };
+    activeStreamTokenRef.current = streamToken;
     controllerRef.current = controller;
     let settled = false;
     try {
@@ -449,18 +487,23 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
         clientRequestId,
         prompt: content,
         signal: controller.signal,
-        onEvent: handleStreamEvent,
+        onEvent: (envelope) => handleStreamEvent(envelope, streamToken),
       });
       settled = true;
     } catch (error) {
-      if (!controller.signal.aborted) dispatch({ type: 'error', message: error instanceof Error ? error.message : '连接失败' });
-    } finally {
-      controllerRef.current = null;
-      if (settled) {
-        clientRequestIdRef.current = null;
-        runIdRef.current = null;
+      if (!controller.signal.aborted && activeStreamTokenRef.current === streamToken) {
+        dispatch({ type: 'error', message: error instanceof Error ? error.message : '连接失败' });
       }
-      streamingRef.current = false;
+    } finally {
+      if (activeStreamTokenRef.current === streamToken) {
+        activeStreamTokenRef.current = null;
+        controllerRef.current = null;
+        if (settled) {
+          clientRequestIdRef.current = null;
+          runIdRef.current = null;
+        }
+        streamingRef.current = false;
+      }
       await queryClient.invalidateQueries({ queryKey: ['conversations', scope] });
       await queryClient.invalidateQueries({ queryKey: ['conversation', scope] });
     }
@@ -549,15 +592,22 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const resumeQueue = async () => {
     if (!conversationRef || streamingRef.current) return;
     const controller = new AbortController();
+    const streamToken: ConversationStreamToken = { identity: conversationIdentity };
+    activeStreamTokenRef.current = streamToken;
     controllerRef.current = controller;
     streamingRef.current = true;
     try {
-      await streamQueueResume({ scope, sessionId: conversationRef, signal: controller.signal, onEvent: handleStreamEvent });
+      await streamQueueResume({ scope, sessionId: conversationRef, signal: controller.signal, onEvent: (envelope) => handleStreamEvent(envelope, streamToken) });
     } catch (error) {
-      if (!controller.signal.aborted) setQueueNotice(error instanceof Error ? error.message : '恢复队列失败');
+      if (!controller.signal.aborted && activeStreamTokenRef.current === streamToken) {
+        setQueueNotice(error instanceof Error ? error.message : '恢复队列失败');
+      }
     } finally {
-      controllerRef.current = null;
-      streamingRef.current = false;
+      if (activeStreamTokenRef.current === streamToken) {
+        activeStreamTokenRef.current = null;
+        controllerRef.current = null;
+        streamingRef.current = false;
+      }
       await queryClient.invalidateQueries({ queryKey: ['conversations', scope] });
       await queryClient.invalidateQueries({ queryKey: ['conversation'] });
     }
