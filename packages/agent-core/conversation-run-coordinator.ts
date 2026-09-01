@@ -131,6 +131,7 @@ export function createConversationRunCoordinator(dependencies: {
   const locks = new Map<string, Promise<void>>();
   const observe = (observation: QueueObservation) => dependencies.observe?.(observation);
   const MAX_CONSECUTIVE_AGENT_NOTIFICATION_RUNS = 4;
+  const MAX_AGENT_NOTIFICATION_BATCH = 4;
   const AGENT_NOTIFICATION_BUDGET: AgentRunBudget = {
     maxModelTurns: 20,
     maxModelAttempts: 24,
@@ -167,12 +168,10 @@ export function createConversationRunCoordinator(dependencies: {
       if (pending.length === 0) return null;
     }
     pending.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    const first = pending[0]!;
-    const groupKey = first.delegationGroupId ?? first.notificationId;
-    const notifications = pending.filter((item) => (item.delegationGroupId ?? item.notificationId) === groupKey);
+    const notifications = pending.slice(0, MAX_AGENT_NOTIFICATION_BATCH);
     const ids = notifications.map((item) => item.notificationId);
     const content = [
-      'The following background child-agent runs completed. Incorporate the useful results, continue the parent task if needed, and do not claim they are still running.',
+      'The following background child-agent runs are terminal and their results are newly delivered to this Main Run. Incorporate every listed result before deciding the next action. Do not wait for, poll, or claim that any listed run is still running. If these results complete the parent task, produce the final synthesis now.',
       JSON.stringify(notifications.map((item) => ({
         agentId: item.agentId,
         agentRunId: item.agentRunId,
@@ -305,23 +304,6 @@ export function createConversationRunCoordinator(dependencies: {
             observe({ metric: 'queue.wait_ms', value: waited, sessionId: handle.sessionId, runId: handle.runId, itemId: consumed.item.itemId, delivery: 'steer' });
             observe({ metric: 'steer.safe_boundary_wait_ms', value: waited, sessionId: handle.sessionId, runId: handle.runId, itemId: consumed.item.itemId });
             return { action: 'continue', steer: consumed.message, itemId: consumed.item.itemId, directive: consumed.message.content } as const;
-          }
-          const queue = await repository.getQueue(handle.sessionId);
-          if (!queue.pending.some((item) => item.delivery === 'next_run')) {
-            const batch = await pendingAgentBatch(handle.sessionId);
-            if (batch && dependencies.agentInbox) {
-              await repository.appendRunMessage({
-                sessionId: handle.sessionId,
-                runId: handle.runId,
-                message: batch.message,
-                origin: batch.origin,
-              });
-              await dependencies.agentInbox.consume(handle.sessionId, batch.notifications.map((item) => item.notificationId), handle.runId);
-              return {
-                action: 'continue', steer: batch.message, itemId: batch.notifications[0]!.notificationId,
-                directive: batch.message.content, refreshContext: false, updateActiveRequest: false,
-              } as const;
-            }
           }
           if (input.wouldNaturallyComplete) {
             handle.phase = 'closing';

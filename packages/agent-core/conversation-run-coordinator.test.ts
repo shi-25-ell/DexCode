@@ -308,7 +308,7 @@ test('failed Queue resume releases the session chain for a later retry', async (
   }
 });
 
-test('Coordinator gives Steer priority, then injects one grouped Agent Inbox notification at a safe boundary', async () => {
+test('Coordinator gives Steer priority and delivers Agent Inbox notifications in a fresh follow-on Run', async () => {
   const repository = createSessionRepository({ projectId: `test-coordinator-agent-inbox-${crypto.randomUUID()}` });
   const projectDir = dirname(repository.sessionsDir);
   try {
@@ -319,7 +319,7 @@ test('Coordinator gives Steer priority, then injects one grouped Agent Inbox not
       notificationId: `notification-${agentRunId}`,
       agentId: `agent-${index + 1}`,
       agentRunId,
-      delegationGroupId: 'delegation-main-1',
+      delegationGroupId: `delegation-main-${index + 1}`,
       createdAt: new Date(Date.now() + index).toISOString(),
       summary: `result-${index + 1}`,
       result: { status: 'completed', terminationReason: 'natural_completion', finalContent: `result-${index + 1}` },
@@ -329,19 +329,22 @@ test('Coordinator gives Steer priority, then injects one grouped Agent Inbox not
       pending: async () => notifications.filter((item) => !consumed.includes(item.notificationId)),
       consume: async (_sessionId: string, ids: string[]) => { consumed.push(...ids); },
     };
+    const prompts: string[] = [];
     const agent = {
       async runTask(sessionId: string, prompt: string, _selectedFile: string | null, _onEvent: (event: AgentEvent) => void, _hooks: unknown, options: any) {
-        await repository.beginRun({ sessionId, runId: options.runId, userMessage: { role: 'user', content: prompt }, context });
-        entered.release();
-        await proceed.promise;
-        const steer = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 3, wouldNaturallyComplete: true });
-        assert.equal(steer.action, 'continue');
-        assert.equal(steer.directive, 'urgent user steer');
-        const inbox = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 2, wouldNaturallyComplete: true });
-        assert.equal(inbox.action, 'continue');
-        assert.equal(inbox.refreshContext, false);
-        assert.match(inbox.directive, /result-1/);
-        assert.match(inbox.directive, /result-2/);
+        prompts.push(prompt);
+        if (!options.prestarted) await repository.beginRun({ sessionId, runId: options.runId, userMessage: { role: 'user', content: prompt }, context });
+        if (prompt === 'initial') {
+          entered.release();
+          await proceed.promise;
+          const steer = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 3, wouldNaturallyComplete: true });
+          assert.equal(steer.action, 'continue');
+          assert.equal(steer.directive, 'urgent user steer');
+        } else {
+          assert.match(prompt, /result-1/);
+          assert.match(prompt, /result-2/);
+          assert.match(prompt, /terminal and their results are newly delivered/);
+        }
         const finish = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 1, wouldNaturallyComplete: true });
         assert.equal(finish.action, 'finish');
         const value = terminal(options.runId, prompt);
@@ -355,10 +358,11 @@ test('Coordinator gives Steer priority, then injects one grouped Agent Inbox not
     await coordinator.submitDuringRun({ sessionId: session.sessionId, content: 'urgent user steer', delivery: 'steer', expectedRunId: 'run-agent-inbox', operationId: 'steer-before-agent' });
     proceed.release();
     await running;
+    assert.equal(prompts.length, 2);
     assert.deepEqual(consumed.sort(), notifications.map((item) => item.notificationId).sort());
     const loaded = await repository.loadSession(session.sessionId);
-    assert.equal(loaded?.runReports?.length, 1);
-    assert.equal(loaded?.ledger?.filter((record) => record.type === 'message' && record.origin?.startsWith('agent_notification:')).length, 1);
+    assert.equal(loaded?.runReports?.length, 2);
+    assert.equal(loaded?.ledger?.filter((record) => record.type === 'run_started' && record.origin?.startsWith('agent_notification:')).length, 1);
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }
