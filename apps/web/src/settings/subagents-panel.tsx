@@ -90,7 +90,7 @@ export function SubagentsPanel() {
       onRefresh={() => { void query.refetch(); }}
       action={<><span className="settings-count">{count}/{limit}</span><button className="primary-button" onClick={openNew} disabled={atCapacity} title={atCapacity ? '已达到子智能体数量上限' : undefined}><Plus size={15} />新建子智能体</button></>}
     />
-    <SettingsFeedback loading={query.isLoading} error={query.error ?? toggle.error ?? remove.error} empty={!query.isLoading && count === 0 ? '暂无子智能体' : undefined} />
+    <SettingsFeedback loading={query.isLoading} error={query.error ?? toggle.error ?? remove.error} />
     <div className="settings-list subagent-grid">{query.data?.agents.map((agent) => <article className="settings-row subagent-card" key={agent.name}>
       <div className="settings-row-main">
         <div className="subagent-card-top">
