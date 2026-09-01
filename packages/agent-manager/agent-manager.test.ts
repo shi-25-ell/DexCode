@@ -125,9 +125,12 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
   const manager = createAgentManager({ enabled: true, store, definitions, runChild });
   const caller = (toolCallId: string) => ({ sessionId, callerRunId: 'main-run', callerTurn: 1, toolCallId, delegationGroupId: 'group-1', forkSnapshot: [] });
   try {
+    assert.equal(definitions.resolve('assistant')?.definition.name, 'assistant');
+    assert.deepEqual(manager.definitions().map(({ name }) => name), ['general-purpose', 'researcher', 'reviewer']);
     const missing = await manager.spawn({ task: 'hello', agent: 'greeter' }, caller('spawn-missing')) as { code: string; message: string };
     assert.equal(missing.code, 'definition_not_found');
-    assert.match(missing.message, /Available agents: assistant, general-purpose, researcher, reviewer/);
+    assert.match(missing.message, /Available agents: general-purpose, researcher, reviewer/);
+    assert.doesNotMatch(missing.message, /assistant/);
     const first = await manager.spawn({ task: 'one' }, caller('spawn-1')) as { agent_id: string; message: string; asynchronous: boolean; background?: boolean };
     assert.equal(first.asynchronous, true);
     assert.equal(first.background, undefined);

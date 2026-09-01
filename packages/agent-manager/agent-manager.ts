@@ -31,6 +31,7 @@ type Handle = { sessionId: string; agentId: string; agentRunId: string; abortCon
 
 const WRITE_TOOLS = new Set(['write_file', 'patch_file', 'run_command']);
 const BUILTIN_AGENT_NAMES = new Set(['general-purpose', 'assistant', 'researcher', 'reviewer']);
+const MODEL_HIDDEN_AGENT_NAMES = new Set(['assistant']);
 
 function isWriter(agent: AgentRecord): boolean {
   const allow = agent.definitionSnapshot.toolPolicy.allow ?? [];
@@ -124,6 +125,8 @@ export function createAgentManager(options: {
     maxOrchestrationOpsPerRun: options.limits?.maxOrchestrationOpsPerRun ?? 32,
     maxStalledOrchestrationOps: options.limits?.maxStalledOrchestrationOps ?? 3,
   };
+  const modelVisibleDefinitions = () => options.definitions.list()
+    .filter(({ name }) => !MODEL_HIDDEN_AGENT_NAMES.has(name));
   const handles = new Map<string, Handle>();
   const locks = new Map<string, Promise<void>>();
   const recoveredSessions = new Set<string>();
@@ -260,7 +263,7 @@ export function createAgentManager(options: {
     const requestedDefinition = input.agent?.trim() || DEFAULT_AGENT_DEFINITION_NAME;
     const resolved = options.definitions.resolve(requestedDefinition);
     if (!resolved) {
-      const available = options.definitions.list().map((definition) => definition.name).sort();
+      const available = modelVisibleDefinitions().map((definition) => definition.name).sort();
       throw new AgentManagerError('definition_not_found', `Agent definition not found: ${requestedDefinition}. Available agents: ${available.join(', ') || 'none'}`);
     }
     const contextMode = input.contextMode ?? resolved.definition.defaultContextMode;
@@ -405,7 +408,7 @@ export function createAgentManager(options: {
   }
 
   return {
-    definitions: () => options.definitions.list().map(({ name, description }) => ({ name, description })),
+    definitions: () => modelVisibleDefinitions().map(({ name, description }) => ({ name, description })),
     spawn: async (input, caller) => {
       try { return await withAgentLock(`operation:${caller.sessionId}:${caller.callerRunId}:${caller.toolCallId}`, () => spawnRaw(input, caller)); }
       catch (error) { return agentErrorResult(error); }
