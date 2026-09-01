@@ -159,12 +159,6 @@ export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGr
   }, [run.activityOrder, run.approvalsById, run.toolsByCallId]);
   return (
     <section className="run-activity" aria-label="当前运行" aria-live="polite">
-      <div className={`run-phase ${run.phase}`} role="status">
-        <LoaderCircle className="run-phase-spinner" size={16} aria-hidden="true" />
-        <span>{phaseLabels[run.phase]}</span>
-        <ElapsedTime key={run.phaseChangedAt} startedAt={run.phaseChangedAt} />
-        {run.note ? <small>{run.note}</small> : null}
-      </div>
       {needsResync ? <div className="run-resync-note">实时片段有缺失，完成后将使用已提交会话校准。</div> : null}
       {displayOrder.map((displayEntry) => {
         if (displayEntry.kind === 'tool_batch') return <ToolBatchCard key={displayEntry.key} batch={displayEntry.batch} />;
@@ -191,6 +185,12 @@ export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGr
           </Fragment>
         );
       })}
+      <div className={`run-phase ${run.phase}`} role="status">
+        <LoaderCircle className="run-phase-spinner" size={16} aria-hidden="true" />
+        <span>{phaseLabels[run.phase]}</span>
+        <ElapsedTime key={run.phaseChangedAt} startedAt={run.phaseChangedAt} />
+        {run.note ? <small>{run.note}</small> : null}
+      </div>
     </section>
   );
 }

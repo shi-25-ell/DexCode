@@ -189,6 +189,19 @@ describe('RunActivity', () => {
     expect(screen.queryByRole('button', { name: '展开思考过程' })).not.toBeInTheDocument();
   });
 
+  it('keeps the live phase below the latest streamed activity', () => {
+    render(createElement(RunActivity, {
+      run: run({
+        committedMessages: [{ id: 'message-1', messageId: 'message-1', kind: 'assistant', content: '最新流式内容', turn: 1, final: false }],
+        activityOrder: [{ kind: 'assistant', messageId: 'message-1' }],
+      }),
+      needsResync: false,
+    }));
+    const message = screen.getByText('最新流式内容');
+    const phase = screen.getByRole('status');
+    expect(message.compareDocumentPosition(phase) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
   it('keeps provider reasoning folded by default behind a keyboard-accessible button', () => {
     render(createElement(RunActivity, {
       run: run({
