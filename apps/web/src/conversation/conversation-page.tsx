@@ -759,8 +759,9 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
           {loadingConversation ? (
             <div className="empty-conversation" role="status"><p>正在加载会话…</p></div>
           ) : timeline.length === 0 ? (
-            <div className="empty-conversation">
+            <div className="empty-conversation empty-conversation-intro">
               <h2>{scope.kind === 'general' ? '从一个问题开始' : '开始处理当前项目'}</h2>
+              <img src="/dexcode-helmet-coding-here.svg" alt="" aria-hidden="true" />
               <p>{scope.kind === 'general' ? '这里不会启用项目文件与命令工具。加载项目后可以让 Agent 阅读和修改代码。' : '描述你的目标，DexCode 会在对话中展示每一步工具调用。'}</p>
             </div>
           ) : null}
