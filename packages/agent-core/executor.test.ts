@@ -238,6 +238,52 @@ test('orchestration tools receive immutable caller context and stay out of ordin
   assert.match(spawn.function.parameters.properties.context_mode.description ?? '', /fresh.*without the main conversation.*fork.*current context.*definition's default/i);
 });
 
+test('an orchestration circuit result terminates the Run without another model turn', async () => {
+  const { host } = toolHost();
+  const model = scriptedModel([
+    { content: '', reasoning: '', toolCalls: [{ id: 'wait-circuit', name: 'wait_agent', arguments: { agent_ids: ['agent-a'] } }], finishReason: 'tool_calls' },
+  ]);
+  const orchestration = {
+    spawn: async () => ({}),
+    wait: async () => ({ status: 'circuit_open', code: 'orchestration_stalled', orchestration_circuit_open: true }),
+    followup: async () => ({}),
+    stop: async () => ({}),
+  };
+  const result = await createExecutor(host, undefined, undefined, orchestration).runReActLoop(
+    model,
+    [{ role: 'user', content: 'wait' }],
+    () => {},
+    undefined,
+    { runId: 'run-circuit', sessionId: 'session-circuit', maxIterations: 20 },
+  );
+  assert.equal(result.status, 'limited');
+  assert.equal(result.terminationReason, 'orchestration_stalled');
+  assert.equal(result.modelTurnCount, 1);
+  assert.equal(result.error?.code, 'ORCHESTRATION_STALLED');
+});
+
+test('model request timeout is forwarded and cumulative token usage is bounded', async () => {
+  const { host } = toolHost();
+  let timeoutMs: number | undefined;
+  const model: ModelClient = {
+    model: 'budgeted', baseUrl: 'memory://budgeted', reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+    async *streamMessage(_messages, options) {
+      timeoutMs = options?.timeoutMs;
+      yield { version: 1, type: 'turn_started', attemptId: 'budget-attempt' };
+      yield { version: 1, type: 'text_delta', delta: 'bounded answer' };
+      yield { version: 1, type: 'turn_completed', response: { content: 'bounded answer', reasoning: '', toolCalls: [], finishReason: 'stop', usage: { inputTokens: 9, outputTokens: 2, totalTokens: 11 } } };
+    },
+  };
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'work' }], () => {}, undefined, {
+    modelRequestTimeoutMs: 300_000,
+    maxTotalTokens: 10,
+  });
+  assert.equal(timeoutMs, 300_000);
+  assert.equal(result.status, 'limited');
+  assert.equal(result.terminationReason, 'total_token_limit');
+  assert.equal(result.finalContent, 'bounded answer');
+});
+
 test('consumes one Steer at a natural safe boundary before the next model request', async () => {
   const { host } = toolHost();
   const scripted = scriptedModel([

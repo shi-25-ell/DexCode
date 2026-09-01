@@ -13,7 +13,7 @@ import type {
 import type { ModelClient } from '../llm-client/index.ts';
 import type { CodingToolHost, ConfirmHook, ExecutorHooks } from './executor.ts';
 import { createAgentRuntime } from './agent-runtime.ts';
-import type { AgentLifecycleHooks, AgentRunResult } from './agent-runtime.ts';
+import type { AgentLifecycleHooks, AgentOrigin, AgentRunBudget, AgentRunResult } from './agent-runtime.ts';
 import type { SessionRepository } from './session-contracts.ts';
 import { projectConversation } from '../conversation-view/index.ts';
 import {
@@ -245,6 +245,8 @@ export function createCodingAgent(
       legacyEvents?: boolean;
       presentationHooks?: (emit: (event: RunEventPayload) => void) => ExecutorHooks;
       lifecycle?: AgentLifecycleHooks;
+      origin?: AgentOrigin;
+      budget?: AgentRunBudget;
     } = {},
   ): Promise<TaskSummary> {
     if (!sessionRepository) throw new Error('sessionRepository is required for runTask');
@@ -404,7 +406,7 @@ export function createCodingAgent(
         };
       };
       result = await runtime.runAgent({
-        identity: { runId, profile: 'main', origin: 'user' },
+        identity: { runId, profile: 'main', origin: options.origin ?? 'user' },
         messages: executionMessages,
         systemSections,
         persistence: 'session',
@@ -424,7 +426,7 @@ export function createCodingAgent(
             ...(prepared.activity ? { activity: prepared.activity } : {}),
           }).then(() => undefined),
         },
-        budget: {},
+        budget: options.budget ?? {},
         signal: options.signal,
         productSessionId: sessionId,
         executorHooks: resolvedHooks,
@@ -451,7 +453,7 @@ export function createCodingAgent(
       result = {
         runId,
         profile: 'main',
-        origin: 'user',
+        origin: options.origin ?? 'user',
         messages: [],
         finalContent: '',
         toolsUsed: [],

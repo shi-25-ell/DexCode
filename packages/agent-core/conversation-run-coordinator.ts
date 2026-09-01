@@ -1,6 +1,6 @@
 import type { AgentEvent, QueueDelivery, QueueItemView, QueuePauseReason, RunContext, Session, TaskSummary } from '../shared/types.ts';
 import type { ExecutorHooks } from './executor.ts';
-import type { AgentLifecycleHooks } from './agent-runtime.ts';
+import type { AgentLifecycleHooks, AgentOrigin, AgentRunBudget } from './agent-runtime.ts';
 import type { QueueMutationOutcome, SessionRepository } from './session-contracts.ts';
 import type { RunCommandSource } from './run-commands.ts';
 import type { RunEventEnvelope, RunEventPayload } from '../run-protocol/contracts.ts';
@@ -27,6 +27,8 @@ type AgentRunner = {
       legacyEvents?: boolean;
       presentationHooks?: (emit: (event: RunEventPayload) => void) => ExecutorHooks;
       lifecycle?: AgentLifecycleHooks;
+      origin?: AgentOrigin;
+      budget?: AgentRunBudget;
     },
   ): Promise<TaskSummary>;
 };
@@ -72,6 +74,7 @@ export type StartConversationRunInput = {
   isNew?: boolean;
   clientRequestId?: string;
   sourceItemId?: string;
+  notificationDelivery?: boolean;
 };
 
 export type SubmitDuringRunInput = {
@@ -127,6 +130,15 @@ export function createConversationRunCoordinator(dependencies: {
   const chainsBySessionId = new Map<string, ConversationRunChain>();
   const locks = new Map<string, Promise<void>>();
   const observe = (observation: QueueObservation) => dependencies.observe?.(observation);
+  const MAX_CONSECUTIVE_AGENT_NOTIFICATION_RUNS = 4;
+  const AGENT_NOTIFICATION_BUDGET: AgentRunBudget = {
+    maxModelTurns: 20,
+    maxModelAttempts: 24,
+    maxRetriesPerTurn: 1,
+    maxOutputTokens: 16_384,
+    modelRequestTimeoutMs: 300_000,
+    maxTotalTokens: 1_000_000,
+  };
 
   function notificationIdsFromOrigin(origin: string | undefined): string[] {
     return origin?.startsWith('agent_notification:') ? origin.slice('agent_notification:'.length).split(',').filter(Boolean) : [];
@@ -176,13 +188,22 @@ export function createConversationRunCoordinator(dependencies: {
     return { notifications, message: { role: 'user', content }, origin: `agent_notification:${ids.join(',')}` };
   }
 
-  async function beginAgentNotificationRun(sessionId: string, context: RunContext): Promise<{ runId: string; prompt: string } | null> {
+  async function beginAgentNotificationRun(sessionId: string, context: RunContext): Promise<{ runId: string; prompt: string; notificationDelivery: true } | null> {
     const batch = await pendingAgentBatch(sessionId);
     if (!batch || !dependencies.agentInbox) return null;
+    const session = await repository.loadSession(sessionId);
+    const consecutiveNotificationRuns = [...(session?.ledger ?? [])].reverse().reduce((count, record) => {
+      if (count < 0 || record.type !== 'run_started') return count;
+      return record.origin?.startsWith('agent_notification:') ? count + 1 : -1;
+    }, 0);
+    if (consecutiveNotificationRuns >= MAX_CONSECUTIVE_AGENT_NOTIFICATION_RUNS) {
+      observe({ metric: 'run_chain.paused.count', value: 1, sessionId, outcome: 'agent_notification_limit', reason: 'agent_notification_limit' });
+      return null;
+    }
     const runId = crypto.randomUUID();
     await repository.beginRun({ sessionId, runId, userMessage: batch.message, context, profile: 'main', origin: batch.origin });
     await dependencies.agentInbox.consume(sessionId, batch.notifications.map((item) => item.notificationId), runId);
-    return { runId, prompt: batch.message.content };
+    return { runId, prompt: batch.message.content, notificationDelivery: true };
   }
 
   async function withSessionLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
@@ -385,6 +406,7 @@ export function createConversationRunCoordinator(dependencies: {
             ...(current.isNew !== undefined ? { isNew: current.isNew } : {}),
             ...(current.clientRequestId ? { clientRequestId: current.clientRequestId } : {}),
             ...(current.sourceItemId ? { sourceItemId: current.sourceItemId } : {}),
+            ...(current.notificationDelivery ? { origin: 'orchestrated' as const, budget: AGENT_NOTIFICATION_BUDGET } : {}),
             commandSource: commandSource(handle),
             ...(dependencies.createLifecycleHooks ? {
               lifecycle: dependencies.createLifecycleHooks(current.sessionId, current.runId),
@@ -422,7 +444,7 @@ export function createConversationRunCoordinator(dependencies: {
       if (!claimed) {
         const notificationRun = await beginAgentNotificationRun(current.sessionId, environment.context);
         if (notificationRun) {
-          current = { sessionId: current.sessionId, runId: notificationRun.runId, prompt: notificationRun.prompt, prestarted: true };
+          current = { sessionId: current.sessionId, runId: notificationRun.runId, prompt: notificationRun.prompt, prestarted: true, notificationDelivery: true };
           continue;
         }
         observe({ metric: 'run_chain.length', value: summaries.length, sessionId: current.sessionId, runId: current.runId, outcome: 'completed' });
@@ -449,7 +471,7 @@ export function createConversationRunCoordinator(dependencies: {
 
   async function resume(sessionId: string, sink: EventSink, stream: CoordinatorStreamOptions = {}): Promise<RunChainResult> {
     const chain: ConversationRunChain = { chainId: crypto.randomUUID(), sessionId, sink };
-    let next: { runId: string; prompt: string; sourceItemId?: string } | null;
+    let next: { runId: string; prompt: string; sourceItemId?: string; notificationDelivery?: true } | null;
     try {
       next = await withSessionLock(sessionId, async () => {
         if (chainsBySessionId.has(sessionId) || activeBySessionId.has(sessionId)) throw new Error('Session already has an active Run');
@@ -472,7 +494,7 @@ export function createConversationRunCoordinator(dependencies: {
       return { summaries: [], paused: false };
     }
     try {
-      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, ...(next.sourceItemId ? { sourceItemId: next.sourceItemId } : {}) }, sink, chain, stream);
+      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, ...(next.sourceItemId ? { sourceItemId: next.sourceItemId } : {}), ...(next.notificationDelivery ? { notificationDelivery: true } : {}) }, sink, chain, stream);
     } finally {
       await unregisterChain(chain);
     }

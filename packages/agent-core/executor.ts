@@ -99,7 +99,9 @@ export type TerminationReason =
   | 'invalid_model_response'
   | 'model_attempt_limit'
   | 'output_token_limit'
-  | 'model_turn_limit';
+  | 'model_turn_limit'
+  | 'total_token_limit'
+  | 'orchestration_stalled';
 
 export type LoopResult = {
   messages: ChatMessage[];
@@ -129,6 +131,8 @@ export type ReActLoopOptions = {
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
   maxOutputTokens?: number;
+  modelRequestTimeoutMs?: number;
+  maxTotalTokens?: number;
   toolPolicy?: ToolPolicy;
   callerAgentId?: string;
   nonInteractive?: boolean;
@@ -433,6 +437,7 @@ export function createExecutor(
       const contextSummaryUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
       const contextRefreshWarnings: Array<{ itemId: string; message: string }> = [];
       let forceSummaryNext = false;
+      let orchestrationCircuitOpen = false;
       let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
       let forkSnapshot: ChatMessage[] = [];
       const base = () => ({ messages: loopMessages, finalContent, ...(finalMessageId ? { finalMessageId } : {}), toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage, contextRefreshWarnings });
@@ -580,6 +585,7 @@ export function createExecutor(
             parallel_tool_calls: false,
             max_tokens: outputBudgets[outputBudgetIndex],
             signal,
+            ...(options.modelRequestTimeoutMs !== undefined ? { timeoutMs: options.modelRequestTimeoutMs } : {}),
           }), onEvent, options.presentation ? { messageId, emit: emitPresentation, phase: emitPhase } : undefined));
           if (signal.aborted || (turn.status === 'failed' && turn.failure.category === 'cancelled')) {
             return aborted(base());
@@ -700,6 +706,15 @@ export function createExecutor(
         emitPresentation({ type: 'assistant_message_committed', turn: modelTurnCount, message: committedAssistantMessage(response, modelTurnCount, messageId) });
         workingMessages.push(assistant);
         loopMessages.push(assistant);
+        if (options.maxTotalTokens !== undefined && usage.totalTokens > options.maxTotalTokens) {
+          finalMessageId = messageId;
+          await options.semantic?.turnEnded?.({ turn: modelTurnCount, toolCalls: response.toolCalls.map((call) => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+          })), finishReason: response.finishReason });
+          return { ...base(), status: 'limited', terminationReason: 'total_token_limit' };
+        }
         if (response.toolCalls.length === 0) {
           finalMessageId = messageId;
           await options.semantic?.turnEnded?.({ turn: modelTurnCount, toolCalls: [], finishReason: response.finishReason });
@@ -841,6 +856,9 @@ export function createExecutor(
               } else {
                 toolResult = await orchestration.stop({ agentId: String(args.agent_id), ...(typeof args.reason === 'string' ? { reason: args.reason } : {}) }, caller);
               }
+              if (toolResult && typeof toolResult === 'object' && (toolResult as Record<string, unknown>).orchestration_circuit_open === true) {
+                orchestrationCircuitOpen = true;
+              }
             } else if (isMemoryTool(toolName) && codingToolHost.executeManagedMemoryTool) {
               markToolRunning();
               toolResult = await codingToolHost.executeManagedMemoryTool(toolName, args, { runId, ...(options.sessionId ? { sessionId: options.sessionId } : {}), signal });
@@ -975,6 +993,14 @@ export function createExecutor(
           })),
           finishReason: response.finishReason,
         });
+        if (orchestrationCircuitOpen) {
+          return {
+            ...base(),
+            status: 'limited',
+            terminationReason: 'orchestration_stalled',
+            error: { code: 'ORCHESTRATION_STALLED', message: 'Multi-Agent orchestration was stopped after repeated operations made no state progress.' },
+          };
+        }
         const decision = await options.commandSource?.atSafeBoundary({
           sessionId,
           runId,

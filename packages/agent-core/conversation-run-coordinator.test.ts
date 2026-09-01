@@ -363,3 +363,46 @@ test('Coordinator gives Steer priority, then injects one grouped Agent Inbox not
     await rm(projectDir, { recursive: true, force: true });
   }
 });
+
+test('Coordinator does not auto-start an unbounded chain of Agent notification Runs', async () => {
+  const repository = createSessionRepository({ projectId: `test-coordinator-agent-inbox-limit-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    for (let index = 0; index < 4; index += 1) {
+      const runId = `notification-run-${index}`;
+      await repository.beginRun({
+        sessionId: session.sessionId,
+        runId,
+        userMessage: { role: 'user', content: `notification ${index}` },
+        context,
+        profile: 'main',
+        origin: `agent_notification:notification-old-${index}`,
+      });
+      const value = terminal(runId, `notification ${index}`);
+      await repository.finishRun({ sessionId: session.sessionId, report: value.report, summary: value.summary });
+    }
+    const notification = {
+      notificationId: 'notification-new', agentId: 'agent-1', agentRunId: 'agent-run-new', createdAt: new Date().toISOString(), summary: 'new result',
+      result: { status: 'completed', terminationReason: 'natural_completion', finalContent: 'new result' },
+    };
+    const consumed: string[] = [];
+    const observations: Array<{ outcome?: string; reason?: string }> = [];
+    const coordinator = createConversationRunCoordinator({
+      repository,
+      agentInbox: {
+        pending: async () => consumed.includes(notification.notificationId) ? [] : [notification],
+        consume: async (_sessionId, ids) => { consumed.push(...ids); },
+      },
+      resolveEnvironment: async () => ({ agent: { runTask: async () => { throw new Error('notification Run must not start'); } }, context }),
+      createHooks: () => ({}),
+      observe: (observation) => observations.push(observation),
+    });
+    const result = await coordinator.resume(session.sessionId, () => {});
+    assert.deepEqual(result.summaries, []);
+    assert.deepEqual(consumed, []);
+    assert.equal(observations.some((item) => item.reason === 'agent_notification_limit'), true);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});

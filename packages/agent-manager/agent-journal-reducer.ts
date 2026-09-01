@@ -10,10 +10,18 @@ function conversation(snapshot: AgentTreeSnapshot, agentId: string) {
 }
 
 export function createAgentTreeSnapshot(sessionId: string, rootAgentId: string): AgentTreeSnapshot {
-  return { version: 1, sessionId, rootAgentId, revision: 0, agents: [], runs: [], conversations: [], contexts: [], operations: {}, inbox: [] };
+  return { version: 1, sessionId, rootAgentId, revision: 0, agents: [], runs: [], conversations: [], contexts: [], operations: {}, inbox: [], control: { halted: false } };
 }
 
 export function applyAgentStoreEvent(snapshot: AgentTreeSnapshot, event: AgentStoreEvent): void {
+  if (event.type === 'agent_session_halted') {
+    snapshot.control = { halted: true, haltedAt: event.haltedAt, haltedReason: event.reason };
+    return;
+  }
+  if (event.type === 'agent_session_resumed') {
+    snapshot.control = { halted: false, resumedAt: event.resumedAt };
+    return;
+  }
   if (event.type === 'agent_completion_notification') {
     if (!snapshot.inbox.some((item) => item.notificationId === event.notification.notificationId)) snapshot.inbox.push(structuredClone(event.notification));
     return;

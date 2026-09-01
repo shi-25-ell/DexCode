@@ -381,7 +381,7 @@ const agentStore = createAgentStore({
   sessionsDir: sessionRepository.sessionsDir,
   observe(sessionId, events, snapshot) {
     for (const event of activityEventsFromStore(events, snapshot)) agentActivityStream.publish(sessionId, event);
-    if (events.some((event) => event.type === 'agent_completion_notification')) agentInboxWake(sessionId);
+    if (!snapshot.control.halted && events.some((event) => event.type === 'agent_completion_notification')) agentInboxWake(sessionId);
   },
 });
 const approvalModeStore = await createApprovalModeStore({
@@ -573,10 +573,31 @@ function scheduleAgentInboxWake(sessionId: string): void {
   }, 100));
 }
 agentInboxWake = scheduleAgentInboxWake;
+
+async function stopConversationSession(session: Session, reason = 'user_stop') {
+  const timer = agentInboxWakeTimers.get(session.sessionId);
+  if (timer) clearTimeout(timer);
+  agentInboxWakeTimers.delete(session.sessionId);
+  await agentStore.haltSession(session.sessionId, reason);
+  const main = await conversationRunCoordinator.stop({ sessionId: session.sessionId, reason: 'user_stop' });
+  const agents = session.scope.kind === 'workspace'
+    ? await (await runtimeForSession(session)).agentManager.stopSession(session.sessionId, reason)
+    : { stoppedAgents: 0, pendingNotificationsConsumed: 0, tree: null };
+  const runtime = await conversationRunCoordinator.snapshot(session.sessionId);
+  return {
+    stopped: main.stopped || agents.stoppedAgents > 0 || agents.pendingNotificationsConsumed > 0,
+    stoppedMain: main.stopped,
+    stoppedAgents: agents.stoppedAgents,
+    pendingNotificationsConsumed: agents.pendingNotificationsConsumed,
+    activeRun: runtime.activeRun ?? null,
+    agents: agents.tree,
+  };
+}
+
 void (async () => {
   for (const session of await sessionRepository.listSessions()) {
     const tree = await agentStore.load(session.sessionId, true);
-    if (tree?.inbox.some((item) => item.status === 'pending')) scheduleAgentInboxWake(session.sessionId);
+    if (!tree?.control.halted && tree?.inbox.some((item) => item.status === 'pending')) scheduleAgentInboxWake(session.sessionId);
   }
 })().catch((error) => console.error('Failed to recover Agent Inbox', error));
 
@@ -883,6 +904,8 @@ function completeV2Chain(chain: ActiveV2Chain): void {
 
 async function startAgentInboxContinuation(sessionId: string): Promise<void> {
   try {
+    const tree = await agentStore.load(sessionId, false);
+    if (tree?.control.halted || !tree?.inbox.some((item) => item.status === 'pending')) return;
     const runtime = await conversationRunCoordinator.snapshot(sessionId);
     if (runtime.activeRun) return;
     const chain = createV2Chain(sessionId);
@@ -1254,6 +1277,16 @@ export function startRuntimeServer() {
       return;
     }
 
+    const conversationCommandMatch = /^\/api\/conversations\/([^/]+)\/commands$/.exec(url.pathname);
+    if (conversationCommandMatch && req.method === 'POST') {
+      const conversationRef = decodeURIComponent(conversationCommandMatch[1]!);
+      const session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
+      const { action } = await parseBody<{ action?: 'stop_all' }>(req);
+      if (action !== 'stop_all') throw new HttpError(400, '不支持的会话命令');
+      sendJson(res, 200, { ok: true, ...(await stopConversationSession(session)) });
+      return;
+    }
+
     const conversationMutationMatch = /^\/api\/conversations\/([^/]+)$/.exec(url.pathname);
     if (conversationMutationMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
       const conversationRef = decodeURIComponent(conversationMutationMatch[1]);
@@ -1365,6 +1398,8 @@ export function startRuntimeServer() {
           return;
         }
       }
+
+      if (session.scope.kind === 'workspace') await (await runtimeForSession(session)).agentManager.resumeSession(session.sessionId);
 
       if (streamVersion === 2) {
         const chain = createV2Chain(session.sessionId, runId, clientRequestId);
@@ -2092,6 +2127,7 @@ export function startRuntimeServer() {
         session = await sessionRepository.createSession(requestWorkspaceScope);
       }
       const sessionRuntime = await runtimeForSession(session);
+      await sessionRuntime.agentManager.resumeSession(session.sessionId);
 
       res.writeHead(200, sseHeaders());
 

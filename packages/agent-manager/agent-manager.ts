@@ -106,11 +106,12 @@ export function createAgentManager(options: {
   store: AgentStore;
   definitions: AgentDefinitionRegistry;
   runChild(input: ChildRunInput): Promise<AgentRunResult>;
-  limits?: { maxConcurrentAgents?: number; maxAgentsPerSession?: number; maxDepth?: number; maxConcurrentSharedWriters?: number };
+  limits?: { maxConcurrentAgents?: number; maxAgentsPerSession?: number; maxDepth?: number; maxConcurrentSharedWriters?: number; maxOrchestrationOpsPerRun?: number; maxStalledOrchestrationOps?: number };
 }): AgentOrchestrationPort & {
   list(sessionId: string): Promise<AgentTreeSnapshot | null>;
   detail(sessionId: string, agentId: string): Promise<{ agent: AgentRecord; runs: AgentRunRecord[]; messages: ChatMessage[]; tools: AgentToolRecord[] } | null>;
-  stopSession(sessionId: string, reason?: string): Promise<void>;
+  stopSession(sessionId: string, reason?: string): Promise<{ stoppedAgents: number; pendingNotificationsConsumed: number; tree: AgentTreeSnapshot | null }>;
+  resumeSession(sessionId: string): Promise<AgentTreeSnapshot | null>;
   shutdown(reason?: string): Promise<void>;
 } {
   const limits = {
@@ -118,10 +119,13 @@ export function createAgentManager(options: {
     maxAgentsPerSession: options.limits?.maxAgentsPerSession ?? 8,
     maxDepth: options.limits?.maxDepth ?? 1,
     maxConcurrentSharedWriters: options.limits?.maxConcurrentSharedWriters ?? 1,
+    maxOrchestrationOpsPerRun: options.limits?.maxOrchestrationOpsPerRun ?? 32,
+    maxStalledOrchestrationOps: options.limits?.maxStalledOrchestrationOps ?? 3,
   };
   const handles = new Map<string, Handle>();
   const locks = new Map<string, Promise<void>>();
   const recoveredSessions = new Set<string>();
+  const callerGuards = new Map<string, { sessionId: string; operations: number; lastRevision?: number; stalledOperations: number; observedTerminalRuns: Set<string>; circuitOpen: boolean }>();
 
   const requireEnabled = () => { if (!options.enabled) throw new AgentManagerError('feature_disabled', 'Multi-Agent is disabled'); };
   const withAgentLock = async <T>(agentId: string, action: () => Promise<T>): Promise<T> => {
@@ -148,6 +152,39 @@ export function createAgentManager(options: {
     const agent = tree.agents.find((item) => item.agentId === agentId);
     if (!agent) throw new AgentManagerError('not_found', `Agent not found: ${agentId}`);
     return { tree, agent };
+  };
+  const callerGuard = (caller: AgentCallerContext) => {
+    let guard = callerGuards.get(caller.callerRunId);
+    if (!guard) {
+      guard = { sessionId: caller.sessionId, operations: 0, stalledOperations: 0, observedTerminalRuns: new Set(), circuitOpen: false };
+      callerGuards.set(caller.callerRunId, guard);
+      while (callerGuards.size > 128) callerGuards.delete(callerGuards.keys().next().value!);
+    }
+    return guard;
+  };
+  const orchestrationPreflight = async (caller: AgentCallerContext) => {
+    const tree = await loadTree(caller.sessionId);
+    if (tree?.control.halted) {
+      return { status: 'blocked', code: 'session_halted', message: 'Multi-Agent orchestration is halted for this Session. A new user Run must explicitly resume it.' };
+    }
+    const guard = callerGuard(caller);
+    guard.operations += 1;
+    if (guard.lastRevision === tree?.revision) guard.stalledOperations += 1;
+    else guard.stalledOperations = 0;
+    guard.lastRevision = tree?.revision;
+    if (guard.operations > limits.maxOrchestrationOpsPerRun || guard.stalledOperations >= limits.maxStalledOrchestrationOps) {
+      guard.circuitOpen = true;
+    }
+    if (!guard.circuitOpen) return undefined;
+    return {
+      status: 'circuit_open',
+      code: 'orchestration_stalled',
+      orchestration_circuit_open: true,
+      operations: guard.operations,
+      stalled_operations: guard.stalledOperations,
+      revision: tree?.revision ?? 0,
+      message: 'Multi-Agent orchestration stopped because it exceeded its operation budget or made no state progress. Do not call orchestration tools again in this Run.',
+    };
   };
 
   const launch = (agent: AgentRecord, run: AgentRunRecord, initialMessages: ChatMessage[]): Handle => {
@@ -188,9 +225,12 @@ export function createAgentManager(options: {
       }
       if (durationTimer) clearTimeout(durationTimer);
       const completedAt = new Date().toISOString();
+      const beforeTerminal = await options.store.load(agent.sessionId, false);
       await options.store.append(agent.sessionId, [
         { type: 'agent_run_terminal', agentId: agent.agentId, agentRunId: run.agentRunId, status: result.status, result, completedAt },
-        { type: 'agent_completion_notification', notification: completionNotification(agent, run, result, completedAt) },
+        ...(!beforeTerminal?.control.halted
+          ? [{ type: 'agent_completion_notification' as const, notification: completionNotification(agent, run, result, completedAt) }]
+          : []),
       ]);
       handles.delete(agent.agentId);
       return result;
@@ -202,6 +242,8 @@ export function createAgentManager(options: {
 
   async function spawnRaw(input: { task: string; agent?: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext) {
     requireEnabled();
+    const blocked = await orchestrationPreflight(caller);
+    if (blocked) return blocked;
     if (caller.callerAgentId && limits.maxDepth <= 1) throw new AgentManagerError('depth_exceeded', 'Child agents cannot spawn recursively');
     const existing = await loadTree(caller.sessionId);
     const replay = existing?.operations[`${caller.callerRunId}:${caller.toolCallId}`];
@@ -248,6 +290,8 @@ export function createAgentManager(options: {
 
   async function followupRaw(input: { agentId: string; task: string }, caller: AgentCallerContext) {
     requireEnabled();
+    const blocked = await orchestrationPreflight(caller);
+    if (blocked) return blocked;
     return withAgentLock(input.agentId, async () => {
       const { tree, agent } = await findAgent(caller.sessionId, input.agentId);
       if (agent.currentRunId || handles.has(agent.agentId)) throw new AgentManagerError('agent_busy', `Agent is already running: ${agent.agentId}`);
@@ -282,6 +326,8 @@ export function createAgentManager(options: {
 
   async function stopRaw(input: { agentId: string; reason?: string }, caller: AgentCallerContext) {
     requireEnabled();
+    const blocked = await orchestrationPreflight(caller);
+    if (blocked) return blocked;
     const { agent } = await findAgent(caller.sessionId, input.agentId);
     const handle = handles.get(agent.agentId);
     if (!handle || !agent.currentRunId) return { agent_id: agent.agentId, status: 'already_idle' };
@@ -292,6 +338,8 @@ export function createAgentManager(options: {
 
   async function waitRaw(input: { agentIds: string[]; mode?: 'any' | 'all'; block?: boolean; timeoutMs?: number }, caller: AgentCallerContext) {
     requireEnabled();
+    const blocked = await orchestrationPreflight(caller);
+    if (blocked) return blocked;
     const tree = await treeFor(caller.sessionId);
     const targets = input.agentIds.map((agentId) => {
       const agent = tree.agents.find((item) => item.agentId === agentId);
@@ -326,11 +374,21 @@ export function createAgentManager(options: {
       timedOut = !cancelled;
     }
     const latest = (await options.store.load(caller.sessionId, false))!;
+    const guard = callerGuard(caller);
     const completed = targets.flatMap(({ agent, run }) => {
       const current = latest.runs.find((item) => item.agentRunId === run.agentRunId)!;
-      return current.status === 'running' ? [] : [{ agent_id: agent.agentId, ...resultView(current, agent.definitionSnapshot.budget.maxResultBytes ?? 64 * 1024) }];
+      if (current.status === 'running' || guard.observedTerminalRuns.has(current.agentRunId)) return [];
+      guard.observedTerminalRuns.add(current.agentRunId);
+      return [{ agent_id: agent.agentId, ...resultView(current, agent.definitionSnapshot.budget.maxResultBytes ?? 64 * 1024) }];
     });
-    return { mode, block, timed_out: timedOut, cancelled, completed, running: targets.filter(({ run }) => latest.runs.find((item) => item.agentRunId === run.agentRunId)?.status === 'running').map(({ agent, run }) => ({ agent_id: agent.agentId, agent_run_id: run.agentRunId })) };
+    const running = targets.filter(({ run }) => latest.runs.find((item) => item.agentRunId === run.agentRunId)?.status === 'running').map(({ agent, run }) => ({ agent_id: agent.agentId, agent_run_id: run.agentRunId }));
+    return {
+      status: completed.length > 0 ? 'settled' : running.length > 0 ? 'running' : 'no_change',
+      mode, block, timed_out: timedOut, cancelled, completed, running,
+      settled: running.length === 0,
+      ...(completed.length === 0 && running.length === 0 ? { code: 'already_observed', message: 'All selected Agent Runs are terminal and their results were already delivered to this caller. There is no new progress to wait for.' } : {}),
+      revision: latest.revision,
+    };
   }
 
   return {
@@ -356,9 +414,19 @@ export function createAgentManager(options: {
       };
     },
     async stopSession(sessionId, reason = 'Session is closing') {
+      await options.store.haltSession(sessionId, reason);
       const sessionHandles = [...handles.values()].filter((handle) => handle.sessionId === sessionId);
       for (const handle of sessionHandles) handle.abortController.abort(reason);
       await Promise.allSettled(sessionHandles.map((handle) => handle.promise));
+      const pending = (await options.store.load(sessionId, false))?.inbox.filter((item) => item.status === 'pending') ?? [];
+      const tree = pending.length > 0
+        ? await options.store.consumeNotifications(sessionId, pending.map((item) => item.notificationId), `session-stop:${reason}`)
+        : await options.store.load(sessionId, false);
+      for (const [runId, guard] of callerGuards) if (guard.sessionId === sessionId) callerGuards.delete(runId);
+      return { stoppedAgents: sessionHandles.length, pendingNotificationsConsumed: pending.length, tree };
+    },
+    async resumeSession(sessionId) {
+      return options.store.resumeSession(sessionId);
     },
     async shutdown(reason = 'Runtime is shutting down') {
       const active = [...handles.values()];

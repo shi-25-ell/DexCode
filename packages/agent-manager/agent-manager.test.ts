@@ -78,13 +78,15 @@ test('Definition parser rejects unknown fields and workspace definitions overrid
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('child Agent definitions default to 200 model turns', () => {
+test('child Agent definitions have bounded long-task budgets', () => {
   assert.equal(BUILTIN_AGENT_DEFINITIONS.some((definition) => definition.name === 'general-purpose'), true);
   assert.equal(BUILTIN_AGENT_DEFINITIONS.some((definition) => definition.name === 'assistant'), true);
-  assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.maxModelTurns, 200);
-  assert.equal(BUILTIN_AGENT_DEFINITIONS[1]?.budget.maxModelTurns, 200);
+  assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.maxModelTurns, 64);
+  assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.modelRequestTimeoutMs, 300_000);
+  assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.maxTotalTokens, 1_500_000);
+  assert.equal(BUILTIN_AGENT_DEFINITIONS[1]?.budget.maxModelTurns, 64);
   const parsed = parseAgentDefinitionMarkdown('---\nname: scout\ndescription: test\n---\nInspect source.');
-  assert.equal(parsed.budget.maxModelTurns, 200);
+  assert.equal(parsed.budget.maxModelTurns, 64);
 });
 
 test('Multi-Agent is available by default and can be explicitly disabled', () => {
@@ -139,7 +141,7 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     assert.equal(immediate.block, false);
     const waited = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all', block: true, timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[]; timed_out: boolean };
     assert.equal(waited.timed_out, false);
-    assert.equal(waited.completed.length, 2);
+    assert.equal(immediate.completed.length + waited.completed.length, 2);
     const inbox = await store.pendingNotifications(sessionId);
     assert.equal(inbox.length, 2);
     assert.ok(inbox.every((item) => item.delegationGroupId === 'group-1'));
@@ -166,5 +168,72 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     await manager.wait({ agentIds: [slow.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-4'));
     assert.deepEqual(completedInputs.sort(), ['after-stop', 'one', 'three', 'two'].sort());
     assert.equal((await manager.detail(sessionId, first.agent_id))?.runs.length, 2);
+  } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('AgentManager delivers each terminal once and opens the no-progress circuit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dexcode-agent-circuit-'));
+  const sessionId = 'session-circuit';
+  const store = createAgentStore({ sessionsDir: root });
+  const definitions = createAgentDefinitionRegistry();
+  const runChild = async ({ run }: Parameters<Parameters<typeof createAgentManager>[0]['runChild']>[0]): Promise<AgentRunResult> => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const now = new Date().toISOString();
+    return {
+      runId: run.agentRunId, parentRunId: run.invokedByRunId, profile: 'child', origin: 'orchestrated', status: 'completed', terminationReason: 'natural_completion',
+      finalContent: 'done', messages: [], modelTurnCount: 1, modelAttemptCount: 1, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, unknown: 0 },
+      toolsUsed: [], filesModified: [], fileChanges: [], skillsUsed: [], contextSummaryUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      contextRefreshWarnings: [], runtimeWarnings: [], startedAt: now, completedAt: now, durationMs: 1,
+    };
+  };
+  const manager = createAgentManager({ enabled: true, store, definitions, runChild });
+  const caller = (toolCallId: string) => ({ sessionId, callerRunId: 'main-circuit', callerTurn: 1, toolCallId, delegationGroupId: 'group-circuit', forkSnapshot: [] });
+  try {
+    const spawned = await manager.spawn({ task: 'finish' }, caller('spawn')) as { agent_id: string };
+    const first = await manager.wait({ agentIds: [spawned.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[] };
+    assert.equal(first.completed.length, 1);
+    for (const id of ['wait-2', 'wait-3', 'wait-4']) {
+      const duplicate = await manager.wait({ agentIds: [spawned.agent_id] }, caller(id)) as { status: string; code: string; completed: unknown[] };
+      assert.equal(duplicate.status, 'no_change');
+      assert.equal(duplicate.code, 'already_observed');
+      assert.deepEqual(duplicate.completed, []);
+    }
+    const circuit = await manager.wait({ agentIds: [spawned.agent_id] }, caller('wait-5')) as { code: string; orchestration_circuit_open: boolean };
+    assert.equal(circuit.code, 'orchestration_stalled');
+    assert.equal(circuit.orchestration_circuit_open, true);
+  } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('session stop is durable, consumes terminal notifications and requires an explicit resume', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dexcode-agent-stop-session-'));
+  const sessionId = 'session-stop-all';
+  const store = createAgentStore({ sessionsDir: root });
+  const definitions = createAgentDefinitionRegistry();
+  const runChild = async ({ run, signal }: Parameters<Parameters<typeof createAgentManager>[0]['runChild']>[0]): Promise<AgentRunResult> => {
+    if (run.input === 'blocked') await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+    const now = new Date().toISOString();
+    return {
+      runId: run.agentRunId, parentRunId: run.invokedByRunId, profile: 'child', origin: 'orchestrated',
+      status: signal.aborted ? 'aborted' : 'completed', terminationReason: signal.aborted ? 'user_abort' : 'natural_completion', finalContent: '',
+      messages: [], modelTurnCount: 1, modelAttemptCount: 1, usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1, unknown: 0 }, toolsUsed: [], filesModified: [], fileChanges: [], skillsUsed: [],
+      contextSummaryUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, contextRefreshWarnings: [], runtimeWarnings: [], startedAt: now, completedAt: now, durationMs: 1,
+    };
+  };
+  const manager = createAgentManager({ enabled: true, store, definitions, runChild });
+  const caller = (toolCallId: string, callerRunId = 'main-stop') => ({ sessionId, callerRunId, callerTurn: 1, toolCallId, delegationGroupId: 'group-stop', forkSnapshot: [] });
+  try {
+    const spawned = await manager.spawn({ task: 'blocked' }, caller('spawn')) as { agent_id: string };
+    const stopped = await manager.stopSession(sessionId, 'emergency stop');
+    assert.equal(stopped.stoppedAgents, 1);
+    assert.equal(stopped.tree?.control.halted, true);
+    assert.equal(stopped.tree?.runs.find((run) => run.agentId === spawned.agent_id)?.status, 'interrupted');
+    assert.deepEqual(await store.pendingNotifications(sessionId), []);
+    const blocked = await manager.followup({ agentId: spawned.agent_id, task: 'must not restart' }, caller('followup-blocked', 'main-after-stop')) as { code: string };
+    assert.equal(blocked.code, 'session_halted');
+    await manager.resumeSession(sessionId);
+    const resumed = await manager.followup({ agentId: spawned.agent_id, task: 'resume' }, caller('followup-resumed', 'main-resumed')) as { status: string };
+    assert.equal(resumed.status, 'running');
+    await manager.wait({ agentIds: [spawned.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-resumed', 'main-resumed'));
+    assert.equal((await manager.list(sessionId))?.control.halted, false);
   } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }); }
 });

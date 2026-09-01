@@ -33,6 +33,8 @@ export type AgentRunBudget = {
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
   maxOutputTokens?: number;
+  modelRequestTimeoutMs?: number;
+  maxTotalTokens?: number;
 };
 
 export type AgentContextPolicy =
@@ -222,6 +224,8 @@ function validateBudget(budget: AgentRunBudget): void {
   positiveInteger('maxModelTurns', budget.maxModelTurns);
   positiveInteger('maxModelAttempts', budget.maxModelAttempts);
   positiveInteger('maxOutputTokens', budget.maxOutputTokens);
+  positiveInteger('modelRequestTimeoutMs', budget.modelRequestTimeoutMs);
+  positiveInteger('maxTotalTokens', budget.maxTotalTokens);
   if (budget.maxRetriesPerTurn !== undefined
     && (!Number.isInteger(budget.maxRetriesPerTurn) || budget.maxRetriesPerTurn < 0)) {
     throw new Error('maxRetriesPerTurn must be a non-negative integer');
@@ -328,6 +332,8 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
           maxModelAttempts: spec.budget.maxModelAttempts,
           maxRetriesPerTurn: spec.budget.maxRetriesPerTurn,
           maxOutputTokens: spec.budget.maxOutputTokens,
+          modelRequestTimeoutMs: spec.budget.modelRequestTimeoutMs,
+          maxTotalTokens: spec.budget.maxTotalTokens,
           toolPolicy: spec.toolPolicy,
           nonInteractive: identity.origin === 'orchestrated',
           semantic,
@@ -404,6 +410,8 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
         ...(spec.budget?.maxModelAttempts !== undefined ? { maxModelAttempts: spec.budget.maxModelAttempts } : {}),
         ...(spec.budget?.maxRetriesPerTurn !== undefined ? { maxRetriesPerTurn: spec.budget.maxRetriesPerTurn } : {}),
         ...(spec.budget?.maxOutputTokens !== undefined ? { maxOutputTokens: spec.budget.maxOutputTokens } : {}),
+        ...(spec.budget?.modelRequestTimeoutMs !== undefined ? { modelRequestTimeoutMs: spec.budget.modelRequestTimeoutMs } : {}),
+        ...(spec.budget?.maxTotalTokens !== undefined ? { maxTotalTokens: spec.budget.maxTotalTokens } : {}),
       },
     });
   }

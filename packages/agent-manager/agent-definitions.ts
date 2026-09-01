@@ -12,7 +12,7 @@ export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
     systemPrompt: 'Complete the assigned task as a general-purpose child agent. Use available read-only tools when needed and return a concise result to the parent agent.',
     toolPolicy: { allow: [...READONLY_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
     defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
-    budget: { maxModelTurns: 200, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024 },
+    budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
     memoryPolicy: { read: true, write: false, automaticExtraction: false },
     isolationPolicy: { default: 'shared', allowed: ['shared'] },
   },
@@ -22,7 +22,7 @@ export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
     systemPrompt: 'Complete the assigned task as a child agent. Use available read-only tools when needed and return a concise result to the parent agent.',
     toolPolicy: { allow: [...READONLY_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
     defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
-    budget: { maxModelTurns: 200, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024 },
+    budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
     memoryPolicy: { read: true, write: false, automaticExtraction: false },
     isolationPolicy: { default: 'shared', allowed: ['shared'] },
   },
@@ -32,7 +32,7 @@ export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
     systemPrompt: 'Investigate the assigned task using only read-only tools. Return concise, source-grounded findings and call out uncertainty.',
     toolPolicy: { allow: [...READONLY_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
     defaultContextMode: 'fresh', allowedContextModes: ['fresh', 'fork'],
-    budget: { maxModelTurns: 200, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024 },
+    budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
     memoryPolicy: { read: true, write: false, automaticExtraction: false },
     isolationPolicy: { default: 'shared', allowed: ['shared'] },
   },
@@ -42,7 +42,7 @@ export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
     systemPrompt: 'Review the assigned scope. Inspect the actual source and report actionable correctness or regression risks with evidence.',
     toolPolicy: { allow: [...READONLY_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
     defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
-    budget: { maxModelTurns: 200, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024 },
+    budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
     memoryPolicy: { read: true, write: false, automaticExtraction: false },
     isolationPolicy: { default: 'shared', allowed: ['shared'] },
   },
@@ -76,7 +76,7 @@ function bool(value: string, key: string): boolean {
 
 const KEYS = new Set([
   'name', 'description', 'default-context-mode', 'allowed-context-modes', 'allowed-tools', 'denied-tools', 'allow-external-mcp', 'allow-skills',
-  'max-model-turns', 'max-model-attempts', 'max-retries-per-turn', 'max-output-tokens', 'max-result-bytes', 'max-run-duration-ms', 'model',
+  'max-model-turns', 'max-model-attempts', 'max-retries-per-turn', 'max-output-tokens', 'max-result-bytes', 'max-run-duration-ms', 'model-request-timeout-ms', 'max-total-tokens', 'model',
   'memory-read', 'memory-write', 'automatic-extraction', 'default-isolation', 'allowed-isolation',
 ]);
 
@@ -113,12 +113,14 @@ export function parseAgentDefinitionMarkdown(content: string): AgentDefinition {
     defaultContextMode: (values.get('default-context-mode') ? scalar(values.get('default-context-mode')!) : 'fresh') as AgentContextMode,
     allowedContextModes: contexts,
     budget: {
-      maxModelTurns: integer(values.get('max-model-turns') ?? '200', 'max-model-turns'),
+      maxModelTurns: integer(values.get('max-model-turns') ?? '64', 'max-model-turns'),
       ...(values.has('max-model-attempts') ? { maxModelAttempts: integer(values.get('max-model-attempts')!, 'max-model-attempts') } : {}),
       ...(values.has('max-retries-per-turn') ? { maxRetriesPerTurn: integer(values.get('max-retries-per-turn')!, 'max-retries-per-turn') } : {}),
       ...(values.has('max-output-tokens') ? { maxOutputTokens: integer(values.get('max-output-tokens')!, 'max-output-tokens') } : {}),
       ...(values.has('max-result-bytes') ? { maxResultBytes: integer(values.get('max-result-bytes')!, 'max-result-bytes') } : {}),
       ...(values.has('max-run-duration-ms') ? { maxRunDurationMs: integer(values.get('max-run-duration-ms')!, 'max-run-duration-ms') } : {}),
+      ...(values.has('model-request-timeout-ms') ? { modelRequestTimeoutMs: integer(values.get('model-request-timeout-ms')!, 'model-request-timeout-ms') } : {}),
+      ...(values.has('max-total-tokens') ? { maxTotalTokens: integer(values.get('max-total-tokens')!, 'max-total-tokens') } : {}),
     },
     ...(values.has('model') ? { model: scalar(values.get('model')!) } : {}),
     memoryPolicy: {

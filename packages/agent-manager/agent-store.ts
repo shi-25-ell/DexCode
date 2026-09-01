@@ -151,6 +151,7 @@ export function createAgentStore(options: { sessionsDir: string; observe?: (sess
 
   async function pendingNotifications(sessionId: string): Promise<AgentCompletionNotification[]> {
     const snapshot = await load(sessionId, false);
+    if (snapshot?.control.halted) return [];
     return snapshot?.inbox.filter((item) => item.status === 'pending') ?? [];
   }
 
@@ -159,6 +160,19 @@ export function createAgentStore(options: { sessionsDir: string; observe?: (sess
     return append(sessionId, [{
       type: 'agent_completion_consumed', notificationIds: [...new Set(notificationIds)], consumedAt: new Date().toISOString(), consumedByRunId,
     }]);
+  }
+
+  async function haltSession(sessionId: string, reason: string): Promise<AgentTreeSnapshot | null> {
+    const snapshot = await load(sessionId, false);
+    if (!snapshot) return null;
+    if (snapshot.control.halted && snapshot.control.haltedReason === reason) return snapshot;
+    return append(sessionId, [{ type: 'agent_session_halted', haltedAt: new Date().toISOString(), reason }]);
+  }
+
+  async function resumeSession(sessionId: string): Promise<AgentTreeSnapshot | null> {
+    const snapshot = await load(sessionId, false);
+    if (!snapshot || !snapshot.control.halted) return snapshot;
+    return append(sessionId, [{ type: 'agent_session_resumed', resumedAt: new Date().toISOString() }]);
   }
 
   return {
@@ -170,6 +184,8 @@ export function createAgentStore(options: { sessionsDir: string; observe?: (sess
     createAgentRun,
     pendingNotifications,
     consumeNotifications,
+    haltSession,
+    resumeSession,
     remove: async (sessionId: string) => { cache.delete(sessionId); await rm(pathFor(sessionId), { force: true }); },
   };
 }

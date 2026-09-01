@@ -22,6 +22,8 @@ export type AgentDefinition = {
     maxOutputTokens?: number;
     maxResultBytes?: number;
     maxRunDurationMs?: number;
+    modelRequestTimeoutMs?: number;
+    maxTotalTokens?: number;
   };
   model?: string;
   memoryPolicy: { read: boolean; write: boolean; automaticExtraction: false };
@@ -110,6 +112,12 @@ export type AgentTreeSnapshot = {
   contexts: AgentContextRecord[];
   operations: Record<string, { agentId: string; agentRunId: string }>;
   inbox: AgentCompletionNotification[];
+  control: {
+    halted: boolean;
+    haltedAt?: string;
+    haltedReason?: string;
+    resumedAt?: string;
+  };
 };
 
 export type AgentCompletionNotification = {
@@ -137,7 +145,9 @@ export type AgentStoreEvent =
   | { type: 'agent_run_terminal'; agentId: string; agentRunId: string; status: Exclude<AgentRunStatus, 'running'>; result: StoredAgentRunResult; completedAt: string }
   | { type: 'agent_recovered'; agentId: string; agentRunId: string; completedAt: string }
   | { type: 'agent_completion_notification'; notification: AgentCompletionNotification }
-  | { type: 'agent_completion_consumed'; notificationIds: string[]; consumedAt: string; consumedByRunId: string };
+  | { type: 'agent_completion_consumed'; notificationIds: string[]; consumedAt: string; consumedByRunId: string }
+  | { type: 'agent_session_halted'; haltedAt: string; reason: string }
+  | { type: 'agent_session_resumed'; resumedAt: string };
 
 export type AgentActivityEvent =
   | { type: 'agent_created'; agent: AgentRecord }
