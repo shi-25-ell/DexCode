@@ -7,6 +7,7 @@ import { assistantResponseCopyText, groupConversationHistory, isCompleteAssistan
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
 import { hasActiveConversationWork, shouldShowConversationLoading, terminalTitle, toolCallIdsRequiringPresentationSettlement } from './conversation-page';
+import { abortStreamOnPageHide } from './stream-lifecycle';
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-id' });
 
@@ -46,6 +47,16 @@ describe('conversation presentation', () => {
       { callId: 'wait-1', name: 'wait_agent' },
       { callId: 'context-1', name: 'compact_context' },
     ])).toEqual(['read-1']);
+  });
+
+  it.each(['beforeunload', 'pagehide'])('aborts the Agent activity stream on %s', (eventName) => {
+    const controller = new AbortController();
+    const removeListener = abortStreamOnPageHide(controller);
+
+    window.dispatchEvent(new Event(eventName));
+
+    expect(controller.signal.aborted).toBe(true);
+    removeListener();
   });
 
   it('collapses committed process items behind each final answer and copies only the final answer', () => {

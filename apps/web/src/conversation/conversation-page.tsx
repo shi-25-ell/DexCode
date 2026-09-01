@@ -29,6 +29,7 @@ import { agentActivityReducer, initialAgentActivityState } from './agent-reducer
 import { AgentActivityCard, AgentDrawer } from './agent-activity';
 import { groupAgentTimeline } from './agent-timeline';
 import { ExecutionHistoryDisclosure } from './execution-history';
+import { abortStreamOnPageHide } from './stream-lifecycle';
 
 type PageAction =
   | { type: 'hydrate'; snapshot: ConversationSnapshot }
@@ -272,6 +273,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   useEffect(() => {
     if (scope.kind !== 'workspace' || !conversationRef || meta.data?.multiAgentEnabled !== true || agents.data === undefined) return;
     const controller = new AbortController();
+    const removePageHideAbort = abortStreamOnPageHide(controller);
     void streamAgentActivity({
       scope, sessionId: conversationRef, signal: controller.signal,
       onEvent(envelope) {
@@ -284,7 +286,10 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
         }
       },
     }).catch((error) => { if (!controller.signal.aborted) console.warn('Agent activity stream ended', error); });
-    return () => controller.abort();
+    return () => {
+      removePageHideAbort();
+      controller.abort();
+    };
   }, [agents.data === undefined, conversationRef, meta.data?.multiAgentEnabled, queryClient, scopeIdentity]);
 
   useEffect(() => {
