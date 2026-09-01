@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -59,6 +59,27 @@ test('MCP exposes the same exact ten-tool registry and rejects removed calls', a
       'find', 'ls', 'list_workspace', 'read_file', 'grep', 'run_command', 'patch_file', 'write_file', 'read_command_output', 'stop_command',
     ]);
     assert.match(String(item.host.mcp.validateToolCall('search_in_workspace', {})), /not found/i);
+  } finally {
+    await item.cleanup();
+  }
+});
+
+test('read_file model contract reaches the paginated disk implementation unchanged', async () => {
+  const item = await fixture();
+  try {
+    await writeFile(join(item.root, 'sample.txt'), 'one\ntwo\nthree\n', 'utf8');
+    const result = await item.host.executeAgentTool('read_file', { path: 'sample.txt', offset: 2, limit: 1 }, { origin: 'agent' }) as Record<string, unknown>;
+    assert.equal(result.content, 'two');
+    assert.equal(result.start_line, 2);
+    assert.equal(result.end_line, 2);
+    assert.equal(result.next_offset, 3);
+
+    const invalid = await item.host.executeAgentTool('read_file', { path: 'sample.txt', offset: 0 }, { origin: 'agent' }) as {
+      status: string;
+      error: { code: string };
+    };
+    assert.equal(invalid.status, 'invalid_arguments');
+    assert.equal(invalid.error.code, 'INVALID_ARGUMENTS');
   } finally {
     await item.cleanup();
   }

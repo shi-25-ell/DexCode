@@ -27,7 +27,7 @@ describe('ToolBatchCard', () => {
       members: [member('ok', 'succeeded'), member('bad', 'failed')],
     } }));
     expect(screen.getByText('部分失败')).toBeInTheDocument();
-    expect(screen.getByText('1 项失败')).toBeInTheDocument();
+    expect(screen.getByText('1 项异常')).toBeInTheDocument();
     expect(screen.getByText(/bad\.ts：无法读取 bad/)).toBeInTheDocument();
   });
 
@@ -39,6 +39,21 @@ describe('ToolBatchCard', () => {
     } }));
     expect(screen.getByText('全部失败')).toBeInTheDocument();
     expect(document.querySelector('.tool-batch-card.failed')).not.toBeNull();
+  });
+
+  it('keeps invalid arguments and policy blocks distinct', () => {
+    render(createElement(ToolBatchCard, { batch: {
+      id: 'tool-batch-invalid', type: 'inspection', members: [member('bad-input', 'invalid', { summary: 'offset 必须大于 0' })],
+    } }));
+    expect(screen.getByText('参数错误')).toBeInTheDocument();
+    expect(document.querySelector('.tool-batch-card.invalid')).not.toBeNull();
+    cleanup();
+
+    render(createElement(ToolBatchCard, { batch: {
+      id: 'tool-batch-blocked', type: 'inspection', members: [member('blocked', 'blocked', { summary: '策略阻止' })],
+    } }));
+    expect(screen.getByText('已阻止')).toBeInTheDocument();
+    expect(document.querySelector('.tool-batch-card.blocked')).not.toBeNull();
   });
 
   it('keeps repeated file operations in call order and reveals their real diffs', () => {
@@ -68,7 +83,7 @@ describe('ToolBatchCard', () => {
         member('second', 'failed', { toolName: 'run_command', category: 'command', name: '执行命令', target: 'npm run lint', approval: { status: 'denied', addedToWhitelist: false } }),
       ],
     } }));
-    expect(screen.getByText('执行了 2 个命令操作 · 失败 1 个')).toBeInTheDocument();
+    expect(screen.getByText('执行了 2 个命令操作 · 异常 1 个')).toBeInTheDocument();
     expect(screen.getByText('部分失败')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '执行命令，展开批次详情' }));
     expect(screen.getByText('npm test')).toBeInTheDocument();

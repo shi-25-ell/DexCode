@@ -1,3 +1,5 @@
+import type { ToolViewStatus } from '../../../packages/shared/types';
+
 export type ConversationScope = { kind: 'general' } | { kind: 'workspace'; workspaceRef: string };
 
 export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge' | 'memory';
@@ -28,7 +30,7 @@ export type ToolPresentation = {
   category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'memory' | 'other';
   name: string;
   target?: string;
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
+  status: ToolViewStatus;
   summary: string;
   rawOutput?: string;
   truncated?: boolean;

@@ -45,13 +45,15 @@ export function batchToolSequence<T extends Pick<ToolPresentation, 'callRef' | '
   return result;
 }
 
-export type ToolBatchStatus = 'running' | 'succeeded' | 'warning' | 'failed' | 'denied' | 'cancelled';
+export type ToolBatchStatus = 'running' | 'succeeded' | 'warning' | 'invalid' | 'blocked' | 'failed' | 'denied' | 'cancelled';
 
 export function toolBatchStatus(batch: Pick<ToolBatchPresentation, 'members'>): { status: ToolBatchStatus; failed: number } {
   const statuses = batch.members.map((member) => member.status);
-  const failed = statuses.filter((status) => status === 'failed').length;
+  const failed = statuses.filter((status) => status === 'invalid' || status === 'blocked' || status === 'failed').length;
   if (statuses.some((status) => status === 'queued' || status === 'running')) return { status: 'running', failed };
   if (statuses.every((status) => status === 'succeeded')) return { status: 'succeeded', failed };
+  if (statuses.every((status) => status === 'invalid')) return { status: 'invalid', failed };
+  if (statuses.every((status) => status === 'blocked')) return { status: 'blocked', failed };
   if (statuses.every((status) => status === 'failed')) return { status: 'failed', failed };
   if (statuses.every((status) => status === 'denied' || status === 'cancelled')) {
     return { status: statuses.some((status) => status === 'denied') ? 'denied' : 'cancelled', failed };
@@ -68,8 +70,8 @@ export function toolBatchSummary(batch: Pick<ToolBatchPresentation, 'type' | 'me
     return [files ? `检查了 ${files} 个文件` : '', searches ? `搜索 ${searches} 次` : '', `${batch.members.length} 项操作`].filter(Boolean).join(' · ');
   }
   if (batch.type === 'command') {
-    const failed = batch.members.filter((member) => member.status === 'failed').length;
-    return `执行了 ${batch.members.length} 个命令操作 · 失败 ${failed} 个`;
+    const issues = batch.members.filter((member) => member.status === 'invalid' || member.status === 'blocked' || member.status === 'failed').length;
+    return `执行了 ${batch.members.length} 个命令操作 · 异常 ${issues} 个`;
   }
   const files = new Set(batch.members.flatMap((member) => {
     const path = member.fileChange?.path ?? member.target;

@@ -371,28 +371,46 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
     });
   }
 
-  async function updateFile(path: string, content: string) {
-    await ensureWorkspaceDir();
+  async function updateFile(path: string, content: string, signal?: AbortSignal) {
     const normalized = normalizePath(path);
-    await assertNoReparsePoint(normalized);
-    const segments = normalized.split('/').filter(Boolean);
-    const existedBefore = Boolean(findFile(normalized));
-    state.tree = upsertNode(state.tree, segments, content);
-
-    const filePath = resolveWorkspacePath(normalized);
-    const dir = dirname(filePath);
-    if (dir) await mkdir(dir, { recursive: true });
-    await writeFile(filePath, content, 'utf8');
-
-    return {
-      ok: true,
-      action: existedBefore ? 'updated' : 'created',
-      file: {
-        path: normalized,
-        content,
-      },
-      tree: listTree(),
-    };
+    return mutationQueue.run(normalized, async () => {
+      const abort = () => {
+        if (signal?.aborted) throw new DOMException('Operation aborted', 'AbortError');
+      };
+      abort();
+      await ensureWorkspaceDir();
+      await assertNoReparsePoint(normalized);
+      const filePath = resolveWorkspacePath(normalized);
+      let before: string | null = null;
+      try {
+        before = await readFile(filePath, 'utf8');
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'ENOENT') {
+          return { ok: false, action: 'write_failed', error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      abort();
+      const dir = dirname(filePath);
+      if (dir) await mkdir(dir, { recursive: true });
+      abort();
+      const temporary = `${filePath}.dexcode-${crypto.randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, content, 'utf8');
+        abort();
+        await rename(temporary, filePath);
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => {});
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        return { ok: false, action: 'write_failed', error: `Atomic file replacement failed: ${error instanceof Error ? error.message : String(error)}` };
+      }
+      state.tree = upsertNode(state.tree, normalized.split('/').filter(Boolean), content);
+      return {
+        ok: true,
+        action: before === null ? 'created' : 'updated',
+        file: { path: normalized, content },
+        tree: listTree(),
+      };
+    });
   }
 
   async function createFolder(path: string) {

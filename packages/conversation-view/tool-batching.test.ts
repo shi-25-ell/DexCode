@@ -81,7 +81,7 @@ test('consecutive commands merge across their individual approval cards', () => 
   if (output[0]?.kind === 'tool_batch') {
     assert.equal(output[0].batch.id, 'tool-batch-command-command-1');
     assert.deepEqual(output[0].batch.members.map((member) => member.callRef), ['command-1', 'command-2']);
-    assert.equal(toolBatchSummary(output[0].batch), '执行了 2 个命令操作 · 失败 1 个');
+    assert.equal(toolBatchSummary(output[0].batch), '执行了 2 个命令操作 · 异常 1 个');
     assert.deepEqual(toolBatchStatus(output[0].batch), { status: 'warning', failed: 1 });
   }
   assert.deepEqual(output.slice(1).map((entry) => entry.key), ['approval-1', 'approval-2']);
@@ -92,6 +92,8 @@ test('batch status exposes partial and total failures without changing membershi
   assert.deepEqual(toolBatchStatus(partial), { status: 'warning', failed: 1 });
   assert.deepEqual(partial.members.map((member) => member.callRef), ['ok', 'bad']);
   assert.deepEqual(toolBatchStatus({ ...partial, members: [tool('read_file', 'bad-1', 'failed'), tool('read_file', 'bad-2', 'failed')] }), { status: 'failed', failed: 2 });
+  assert.deepEqual(toolBatchStatus({ ...partial, members: [tool('read_file', 'invalid-1', 'invalid'), tool('read_file', 'invalid-2', 'invalid')] }), { status: 'invalid', failed: 2 });
+  assert.deepEqual(toolBatchStatus({ ...partial, members: [tool('read_file', 'blocked-1', 'blocked')] }), { status: 'blocked', failed: 1 });
   assert.deepEqual(toolBatchStatus({ ...partial, members: [tool('read_file', 'bad', 'failed'), tool('read_file', 'live', 'running')] }), { status: 'running', failed: 1 });
   assert.deepEqual(toolBatchStatus({ ...partial, members: [tool('read_file', 'deny-1', 'denied'), tool('read_file', 'deny-2', 'denied')] }), { status: 'denied', failed: 0 });
   assert.deepEqual(toolBatchStatus({ ...partial, members: [tool('read_file', 'deny', 'denied'), tool('read_file', 'cancel', 'cancelled')] }), { status: 'denied', failed: 0 });

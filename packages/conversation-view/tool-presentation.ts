@@ -4,6 +4,7 @@ import type { ManagedMemoryType } from '../managed-memory/contracts.ts';
 import { serializeTopic } from '../managed-memory/format.ts';
 import { safeDisplayOutput } from './output-policy.ts';
 import { codingToolSpec } from '../tool-gateway/tool-registry.ts';
+import { normalizeToolResult } from '../shared/tool-result.ts';
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -40,13 +41,10 @@ export function fileChangePresentation(diff?: FileDiff): ToolPresentation['fileC
 }
 
 function outcomeStatus(result: unknown): ToolViewStatus {
-  const object = objectValue(result);
-  const status = String(object.status ?? '').toLowerCase();
-  if (status === 'denied' || status === 'rejected') return 'denied';
-  if (status === 'cancelled' || status === 'aborted') return 'cancelled';
-  if (status === 'failed' || status === 'blocked') return 'failed';
-  if ('error' in object && object.error) return 'failed';
-  return 'succeeded';
+  const normalized = normalizeToolResult(result);
+  if (normalized.ok) return 'succeeded';
+  if (normalized.status === 'invalid_arguments') return 'invalid';
+  return normalized.status;
 }
 
 function descriptor(tool: string, args: Record<string, unknown>) {
@@ -89,13 +87,19 @@ function descriptor(tool: string, args: Record<string, unknown>) {
 }
 
 function successSummary(tool: string, result: unknown, status: ToolViewStatus): string {
+  const normalized = normalizeToolResult(result);
+  if (status === 'invalid') return `参数错误：${normalized.ok ? '参数不符合工具契约' : normalized.error.message}`.slice(0, 160);
+  if (status === 'blocked') return `已阻止：${normalized.ok ? '操作被策略阻止' : normalized.error.message}`.slice(0, 160);
   if (status === 'denied') return '已拒绝执行';
   if (status === 'cancelled') return '已取消';
-  if (status === 'failed') return String(objectValue(result).error ?? '执行失败').slice(0, 160);
+  if (status === 'failed') return (normalized.ok ? '执行失败' : normalized.error.message).slice(0, 160);
   if (tool === 'read_file') {
     const object = objectValue(result);
-    const content = typeof object.content === 'string' ? object.content : typeof result === 'string' ? result : '';
-    return content ? `已读取 ${content.replace(/\r\n/g, '\n').split('\n').length.toLocaleString('zh-CN')} 行` : '读取完成';
+    const start = Number(object.start_line ?? 0);
+    const end = Number(object.end_line ?? 0);
+    const total = Number(object.total_lines ?? 0);
+    if (start > 0 && end >= start) return `已读取第 ${start.toLocaleString('zh-CN')}–${end.toLocaleString('zh-CN')} 行，共 ${total.toLocaleString('zh-CN')} 行`;
+    return total === 0 ? '已读取空文件' : '读取完成';
   }
   if (tool === 'find' || tool === 'ls') return `找到 ${Number(objectValue(result).total ?? 0).toLocaleString('zh-CN')} 项`;
   if (tool === 'list_workspace') return `已列出 ${Number(objectValue(result).node_count ?? 0).toLocaleString('zh-CN')} 个节点`;

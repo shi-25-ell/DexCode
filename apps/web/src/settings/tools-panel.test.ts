@@ -15,5 +15,6 @@ describe('tool settings presets', () => {
       'read_command_output',
       'stop_command',
     ]);
+    expect(TOOL_TEST_PRESETS.read_file).toEqual({ path: 'package.json', offset: 1, limit: 200 });
   });
 });

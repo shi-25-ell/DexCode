@@ -1,5 +1,8 @@
 import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, matchesGlob, relative, resolve } from 'node:path';
+import { DIRECTORY_LIMITS } from './tool-limits.ts';
+
+export { DIRECTORY_LIMITS } from './tool-limits.ts';
 
 export type DirectoryEntryType = 'file' | 'directory' | 'symlink';
 
@@ -16,6 +19,7 @@ export type LsResult = {
   entries: DirectoryEntry[];
   total: number;
   truncated: boolean;
+  truncation_reason?: 'result_limit' | 'byte_limit';
 };
 
 export type FindResult = {
@@ -33,12 +37,6 @@ export type ListWorkspaceResult = {
   truncated: boolean;
   truncation_reason?: 'depth' | 'node_limit' | 'byte_limit';
 };
-
-const DEFAULT_LS_LIMIT = 500;
-const DEFAULT_FIND_LIMIT = 1_000;
-const MAX_NODES = 5_000;
-const MAX_BYTES = 50 * 1024;
-const MAX_DEPTH = 20;
 
 function posixPath(value: string): string {
   return value.replace(/\\/g, '/');
@@ -147,12 +145,23 @@ export async function listDirectory(root: string, input: { path?: string; limit?
   if (!(await stat(directory)).isDirectory()) throw new Error(`Not a directory: ${input.path ?? '.'}`);
   const rules = await readIgnoreRules(root);
   const entries = await readEntries(root, directory, rules);
-  const limit = Math.max(1, Math.min(5_000, Math.floor(input.limit ?? DEFAULT_LS_LIMIT)));
+  const limit = Math.max(1, Math.min(DIRECTORY_LIMITS.lsMaxEntries, Math.floor(input.limit ?? DIRECTORY_LIMITS.lsDefaultEntries)));
+  const selected: DirectoryEntry[] = [];
+  let bytes = 0;
+  let truncationReason: LsResult['truncation_reason'];
+  for (const { absolute: _absolute, ...entry } of entries) {
+    if (selected.length >= limit) { truncationReason = 'result_limit'; break; }
+    const nextBytes = Buffer.byteLength(entry.name, 'utf8') + Buffer.byteLength(entry.path, 'utf8') + Buffer.byteLength(entry.type, 'utf8') + 24;
+    if (bytes + nextBytes > DIRECTORY_LIMITS.maxBytes) { truncationReason = 'byte_limit'; break; }
+    selected.push(entry);
+    bytes += nextBytes;
+  }
   return {
     path: posixPath(relative(root, directory)) || '.',
-    entries: entries.slice(0, limit).map(({ absolute: _absolute, ...entry }) => entry),
+    entries: selected,
     total: entries.length,
-    truncated: entries.length > limit,
+    truncated: Boolean(truncationReason),
+    ...(truncationReason ? { truncation_reason: truncationReason } : {}),
   };
 }
 
@@ -166,7 +175,7 @@ export async function findPaths(
   const searchRoot = await resolveWorkspacePath(root, input.path ?? '.');
   if (!(await stat(searchRoot)).isDirectory()) throw new Error(`Not a directory: ${input.path ?? '.'}`);
   const rules = await readIgnoreRules(root);
-  const limit = Math.max(1, Math.min(10_000, Math.floor(input.limit ?? DEFAULT_FIND_LIMIT)));
+  const limit = Math.max(1, Math.min(DIRECTORY_LIMITS.findMaxResults, Math.floor(input.limit ?? DIRECTORY_LIMITS.findDefaultResults)));
   const matches: string[] = [];
   let bytes = 0;
   let truncated: FindResult['truncation_reason'];
@@ -180,7 +189,7 @@ export async function findPaths(
       if (globMatches(globCandidate, input.pattern)) {
         const nextBytes = Buffer.byteLength(relativeToSearch, 'utf8') + 1;
         if (matches.length >= limit) { truncated = 'result_limit'; return; }
-        if (bytes + nextBytes > MAX_BYTES) { truncated = 'byte_limit'; return; }
+        if (bytes + nextBytes > DIRECTORY_LIMITS.maxBytes) { truncated = 'byte_limit'; return; }
         matches.push(relativeToSearch);
         bytes += nextBytes;
       }
@@ -209,7 +218,7 @@ export async function buildWorkspaceTree(
 ): Promise<ListWorkspaceResult> {
   const realRoot = await resolveWorkspacePath(root, '.');
   const rules = await readIgnoreRules(realRoot);
-  const maxDepth = Math.max(1, Math.min(MAX_DEPTH, Math.floor(input.depth ?? MAX_DEPTH)));
+  const maxDepth = Math.max(1, Math.min(DIRECTORY_LIMITS.maxDepth, Math.floor(input.depth ?? DIRECTORY_LIMITS.maxDepth)));
   let nodes = 1;
   let bytes = Buffer.byteLength(basename(realRoot), 'utf8');
   let truncationReason: ListWorkspaceResult['truncation_reason'];
@@ -220,9 +229,9 @@ export async function buildWorkspaceTree(
     const entries = await readEntries(realRoot, directory, rules);
     for (const entry of entries) {
       if (signal?.aborted) throw new Error('Operation aborted');
-      if (nodes >= MAX_NODES) { truncationReason = 'node_limit'; break; }
+      if (nodes >= DIRECTORY_LIMITS.maxNodes) { truncationReason = 'node_limit'; break; }
       const nextBytes = Buffer.byteLength(entry.name, 'utf8') + Buffer.byteLength(entry.path, 'utf8') + 24;
-      if (bytes + nextBytes > MAX_BYTES) { truncationReason = 'byte_limit'; break; }
+      if (bytes + nextBytes > DIRECTORY_LIMITS.maxBytes) { truncationReason = 'byte_limit'; break; }
       nodes += 1;
       bytes += nextBytes;
       const node: WorkspaceTreeNode = { name: entry.name, path: entry.path, type: entry.type };

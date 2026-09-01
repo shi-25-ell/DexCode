@@ -1,5 +1,6 @@
 import type { ApprovalEffect } from '../shared/types.ts';
 import { validateJsonSchema, type JsonSchema } from '../shared/json-schema.ts';
+import { DIRECTORY_LIMITS, GREP_LIMITS, READ_FILE_LIMITS } from './tool-limits.ts';
 
 export type CodingToolName =
   | 'find'
@@ -67,36 +68,40 @@ export function codingToolSpecs(options: { shellDescription?: string } = {}): Co
   return [
     {
       name: 'find',
-      description: '按 glob 递归查找工作区路径。返回稳定排序的相对路径，不读取文件正文，并遵守 ignore 规则。',
+      description: `按 glob 递归查找工作区路径。返回稳定排序的相对路径，不读取文件正文，并遵守 ignore 规则。默认最多 ${DIRECTORY_LIMITS.findDefaultResults} 项，调用上限 ${DIRECTORY_LIMITS.findMaxResults} 项，总输出上限 ${DIRECTORY_LIMITS.maxBytes / 1024}KB。`,
       inputSchema: objectSchema({
         pattern: { type: 'string', minLength: 1 },
         path: pathProperty,
-        limit: { type: 'integer', minimum: 1, maximum: 10_000 },
+        limit: { type: 'integer', minimum: 1, maximum: DIRECTORY_LIMITS.findMaxResults, description: `结果上限，默认 ${DIRECTORY_LIMITS.findDefaultResults}` },
       }, ['pattern']),
       effect: 'read',
       presentation: { category: 'search', label: '查找路径', batch: 'inspection' },
     },
     {
       name: 'ls',
-      description: '列出工作区内一个目录的直接子项，不递归、不读取文件正文，并包含普通隐藏项。',
+      description: `列出工作区内一个目录的直接子项，不递归、不读取文件正文，并包含普通隐藏项。默认最多 ${DIRECTORY_LIMITS.lsDefaultEntries} 项，调用上限 ${DIRECTORY_LIMITS.lsMaxEntries} 项，总输出上限 ${DIRECTORY_LIMITS.maxBytes / 1024}KB。`,
       inputSchema: objectSchema({
         path: pathProperty,
-        limit: { type: 'integer', minimum: 1, maximum: 5_000 },
+        limit: { type: 'integer', minimum: 1, maximum: DIRECTORY_LIMITS.lsMaxEntries, description: `结果上限，默认 ${DIRECTORY_LIMITS.lsDefaultEntries}` },
       }),
       effect: 'read',
       presentation: { category: 'read', label: '浏览目录', batch: 'inspection' },
     },
     {
       name: 'list_workspace',
-      description: '返回工作区递归树形结构概览，不包含文件正文。可用 depth 缩小输出。',
-      inputSchema: objectSchema({ depth: { type: 'integer', minimum: 1, maximum: 20 } }),
+      description: `返回工作区递归树形结构概览，不包含文件正文。默认及最大深度 ${DIRECTORY_LIMITS.maxDepth}，最多 ${DIRECTORY_LIMITS.maxNodes} 个节点、${DIRECTORY_LIMITS.maxBytes / 1024}KB；可用 depth 缩小输出。`,
+      inputSchema: objectSchema({ depth: { type: 'integer', minimum: 1, maximum: DIRECTORY_LIMITS.maxDepth, description: `递归深度，默认 ${DIRECTORY_LIMITS.maxDepth}` } }),
       effect: 'read',
       presentation: { category: 'read', label: '浏览项目结构', batch: 'inspection' },
     },
     {
       name: 'read_file',
-      description: '读取工作区中一个确定文件的最新磁盘内容。修改已有文件前先读取。',
-      inputSchema: objectSchema({ path: pathProperty }, ['path']),
+      description: `按行读取工作区文本文件的最新磁盘内容。offset 是从 1 开始的起始行，limit 是最多读取行数；默认和单次最多 ${READ_FILE_LIMITS.maxLines} 行，同时受 ${READ_FILE_LIMITS.maxBytes / 1024}KB 上限约束。结果截断时使用 next_offset 继续。修改已有文件前先读取。`,
+      inputSchema: objectSchema({
+        path: pathProperty,
+        offset: { type: 'integer', minimum: 1, description: '从 1 开始的起始行，默认 1' },
+        limit: { type: 'integer', minimum: 1, maximum: READ_FILE_LIMITS.maxLines, description: `最多读取行数，默认且最大 ${READ_FILE_LIMITS.defaultLines}` },
+      }, ['path']),
       effect: 'read',
       presentation: { category: 'read', label: '读取文件', batch: 'inspection' },
     },
@@ -109,8 +114,8 @@ export function codingToolSpecs(options: { shellDescription?: string } = {}): Co
         glob: { type: 'string', minLength: 1 },
         ignoreCase: { type: 'boolean' },
         literal: { type: 'boolean' },
-        context: { type: 'integer', minimum: 0, maximum: 20 },
-        limit: { type: 'integer', minimum: 1, maximum: 10_000 },
+        context: { type: 'integer', maximum: GREP_LIMITS.maxContextLines, description: `匹配前后上下文行数，默认 0；负数按 0 处理，最大 ${GREP_LIMITS.maxContextLines}` },
+        limit: { type: 'integer', maximum: GREP_LIMITS.maxMatches, description: `最大匹配数，默认 ${GREP_LIMITS.defaultMatches}；小于 1 按 1 处理，最大 ${GREP_LIMITS.maxMatches}` },
       }, ['pattern']),
       effect: 'read',
       presentation: { category: 'search', label: '搜索代码', batch: 'inspection' },

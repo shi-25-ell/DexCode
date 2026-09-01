@@ -41,11 +41,13 @@ import {
 } from '../agent-manager/contracts.ts';
 import { agentOrchestrationToolDefinitions } from './tool-definitions.ts';
 import { validateJsonSchema } from '../shared/json-schema.ts';
+import { normalizeToolResult, toolFailure } from '../shared/tool-result.ts';
 import type { PatchFileInput } from '../tool-gateway/structured-edit.ts';
 
 export type CodingToolHost = {
-  readFile: (path: string) => Promise<unknown> | unknown;
-  writeFile: (path: string, content: string) => unknown;
+  readFile: (path: string, options?: { offset?: number; limit?: number }, signal?: AbortSignal) => Promise<unknown> | unknown;
+  readFileForDiff?: (path: string) => Promise<unknown> | unknown;
+  writeFile: (path: string, content: string, signal?: AbortSignal) => unknown;
   runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook; signal?: AbortSignal; timeoutMs?: number; runInBackground?: boolean }) => unknown;
   readCommandOutput?: (taskId: string, waitMs?: number) => unknown;
   stopCommand?: (taskId: string) => unknown;
@@ -341,7 +343,10 @@ export function createExecutor(
   }
 
   const toolFns: Record<string, (args: Record<string, unknown>) => unknown> = {
-    read_file: ({ path }) => codingToolHost.readFile(path as string),
+    read_file: ({ path, offset, limit }) => codingToolHost.readFile(path as string, {
+      ...(typeof offset === 'number' ? { offset } : {}),
+      ...(typeof limit === 'number' ? { limit } : {}),
+    }),
     write_file: ({ path, content }) => codingToolHost.writeFile(path as string, content as string),
     find: (args) => codingToolHost.find(args as Parameters<CodingToolHost['find']>[0]),
     ls: (args) => codingToolHost.ls(args as Parameters<CodingToolHost['ls']>[0]),
@@ -782,8 +787,8 @@ export function createExecutor(
               }
             }
             if (invalid) toolResult = policyDenied
-              ? { status: 'blocked', code: 'blocked_by_policy', tool: toolName, reason: invalid }
-              : { status: 'rejected', error: invalid };
+              ? toolFailure('blocked', 'BLOCKED_BY_POLICY', invalid, { tool: toolName })
+              : toolFailure('invalid_arguments', 'INVALID_ARGUMENTS', invalid, { tool: toolName });
             if (invalid) {
               // Rejected calls still receive a paired tool result but never reach an execution adapter.
             } else if (toolName === 'read_artifact' && options.context) {
@@ -910,7 +915,7 @@ export function createExecutor(
                     onEffectStart: markToolRunning,
                   });
                   if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
-                    const captured = await captureFileDiff(codingToolHost.readFile, args.path, execute);
+                    const captured = await captureFileDiff(codingToolHost.readFileForDiff ?? codingToolHost.readFile, args.path, execute);
                     toolResult = captured.result;
                     fileDiff = captured.diff;
                     if (captured.diff.before !== captured.diff.after) {
@@ -925,7 +930,7 @@ export function createExecutor(
                   toolResult = await codingToolHost.runCommand(String(args.command ?? ''), { onCommandConfirm, signal });
                 } else if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
                   markToolRunning();
-                  const captured = await captureFileDiff(codingToolHost.readFile, args.path, () => fn(args));
+                  const captured = await captureFileDiff(codingToolHost.readFileForDiff ?? codingToolHost.readFile, args.path, () => fn(args));
                   toolResult = captured.result;
                   fileDiff = captured.diff;
                   fileChanges.push(captured.diff);
@@ -945,22 +950,26 @@ export function createExecutor(
                     executeExternal: (name, input, executionSignal) => externalMcpRegistry.callTool(name, input, executionSignal),
                   });
                 } else if (!onConfirm) {
-                  toolResult = { status: 'denied', error: 'external MCP tool requires an approval channel' };
+                  toolResult = toolFailure('denied', 'APPROVAL_REQUIRED', 'External MCP tool requires an approval channel');
                 } else {
                   if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
                   const decision = await onConfirm(`Allow external MCP tool ${toolName}?`, ['allow', 'deny']);
                   toolResult = decision === 'allow'
                     ? await (async () => { markToolRunning(); return externalMcpRegistry.callTool(toolName, args, signal); })()
-                    : { status: 'denied', error: 'external MCP tool denied' };
+                    : toolFailure('denied', 'APPROVAL_DENIED', 'External MCP tool denied');
                 }
               } else {
-                toolResult = { error: `unknown tool: ${toolName}` };
+                toolResult = toolFailure('failed', 'UNSUPPORTED_TOOL', `Unknown tool: ${toolName}`, { tool: toolName });
               }
-              toolResult = enrichToolResult(toolName, toolResult);
             }
           } catch (error) {
-            toolResult = { error: error instanceof Error ? error.message : String(error) };
+            toolResult = signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
+              ? toolFailure('cancelled', 'CANCELLED', 'Tool execution was cancelled', { tool: toolName })
+              : toolFailure('failed', 'EXECUTION_FAILED', error instanceof Error ? error.message : String(error), { tool: toolName });
           }
+          toolResult = enrichToolResult(toolName, toolResult);
+          const normalizedToolResult = normalizeToolResult(toolResult);
+          if (!normalizedToolResult.ok) toolResult = normalizedToolResult;
           if (options.presentation && (toolName === 'spawn_agent' || toolName === 'followup_agent') && toolResult && typeof toolResult === 'object') {
             const result = toolResult as Record<string, unknown>;
             if (typeof result.agent_id === 'string' && typeof result.agent_run_id === 'string') {

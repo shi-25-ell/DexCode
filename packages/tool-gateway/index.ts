@@ -2,6 +2,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { WorkspaceFile } from '../workspace-manager/index.ts';
 import type { ToolInfo } from '../shared/types.ts';
+import { normalizeToolResult, toolFailure } from '../shared/tool-result.ts';
 import { createMcpServer, type McpJsonRpcRequest, type McpJsonRpcResponse, type McpServer } from '../mcp-server/index.ts';
 import { isTrustedReadonlyCommand, matchWhitelistEntry, normalizeCommand, validateCommand } from './command-safety.ts';
 import { createCommandWhitelistStore } from './command-whitelist-store.ts';
@@ -21,6 +22,7 @@ import {
 import { createToolCallLogStore } from './tool-call-log.ts';
 import { buildWorkspaceTree, findPaths, listDirectory } from './directory-walker.ts';
 import { grepWorkspace } from './grep.ts';
+import { readWorkspaceFile, type ReadFileInput } from './read-file.ts';
 import { agentCodingToolDefinitions, codingToolSpec, codingToolSpecs, type CodingToolName } from './tool-registry.ts';
 import type { PatchFileInput } from './structured-edit.ts';
 import { resolveShellCapabilities, type ShellResolverOptions } from './shell/shell-resolver.ts';
@@ -39,7 +41,7 @@ type WorkspaceService = {
   projectDir: string;
   getRootDir: () => string;
   findFile: (path: string) => WorkspaceFile | null;
-  updateFile: (path: string, content: string) => Promise<unknown>;
+  updateFile: (path: string, content: string, signal?: AbortSignal) => Promise<unknown>;
   listTree: () => unknown[];
   listFiles: () => WorkspaceFile[];
   patchFile: (input: PatchFileInput) => Promise<unknown> | unknown;
@@ -274,21 +276,14 @@ export function createCodingToolHost(
     toolRecords.set(name, record);
 
     return async (...args: unknown[]) => {
-      if (!record.enabled) return { error: `工具 ${name} 已被禁用` };
+      if (!record.enabled) return toolFailure('blocked', 'TOOL_DISABLED', `工具 ${name} 已被禁用`, { tool: name });
       const start = Date.now();
       try {
         const result = await fn(...args);
         const duration = Date.now() - start;
         record.callCount++;
         callLog.append(name, args, result, duration);
-        const ok =
-          result &&
-          typeof result === 'object' &&
-          !(result as Record<string, unknown>).error &&
-          (result as Record<string, unknown>).ok !== false &&
-          (result as Record<string, unknown>).status !== 'failed' &&
-          (result as Record<string, unknown>).status !== 'denied' &&
-          (result as Record<string, unknown>).action !== 'patch_failed';
+        const ok = normalizeToolResult(result).ok;
         if (ok) record.successCount++;
         record.avgDurationMs = record.avgDurationMs === 0 ? duration : Math.round(record.avgDurationMs * 0.9 + duration * 0.1);
         record.lastCalledAt = new Date().toISOString();
@@ -330,23 +325,25 @@ export function createCodingToolHost(
   function registryTestTool(name: string, args: Record<string, unknown>): Promise<unknown> {
     const record = toolRecords.get(name);
     if (!record) return Promise.reject(new Error(`工具 ${name} 不存在`));
-    if (!record.enabled) return Promise.resolve({ error: `工具 ${name} 已被禁用` });
+    if (!record.enabled) return Promise.resolve(toolFailure('blocked', 'TOOL_DISABLED', `工具 ${name} 已被禁用`, { tool: name }));
     return mcpServer.callTool(name, args);
   }
 
-  const readFileTool = wrapWithStats('read_file', runtimeToolSpecs.get('read_file')!.description, async (path: string) => {
-      const rootDir = workspaceService.getRootDir();
-      const absPath = await safeExistingPath(rootDir, String(path));
-      if (!absPath) return null;
-      try {
-        const content = await readFile(absPath, 'utf8');
-        return { path, content };
-      } catch {
-        return null;
-      }
-    });
+  const readFileTool = wrapWithStats('read_file', runtimeToolSpecs.get('read_file')!.description,
+    (input: ReadFileInput, signal?: AbortSignal) => readWorkspaceFile(workspaceService.getRootDir(), input, signal));
+  const readFileHost = (path: string, options: Omit<ReadFileInput, 'path'> = {}, signal?: AbortSignal) => readFileTool({ path, ...options }, signal);
+  const readFileForDiff = async (path: string) => {
+    const rootDir = workspaceService.getRootDir();
+    const absPath = await safeExistingPath(rootDir, path);
+    if (!absPath) return null;
+    try {
+      return { path, content: await readFile(absPath, 'utf8') };
+    } catch {
+      return null;
+    }
+  };
   const writeFileTool = wrapWithStats('write_file', runtimeToolSpecs.get('write_file')!.description,
-    (path: string, content: string) => workspaceService.updateFile(path, content));
+    (path: string, content: string, signal?: AbortSignal) => workspaceService.updateFile(path, content, signal));
   const findTool = wrapWithStats('find', runtimeToolSpecs.get('find')!.description,
     (input: { pattern: string; path?: string; limit?: number }, signal?: AbortSignal) => findPaths(cwd(), input, signal));
   const lsTool = wrapWithStats('ls', runtimeToolSpecs.get('ls')!.description,
@@ -375,7 +372,11 @@ export function createCodingToolHost(
       ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
     }),
     list_workspace: (args) => listWorkspaceTool(typeof args.depth === 'number' ? { depth: args.depth } : {}),
-    read_file: (args) => readFileTool(String(args.path ?? '')),
+    read_file: (args) => readFileTool({
+      path: String(args.path ?? ''),
+      ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
+      ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+    }),
     grep: (args) => grepTool(args as Parameters<typeof grepWorkspace>[1]),
     run_command: (args) => runCommandTool(String(args.command ?? ''), {
       approvalGranted: true,
@@ -395,7 +396,8 @@ export function createCodingToolHost(
   });
 
   const host = {
-    readFile: readFileTool,
+    readFile: readFileHost,
+    readFileForDiff,
     writeFile: writeFileTool,
     find: findTool,
     ls: lsTool,
@@ -507,30 +509,28 @@ export function createCodingToolHost(
   ): Promise<unknown> {
     if (!toolName.startsWith('mcp__')) {
       const validationError = mcpServer.validateToolCall(toolName, input);
-      if (validationError) return { status: 'blocked', error: validationError };
+      if (validationError) return toolFailure('invalid_arguments', 'INVALID_ARGUMENTS', validationError, { tool: toolName });
     }
     const subject = await approvalSubject(toolName, input, context.origin);
     const decision = approvalPolicy.authorize(subject, approvalMode.getMode());
-    if (decision.outcome === 'deny') return context.nonInteractive
-      ? { status: 'blocked', code: 'blocked_by_policy', tool: toolName, reason: decision.reason }
-      : { status: 'blocked', error: decision.reason };
+    if (decision.outcome === 'deny') return toolFailure('blocked', 'BLOCKED_BY_POLICY', decision.reason, { tool: toolName });
     if (decision.outcome === 'ask') {
       if (!context.onApproval || context.origin === 'mcp_http') {
         return context.nonInteractive
-          ? { status: 'blocked', code: 'approval_required', tool: toolName, reason: decision.reason }
-          : { status: 'denied', error: '该操作需要用户批准，但当前没有可用的批准通道' };
+          ? toolFailure('blocked', 'APPROVAL_REQUIRED', decision.reason, { tool: toolName })
+          : toolFailure('denied', 'APPROVAL_REQUIRED', '该操作需要用户批准，但当前没有可用的批准通道', { tool: toolName });
       }
       const response = await context.onApproval(approvalRequest(subject, decision.options, decision.reason));
       if (response.fingerprint !== subject.fingerprint) {
-        return { status: 'denied', error: '批准 fingerprint 与待执行操作不匹配' };
+        return toolFailure('denied', 'APPROVAL_MISMATCH', '批准 fingerprint 与待执行操作不匹配', { tool: toolName });
       }
       if (!decision.options.includes(response.decision)) {
-        return { status: 'denied', error: '批准决定不适用于当前操作' };
+        return toolFailure('denied', 'APPROVAL_MISMATCH', '批准决定不适用于当前操作', { tool: toolName });
       }
-      if (response.decision === 'deny') return { status: 'denied', error: '用户拒绝执行该操作' };
+      if (response.decision === 'deny') return toolFailure('denied', 'APPROVAL_DENIED', '用户拒绝执行该操作', { tool: toolName });
       if (response.decision === 'allow_whitelist') {
         if (toolName !== 'run_command' || !subject.command) {
-          return { status: 'denied', error: '只有命令可以加入白名单' };
+          return toolFailure('denied', 'APPROVAL_MISMATCH', '只有命令可以加入白名单', { tool: toolName });
         }
         await whitelistStore.addFromCommand(subject.command, 'exact');
       }
@@ -539,8 +539,11 @@ export function createCodingToolHost(
     const args = subject.normalizedInput as Record<string, unknown>;
     context.onEffectStart?.();
     switch (toolName) {
-      case 'read_file': return host.readFile(String(args.path ?? ''));
-      case 'write_file': return host.writeFile(String(args.path ?? ''), String(args.content ?? ''));
+      case 'read_file': return host.readFile(String(args.path ?? ''), {
+        ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
+        ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+      }, context.signal);
+      case 'write_file': return host.writeFile(String(args.path ?? ''), String(args.content ?? ''), context.signal);
       case 'find': return host.find(args as Parameters<typeof findPaths>[1], context.signal);
       case 'ls': return host.ls(args as Parameters<typeof listDirectory>[1]);
       case 'list_workspace': return host.listWorkspace(args as Parameters<typeof buildWorkspaceTree>[1], context.signal);
@@ -558,7 +561,7 @@ export function createCodingToolHost(
         if (toolName.startsWith('mcp__') && context.executeExternal) {
           return context.executeExternal(toolName, args, context.signal);
         }
-        return { status: 'denied', error: `未知工具默认拒绝：${toolName}` };
+        return toolFailure('failed', 'UNSUPPORTED_TOOL', `未知工具：${toolName}`, { tool: toolName });
     }
   }
 
@@ -572,10 +575,9 @@ export function createCodingToolHost(
       : {};
     const name = String(params.name ?? '');
     const result = await executeAgentTool(name, args, { origin: 'mcp_http' });
-    const failed = result && typeof result === 'object'
-      && ('error' in result || ['blocked', 'denied', 'failed'].includes(String((result as Record<string, unknown>).status ?? '')));
-    return failed
-      ? { jsonrpc: '2.0', id: request.id ?? null, error: { code: -32000, message: String((result as Record<string, unknown>).error ?? 'Tool call failed'), data: result } }
+    const normalized = normalizeToolResult(result);
+    return !normalized.ok
+      ? { jsonrpc: '2.0', id: request.id ?? null, error: { code: -32000, message: normalized.error.message, data: normalized } }
       : { jsonrpc: '2.0', id: request.id ?? null, result: { success: true, tool: name, data: result } };
   }
 

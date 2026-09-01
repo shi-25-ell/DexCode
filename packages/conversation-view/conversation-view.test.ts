@@ -60,6 +60,18 @@ test('tool presentation identifies Agent orchestration and unknown tools', () =>
   assert.equal(unknown.target, 'custom_future_tool');
 });
 
+test('tool presentation distinguishes invalid arguments, policy blocks, approval denial, and execution failure', () => {
+  const invalid = presentTool({ callRef: 'invalid', tool: 'read_file', result: { ok: false, status: 'invalid_arguments', error: { code: 'INVALID_ARGUMENTS', message: '$.offset must be >= 1' } } });
+  const blocked = presentTool({ callRef: 'blocked', tool: 'write_file', result: { ok: false, status: 'blocked', error: { code: 'BLOCKED_BY_POLICY', message: 'outside workspace' } } });
+  const denied = presentTool({ callRef: 'denied', tool: 'write_file', result: { ok: false, status: 'denied', error: { code: 'APPROVAL_DENIED', message: 'user denied' } } });
+  const failed = presentTool({ callRef: 'failed', tool: 'read_file', result: { ok: false, status: 'failed', error: { code: 'NOT_FOUND', message: 'missing file' } } });
+  assert.deepEqual([invalid.status, blocked.status, denied.status, failed.status], ['invalid', 'blocked', 'denied', 'failed']);
+  assert.match(invalid.summary, /参数错误/);
+  assert.match(blocked.summary, /已阻止/);
+  assert.equal(denied.summary, '已拒绝执行');
+  assert.equal(failed.summary, 'missing file');
+});
+
 test('file presentation creates exact non-contiguous hunks and marks new files', () => {
   const modified = presentTool({
     callRef: 'call-multi-hunk',

@@ -196,7 +196,7 @@ interface FindInput {
 
 - `pattern`：glob 路径模式，例如 `**/*.test.ts`、`packages/**/index.ts`。
 - `path`：相对工作区根目录的起始目录，默认工作区根目录。
-- `limit`：可选结果上限；服务端仍需有不可突破的硬上限。
+- `limit`：可选结果上限，默认 `1000`，单次调用最大 `10000`；小于 `1` 时按 `1` 处理。
 
 ### 5.2 语义
 
@@ -205,6 +205,7 @@ interface FindInput {
 - 默认尊重 `.gitignore`；是否同时尊重全局 ignore、隐藏文件和 `.git` 目录必须用测试固定，不能依赖底层库偶然行为。
 - 排序稳定，同一工作区内容在不同调用中产生相同顺序。
 - 返回命中数量、截断状态和路径列表；达到结果数或字节上限时明确标记 `truncated`，不能伪装成完整结果。
+- 总输出最多 `50KB`。`truncation_reason` 必须区分 `result_limit` 与 `byte_limit`。
 - `pattern` 非法、起始目录不存在、路径越界时返回结构化错误。
 - 支持取消信号，避免大仓库扫描成为不可中断任务。
 
@@ -231,7 +232,8 @@ interface LsInput {
 - 目录优先、名称大小写不敏感排序；相同名称仍要有确定的次级排序。
 - 不返回文件内容、文件摘要或递归子节点。
 - 返回目标目录、条目、总数和截断状态。
-- 默认上限、硬上限和输出字节上限必须固定在契约测试中。
+- `limit` 默认 `500`，单次调用最大 `5000`，小于 `1` 时按 `1` 处理；总输出最多 `50KB`。
+- `truncation_reason` 必须区分 `result_limit` 与 `byte_limit`。这些限制属于模型可见契约，必须固定在契约测试中。
 
 建议返回结构：
 
@@ -264,6 +266,7 @@ interface ListWorkspaceInput {
 
 - 无参数表示递归到服务端允许的默认最大深度，语义接近 `ls -R`。
 - `depth` 只用于调用者缩小输出，不允许突破服务端深度、节点数和字节硬上限。
+- 默认及最大深度均为 `20`；整个结果最多 `5000` 个节点、`50KB`。`truncation_reason` 必须明确为 `depth`、`node_limit` 或 `byte_limit`。
 - 如果最终决定严格保持无参数，MCP 侧现有 `depth` 也必须移除；不能保留双重契约。
 
 ### 7.2 返回
@@ -315,8 +318,8 @@ interface GrepInput {
 - `glob`：可选文件过滤，例如 `*.ts`、`**/*.spec.ts`。
 - `ignoreCase`：是否忽略大小写，默认 `false`。
 - `literal`：是否把 `pattern` 作为普通文本而非正则，默认 `false`。
-- `context`：每个命中前后显示的行数，默认 `0`；负数按 `0` 处理。
-- `limit`：最大匹配数，默认 `100`；小于 `1` 时按 `1` 处理。
+- `context`：每个命中前后显示的行数，默认 `0`；负数按 `0` 处理，最大 `20`。
+- `limit`：最大匹配数，默认 `100`；小于 `1` 时按 `1` 处理，最大 `10000`。
 
 Schema 必须拒绝未知字段，并由 Agent、MCP、测试面板和直接 Tool Gateway 调用共同使用。不能继续出现 Agent 少参数、MCP 多参数的同名契约漂移。
 
@@ -764,6 +767,16 @@ packages/tool-gateway/
 - glob 合法/非法、无结果、达到 limit、达到字节上限、取消。
 - `ls` 不递归，`find` 按模式递归，`list_workspace` 返回树且无正文。
 - Agent、MCP 和直接 host 调用返回一致语义。
+- `find` 的默认 `1000`/最大 `10000`、`ls` 的默认 `500`/最大 `5000`，以及三者共享的 `50KB` 输出上限与模型 schema/描述一致。
+- `list_workspace` 的最大深度 `20`、最大节点数 `5000`、`50KB` 输出上限及三个截断原因与模型描述一致。
+
+### 15.1.1 文件读取、整体写入与统一结果
+
+- `read_file` 的 1-based `offset`、默认/最大 `2000` 行、`50KB` 字节上限、续读 `next_offset` 和实际返回范围一致。
+- 空文件、CRLF/CR 展示归一化、尾部换行、超长单行、越界 offset、非文本文件、不存在文件和工作区越界都有固定结果。
+- `write_file` 的新建、整体覆盖、父目录创建、同文件并发、预取消和写盘失败覆盖；失败时原文件不变且不残留临时文件。
+- 模型暴露的字段、必填项、类型、上下限和描述由 registry 契约测试与实际实现常量逐项核对。
+- 参数错误、策略阻止、审批拒绝、执行失败和取消分别映射到独立错误码及前端状态，不能笼统显示为“已拒绝”。
 
 ### 15.2 `grep`
 
@@ -826,7 +839,7 @@ packages/tool-gateway/
 - 六个下线工具和旧搜索名字不出现在新工具列表、设置 preset、descriptor 活跃映射或批次集合中。
 - 包含旧名字和旧 `snapshot` category 的历史 ledger 可以渲染为 legacy/generic 卡片，不进入执行路径、不崩溃、不污染当前工具列表。
 - 同一 fixture 经实时 RunEvent、terminal snapshot 和 Session replay 投影后，工具顺序、状态、category、summary、approval、diff 和批次成员一致。
-- 工具失败、拒绝、取消、结果截断和未知工具均有可读展示，不出现空白卡、错误图标、无限展开或未转义原始输出。
+- 工具参数错误、策略阻止、审批拒绝、执行失败、取消、结果截断和未知工具均有可读且互相可区分的展示，不出现空白卡、错误图标、无限展开或未转义原始输出。
 - Tool Gateway registry、前端工具设置页和测试 preset 使用同一目标工具集合；新增/删除工具后不存在孤立开关或不可调用测试按钮。
 - Web 单元测试、conversation-view 测试、run-protocol 测试和前端构建共同覆盖该矩阵，不能只更新 snapshot 让测试通过。
 
@@ -883,6 +896,8 @@ npm run build:web
 11. 新编辑保持 BOM/EOL，返回真实 diff，歧义或计数不符时不写盘。
 12. 六个下线工具在所有活跃入口中不可见、不可调用、不可通过旧路径绕过；被替换的旧搜索名字同样不可执行。
 13. 取消快照工具注册不会删除或修改已有快照数据，底层功能保持冻结并等待后续专项删除。
+14. `read_file` 支持按行分段读取，并在行数或字节截断时返回可直接续读的 `next_offset`。
+15. `write_file` 与结构化编辑共享同文件串行、工作区边界检查、临时文件原子替换和失败不破坏原文件的安全边界。
 
 ### 17.2 一致性验收
 
@@ -894,6 +909,7 @@ npm run build:web
 6. 目标 10 个工具在后端 registry、Run 协议、conversation-view、前端类型、展示映射、批次映射、设置页和日志中均有一致适配。
 7. 实时展示、terminal snapshot 和刷新后的历史回放对同一工具序列产生相同的顺序、状态、category、summary、diff、approval 和批次归属。
 8. 六个下线工具和旧搜索名字不能发起新调用；包含它们的历史记录仍能安全展示，执行下线与历史可读性互不混淆。
+9. 模型暴露的工具参数、描述、默认值与硬上限和实际实现一致，并由自动化契约测试防止漂移。
 
 ### 17.3 质量验收
 
@@ -953,3 +969,72 @@ npm run build:web
 ## 21. 上下文内部工具展示约束
 
 `read_artifact` 属于上下文管理内部工具。它可以继续参与模型上下文协议、结果回填和持久化，但不得创建前端 Tool Card，也不得进入实时或历史执行流程批次。实时事件投影与刷新后的 Session ledger 投影都必须过滤该工具，并以契约测试覆盖这两个入口。
+
+## 22. 统一 `ToolResult`、错误码与展示状态
+
+所有执行入口必须先归一化为同一结果语义，避免 Tool Gateway、Executor、MCP 和前端各自通过错误文案猜测状态：
+
+```ts
+type ToolResult<T> =
+  | { ok: true; status: 'succeeded'; data: T }
+  | {
+      ok: false;
+      status: 'invalid_arguments' | 'blocked' | 'denied' | 'failed' | 'cancelled';
+      error: {
+        code: ToolErrorCode;
+        message: string;
+        details?: Record<string, unknown>;
+      };
+      data?: T;
+    };
+```
+
+错误码至少包括：`INVALID_ARGUMENTS`、`BLOCKED_BY_POLICY`、`APPROVAL_REQUIRED`、`APPROVAL_DENIED`、`APPROVAL_MISMATCH`、`UNSUPPORTED_TOOL`、`TOOL_DISABLED`、`NOT_FOUND`、`PATH_OUTSIDE_WORKSPACE`、`CONFLICT`、`CANCELLED`、`EXECUTION_FAILED`。
+
+状态映射固定如下：
+
+| `ToolResult.status` | 前端状态 | 中文展示 |
+|---|---|---|
+| `succeeded` | `succeeded` | 成功 |
+| `invalid_arguments` | `invalid` | 参数错误 |
+| `blocked` | `blocked` | 已阻止 |
+| `denied` | `denied` | 已拒绝 |
+| `failed` | `failed` | 失败 |
+| `cancelled` | `cancelled` | 已取消 |
+
+兼容层可以归一化旧结果，但新失败路径必须直接产生带 `status`、`code` 和 `message` 的结构化结果。成功工具的既有业务 payload 可以保留，由统一归一化函数在消费边界包装为 `succeeded`，不强制一次性改写所有成功返回结构。模型参数校验失败属于 `INVALID_ARGUMENTS`，策略拒绝属于 `BLOCKED_BY_POLICY`，用户或审批系统明确拒绝属于 `APPROVAL_DENIED`，三者不得再合并成同一个“已拒绝”卡片。
+
+## 23. `read_file` 分段读取设计
+
+`read_file` 只读取工作区内文本文件的最新磁盘内容，公开输入为：
+
+```ts
+interface ReadFileInput {
+  path: string;
+  offset?: number; // 1-based，默认 1
+  limit?: number;  // 默认及最大 2000 行
+}
+```
+
+单次结果同时受 `2000` 行和 `50KB` 完整行输出限制。返回值至少包含 `path`、`content`、`start_line`、`end_line`、`total_lines`、`output_lines`、`output_bytes`、`truncated`，被截断时还必须返回 `truncation_reason` 与可直接用于下一次调用的 `next_offset`。`truncation_reason` 区分调用者请求的行数、默认行数硬限制和字节限制。
+
+读取时将 CRLF/CR 归一化为 LF 仅用于返回展示，不写回磁盘；文件末尾换行不额外计算为一个空逻辑行。不能为了满足字节上限返回半行：若起始行本身超过 `50KB`，返回结构化执行失败并建议缩小或改用其他受控方式检查。空文件是成功结果；offset 超出非空文件末尾是 `INVALID_ARGUMENTS`；不存在或不是普通文件是 `NOT_FOUND`；越过工作区或经符号链接逃逸是 `PATH_OUTSIDE_WORKSPACE`；含 NUL 的非文本内容明确拒绝，不将乱码伪装成成功文本。取消信号必须贯穿 Agent 调用边界，并返回 `CANCELLED`，不能在取消后把已读内容继续提交给模型。
+
+供文件 diff 使用的内部完整读取通道必须与模型可调用的分页读取分开，避免修改后 diff 只对比文件前 `2000` 行。
+
+## 24. `write_file` 安全设计
+
+`write_file` 只承担新建文件或调用者明确要求的整体覆盖；已有文件的局部修改仍优先使用 `patch_file`。它与结构化编辑共享以下安全边界：
+
+- 写入前解析并校验真实工作区路径，拒绝绝对路径、父目录逃逸和经符号链接越界。
+- 同一文件的检查与写入放在同一个串行临界区，避免并发调用互相覆盖中间状态；不同文件仍可并行。
+- 在目标目录内写入唯一临时文件，再使用原子 rename 替换目标；失败或取消时清理临时文件并保留原文件。
+- 仅在磁盘提交成功后更新 Workspace 内存树，不能先宣告成功再写盘。
+- 支持创建缺失的父目录；批准、取消信号和失败结果必须贯穿到真实写盘阶段。
+- 返回 created/updated 与真实操作级 diff，供实时与历史 modification 卡片一致展示。
+
+## 25. 模型接口与实现一致性约束
+
+工具 registry 是模型参数与描述的权威来源。`read_file`、`find`、`ls`、`list_workspace` 和 `grep` 的实现限制必须导出为共享常量，模型 schema、描述和契约测试从这些常量派生；不得在 prompt、Executor 或 MCP 中手写另一组默认值。
+
+契约测试至少逐项验证：顶层 schema 为 `object`、未知字段被拒绝、必填字段准确、数值上下限与实现一致、描述包含真实默认值和硬上限，以及经过 schema 接受的边界输入会按描述执行。`grep.context` 与 `grep.limit` 有意允许负值进入执行层再分别收敛到 `0` 和 `1`；schema 不得使用与该语义冲突的 `minimum`。任何参数或限制变更都必须同时修改实现常量、模型描述和测试。

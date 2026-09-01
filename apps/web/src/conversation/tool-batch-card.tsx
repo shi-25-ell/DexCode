@@ -8,13 +8,15 @@ const statusLabels = {
   running: '运行中',
   succeeded: '成功',
   warning: '部分失败',
+  invalid: '参数错误',
+  blocked: '已阻止',
   failed: '全部失败',
   denied: '已拒绝',
   cancelled: '已取消',
 } as const;
 
 const commandStatusLabels: Record<ToolPresentation['status'], string> = {
-  queued: '等待执行', running: '执行中', succeeded: '成功', failed: '失败', denied: '已拒绝', cancelled: '已取消',
+  queued: '等待执行', running: '执行中', succeeded: '成功', invalid: '参数错误', blocked: '已阻止', failed: '失败', denied: '已拒绝', cancelled: '已取消',
 };
 
 const approvalStatusLabels = {
@@ -47,7 +49,7 @@ export function ToolBatchCard({ batch }: { batch: ToolBatchPresentation }) {
   const [open, setOpen] = useState(false);
   const state = toolBatchStatus(batch);
   const Icon = batch.type === 'inspection' ? FolderSearch2 : batch.type === 'command' ? TerminalSquare : Files;
-  const failures = batch.members.filter((member) => member.status === 'failed');
+  const failures = batch.members.filter((member) => member.status === 'invalid' || member.status === 'blocked' || member.status === 'failed');
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen} className={`tool-card tool-batch-card ${state.status}`}>
       <Collapsible.Trigger className="tool-card-trigger" aria-label={`${batch.type === 'inspection' ? '检查文件' : batch.type === 'command' ? '执行命令' : '修改文件'}，展开批次详情`}>
@@ -62,9 +64,9 @@ export function ToolBatchCard({ batch }: { batch: ToolBatchPresentation }) {
           ) : null}
         </span>
         <span className={`tool-status ${state.status}`}>
-          {state.status === 'warning' || state.status === 'failed' ? <CircleAlert size={14} /> : null}
+          {state.status === 'warning' || state.status === 'invalid' || state.status === 'blocked' || state.status === 'failed' ? <CircleAlert size={14} /> : null}
           {statusLabels[state.status]}
-          {state.failed > 0 ? <b className="failure-badge">{state.failed} 项失败</b> : null}
+          {state.failed > 0 ? <b className="failure-badge">{state.failed} 项异常</b> : null}
         </span>
         <ChevronDown className={open ? 'chevron open' : 'chevron'} size={16} />
       </Collapsible.Trigger>

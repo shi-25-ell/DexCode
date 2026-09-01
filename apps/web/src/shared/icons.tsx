@@ -43,6 +43,8 @@ export const statusIcons = {
   queued: FolderSearch2,
   running: FolderSearch2,
   failed: CircleAlert,
+  invalid: CircleAlert,
+  blocked: CircleStop,
   denied: CircleStop,
   cancelled: CircleStop,
 };

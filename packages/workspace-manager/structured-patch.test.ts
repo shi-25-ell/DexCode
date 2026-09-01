@@ -15,6 +15,19 @@ test('workspace structured patch writes atomically and serializes concurrent edi
     await workspace.updateFile('src/new.ts', 'new file\n');
     assert.equal(await readFile(join(root, 'src', 'new.ts'), 'utf8'), 'new file\n');
     assert.deepEqual((await readdir(join(root, 'src'))).sort(), ['new.ts']);
+    const [firstWrite, secondWrite] = await Promise.all([
+      workspace.updateFile('serialized.txt', 'first\n'),
+      workspace.updateFile('serialized.txt', 'second\n'),
+    ]);
+    assert.equal(firstWrite.ok, true);
+    assert.equal(secondWrite.ok, true);
+    assert.equal(await readFile(join(root, 'serialized.txt'), 'utf8'), 'second\n');
+    assert.equal((await readdir(root)).some((name) => name.includes('.dexcode-') && name.endsWith('.tmp')), false);
+
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(() => workspace.updateFile('a.txt', 'must not commit', controller.signal), /Operation aborted/);
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'one\ntwo\n');
     const [first, second] = await Promise.all([
       workspace.patchFile({ path: 'a.txt', mode: 'targeted', edits: [{ old_text: 'one', new_text: 'ONE' }] }),
       workspace.patchFile({ path: 'a.txt', mode: 'targeted', edits: [{ old_text: 'two', new_text: 'TWO' }] }),

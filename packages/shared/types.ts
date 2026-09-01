@@ -261,7 +261,7 @@ export type ContextSummaryRecord = {
   artifactRefs: ContextArtifactRef[];
 };
 
-export type ToolViewStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
+export type ToolViewStatus = 'queued' | 'running' | 'succeeded' | 'invalid' | 'blocked' | 'failed' | 'denied' | 'cancelled';
 
 export type ToolPresentation = {
   callRef: string;

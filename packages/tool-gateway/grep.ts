@@ -4,6 +4,9 @@ import { basename, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { ensureRg, type EnsureRgOptions } from './managed-tools/ensure-rg.ts';
 import { resolveWorkspacePath } from './directory-walker.ts';
+import { GREP_LIMITS } from './tool-limits.ts';
+
+export { GREP_LIMITS } from './tool-limits.ts';
 
 export type GrepInput = {
   pattern: string;
@@ -31,10 +34,7 @@ export type GrepResult = {
 };
 
 type RawMatch = { absolutePath: string; line: number; text: string };
-const MAX_BYTES = 50 * 1024;
 const NOTICE_RESERVE_BYTES = 512;
-const MAX_LINE_CHARS = 500;
-const DEFAULT_LIMIT = 100;
 
 function terminate(child: { pid?: number; kill(): boolean | void }): void {
   if (process.platform === 'win32' && child.pid) {
@@ -48,8 +48,8 @@ function displayPath(searchPath: string, absolutePath: string, searchIsFile: boo
 
 function trimLine(line: string): { line: string; truncated: boolean } {
   const normalized = line.replace(/[\r\n]+$/g, '');
-  return normalized.length > MAX_LINE_CHARS
-    ? { line: `${normalized.slice(0, MAX_LINE_CHARS - 1)}…`, truncated: true }
+  return normalized.length > GREP_LIMITS.maxLineChars
+    ? { line: `${normalized.slice(0, GREP_LIMITS.maxLineChars - 1)}…`, truncated: true }
     : { line: normalized, truncated: false };
 }
 
@@ -63,8 +63,8 @@ export async function grepWorkspace(
   const searchPath = await resolveWorkspacePath(root, input.path ?? '.');
   const searchIsFile = (await stat(searchPath)).isFile();
   const executable = await ensureRg(options);
-  const limit = Math.max(1, Math.min(10_000, Math.floor(input.limit ?? DEFAULT_LIMIT)));
-  const context = Math.max(0, Math.min(20, Math.floor(input.context ?? 0)));
+  const limit = Math.max(1, Math.min(GREP_LIMITS.maxMatches, Math.floor(input.limit ?? GREP_LIMITS.defaultMatches)));
+  const context = Math.max(0, Math.min(GREP_LIMITS.maxContextLines, Math.floor(input.context ?? 0)));
   const args = ['--json', '--line-number', '--color=never', '--hidden'];
   if (input.ignoreCase) args.push('--ignore-case');
   if (input.literal) args.push('--fixed-strings');
@@ -126,7 +126,7 @@ export async function grepWorkspace(
     const trimmed = trimLine(value);
     linesTruncated ||= trimmed.truncated;
     const bytes = Buffer.byteLength(`${trimmed.line}\n`, 'utf8');
-    if (totalBytes + bytes > MAX_BYTES - NOTICE_RESERVE_BYTES) { outputTruncated = true; return false; }
+    if (totalBytes + bytes > GREP_LIMITS.maxBytes - NOTICE_RESERVE_BYTES) { outputTruncated = true; return false; }
     rendered.push(trimmed.line);
     totalBytes += bytes;
     return true;
@@ -163,8 +163,8 @@ export async function grepWorkspace(
   if (rendered.length === 0) rendered.push('No matches found');
   const notices: string[] = [];
   if (limitReached) notices.push(`match limit ${limit} reached; narrow path, glob, or pattern`);
-  if (outputTruncated) notices.push(`output truncated at ${MAX_BYTES} bytes`);
-  if (linesTruncated) notices.push(`lines longer than ${MAX_LINE_CHARS} characters were truncated`);
+  if (outputTruncated) notices.push(`output truncated at ${GREP_LIMITS.maxBytes} bytes`);
+  if (linesTruncated) notices.push(`lines longer than ${GREP_LIMITS.maxLineChars} characters were truncated`);
   if (notices.length > 0) rendered.push('', `[${notices.join('. ')}]`);
 
   return {
@@ -177,7 +177,7 @@ export async function grepWorkspace(
     output: rendered.join('\n'),
     details: {
       ...(limitReached ? { matchLimitReached: limit } : {}),
-      truncation: { truncated: outputTruncated, maxBytes: MAX_BYTES },
+      truncation: { truncated: outputTruncated, maxBytes: GREP_LIMITS.maxBytes },
       linesTruncated,
     },
   };

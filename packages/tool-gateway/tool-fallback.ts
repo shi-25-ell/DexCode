@@ -1,3 +1,5 @@
+import { normalizeToolResult } from '../shared/tool-result.ts';
+
 export type ToolFallbackHint = {
   message: string;
   suggestTools?: string[];
@@ -5,7 +7,8 @@ export type ToolFallbackHint = {
 
 export function getToolFallback(toolName: string, result: unknown): ToolFallbackHint | null {
   const r = result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
-  const errorText = String(r?.error ?? r?.stderr ?? '').toLowerCase();
+  const normalized = normalizeToolResult(result);
+  const errorText = String(normalized.ok ? r?.stderr ?? '' : normalized.error.message).toLowerCase();
 
   switch (toolName) {
     case 'patch_file':
@@ -40,8 +43,8 @@ export function getToolFallback(toolName: string, result: unknown): ToolFallback
         suggestTools: ['find', 'ls', 'read_file'],
       };
     default:
-      if (r?.error) {
-        return { message: `工具 ${toolName} 失败：${r.error}`, suggestTools: ['read_file', 'ls'] };
+      if (!normalized.ok) {
+        return { message: `工具 ${toolName} 失败：${normalized.error.message}`, suggestTools: ['read_file', 'ls'] };
       }
       return null;
   }
@@ -50,13 +53,7 @@ export function getToolFallback(toolName: string, result: unknown): ToolFallback
 export function enrichToolResult(toolName: string, result: unknown): unknown {
   if (!result || typeof result !== 'object') return result;
   const r = result as Record<string, unknown>;
-  const failed =
-    Boolean(r.error) ||
-    r.ok === false ||
-    r.status === 'failed' ||
-    r.status === 'denied' ||
-    r.status === 'blocked' ||
-    r.action === 'patch_failed';
+  const failed = !normalizeToolResult(result).ok;
 
   if (!failed) return result;
 

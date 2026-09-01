@@ -9,7 +9,7 @@ export const TOOL_TEST_PRESETS: Record<string, Record<string, unknown>> = {
   find: { pattern: '*.json' },
   ls: { path: '.' },
   list_workspace: { depth: 2 },
-  read_file: { path: 'package.json' },
+  read_file: { path: 'package.json', offset: 1, limit: 200 },
   grep: { pattern: 'scripts', path: 'package.json', literal: true },
   run_command: { command: 'git status --short', timeout_ms: 30000 },
   patch_file: { path: 'package.json', mode: 'targeted', edits: [{ old_text: '"private": true', new_text: '"private": true' }] },
