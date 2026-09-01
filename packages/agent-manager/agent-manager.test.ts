@@ -78,9 +78,15 @@ test('Definition parser rejects unknown fields and workspace definitions overrid
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('child Agent definitions have bounded long-task budgets', () => {
-  assert.equal(BUILTIN_AGENT_DEFINITIONS.some((definition) => definition.name === 'general-purpose'), true);
+test('child Agent definitions have bounded capabilities and long-task budgets', () => {
+  const generalPurpose = BUILTIN_AGENT_DEFINITIONS.find((definition) => definition.name === 'general-purpose');
+  assert.deepEqual(generalPurpose?.toolPolicy.allow, ['read_file', 'find', 'ls', 'list_workspace', 'grep', 'write_file', 'patch_file']);
+  assert.equal(generalPurpose?.toolPolicy.allow?.includes('run_command'), false);
   assert.equal(BUILTIN_AGENT_DEFINITIONS.some((definition) => definition.name === 'assistant'), true);
+  for (const definition of BUILTIN_AGENT_DEFINITIONS.filter((item) => item.name !== 'general-purpose')) {
+    assert.equal(definition.toolPolicy.allow?.includes('write_file'), false);
+    assert.equal(definition.toolPolicy.allow?.includes('patch_file'), false);
+  }
   assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.maxModelTurns, 64);
   assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.modelRequestTimeoutMs, 300_000);
   assert.equal(BUILTIN_AGENT_DEFINITIONS[0]?.budget.maxTotalTokens, 1_500_000);

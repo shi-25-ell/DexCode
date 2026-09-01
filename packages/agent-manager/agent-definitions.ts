@@ -4,13 +4,14 @@ import { join, resolve } from 'node:path';
 import { assertValidAgentDefinition, type AgentContextMode, type AgentDefinition, type AgentIsolation } from './contracts.ts';
 
 const READONLY_TOOLS = ['read_file', 'find', 'ls', 'list_workspace', 'grep'];
+const FILE_WRITE_TOOLS = ['write_file', 'patch_file'];
 
 export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
   {
     name: 'general-purpose',
-    description: 'Default general-purpose child agent for arbitrary bounded delegated tasks.',
-    systemPrompt: 'Complete the assigned task as a general-purpose child agent. Use available read-only tools when needed and return a concise result to the parent agent.',
-    toolPolicy: { allow: [...READONLY_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
+    description: 'Default general-purpose child agent for bounded delegated tasks, including workspace file edits.',
+    systemPrompt: 'Complete the assigned task as a general-purpose child agent. Use available workspace tools when needed, edit files when the task requires it, and return a concise result to the parent agent.',
+    toolPolicy: { allow: [...READONLY_TOOLS, ...FILE_WRITE_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
     defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
     budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
     memoryPolicy: { read: true, write: false, automaticExtraction: false },
