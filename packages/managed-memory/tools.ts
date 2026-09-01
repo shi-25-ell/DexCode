@@ -76,8 +76,19 @@ export const MEMORY_TOOL_DEFINITIONS = [
           path: { type: 'string', description: TOPIC_PATH_DESCRIPTION, pattern: TOPIC_FILENAME_PATTERN_SOURCE },
           name: { type: 'string' }, description: { type: 'string' },
           type: { type: 'string', enum: [...MANAGED_MEMORY_TYPES] }, body: { type: 'string' },
-          indexTitle: { type: 'string' }, indexHook: { type: 'string' },
-          expectedDigest: { type: ['string', 'null'] }, operationId: { type: 'string' },
+          indexTitle: {
+            type: 'string', maxLength: 40,
+            description: 'Short MEMORY.md link title. Keep concise; the rendered index line has a hard 200-character limit.',
+          },
+          indexHook: {
+            type: 'string', maxLength: 60,
+            description: 'Short MEMORY.md retrieval hint. Put details in body; the rendered index line has a hard 200-character limit.',
+          },
+          expectedDigest: { type: ['string', 'null'] },
+          operationId: {
+            type: 'string',
+            description: 'Unique ID for this exact mutation attempt. Reuse only when retrying an identical request after an uncertain transport result; if any input changed or a prior attempt was rejected, use a new unique operationId.',
+          },
         },
         required: ['path', 'name', 'description', 'type', 'body', 'indexTitle', 'indexHook', 'expectedDigest', 'operationId'],
         additionalProperties: false,

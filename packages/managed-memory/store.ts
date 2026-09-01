@@ -234,10 +234,16 @@ export function createManagedMemoryStore(options: StoreOptions) {
   }
 
   function replay(operation: ManagedMemoryOperation): MemoryMutationResult {
+    const committed = operation.outcome === 'committed';
+    const reason = operation.reason ?? operation.outcome;
     return {
-      ok: operation.outcome === 'committed', mutationCommitted: operation.outcome === 'committed', action: operation.action as 'upsert' | 'remove',
+      ok: committed, mutationCommitted: committed, action: operation.action as 'upsert' | 'remove',
       path: operation.path ?? '', operationId: operation.operationId, ...(operation.afterDigest ? { digest: operation.afterDigest } : {}), replayed: true,
-      ...(operation.outcome !== 'committed' ? { error: operation.reason ?? operation.outcome } : {}),
+      ...(!committed ? {
+        code: operation.outcome === 'conflict' ? 'MEMORY_CONFLICT' as const : 'MEMORY_REJECTED' as const,
+        error: `${reason}. This operationId already records a failed attempt; use a new unique operationId after changing any input.`,
+        ...(operation.outcome === 'conflict' && operation.beforeDigest ? { latestDigest: operation.beforeDigest } : {}),
+      } : {}),
     };
   }
 

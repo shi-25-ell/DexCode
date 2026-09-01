@@ -35,13 +35,37 @@ test('memory_upsert contract makes the bare topic filename rule explicit to the 
   const definition = MEMORY_TOOL_DEFINITIONS.find((item) => item.function.name === 'memory_upsert');
   assert.ok(definition);
   const pathSchema = definition.function.parameters.properties.path as { description?: string; pattern?: string };
+  const titleSchema = definition.function.parameters.properties.indexTitle as { maxLength?: number };
+  const hookSchema = definition.function.parameters.properties.indexHook as { maxLength?: number };
+  const operationIdSchema = definition.function.parameters.properties.operationId as { description?: string };
   assert.equal(pathSchema.pattern, '^[a-z0-9][a-z0-9_-]{0,79}\\.md$');
   assert.match(pathSchema.description ?? '', /bare filename|裸文件名/i);
+  assert.equal(titleSchema.maxLength, 40);
+  assert.equal(hookSchema.maxLength, 60);
+  assert.match(operationIdSchema.description ?? '', /new unique.*changed|changed.*new unique/i);
   assert.match(buildMemoryPolicyPrompt(true), /bare filename|裸文件名/i);
   assert.throws(
     () => validateTopicPath('topics/coding-agent-project.md'),
     /bare filename.*directory prefixes.*topics\//i,
   );
+});
+
+test('replayed rejected operation tells the model to use a new operationId', async () => {
+  const value = await fixture();
+  try {
+    const rejected = await value.system.store.upsert({
+      ...upsertInput('op-rejected'),
+      indexTitle: 'x'.repeat(201),
+    });
+    assert.equal(rejected.code, 'MEMORY_REJECTED');
+
+    const replayed = await value.system.store.upsert(upsertInput('op-rejected'));
+    assert.equal(replayed.replayed, true);
+    assert.match(replayed.error ?? '', /new unique operationId/i);
+
+    const retried = await value.system.store.upsert(upsertInput('op-retry'));
+    assert.equal(retried.mutationCommitted, true);
+  } finally { await value.dispose(); }
 });
 
 test('store atomically upserts topic and index, replays operationId, and detects digest conflicts', async () => {
