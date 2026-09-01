@@ -847,12 +847,46 @@ export function createExecutor(
                   ...(typeof args.isolation === 'string' ? { isolation: args.isolation as 'shared' | 'worktree' } : {}),
                 }, caller);
               } else if (toolName === 'wait_agent') {
-                toolResult = await orchestration.wait({
+                const waitInput = {
                   agentIds: (args.agent_ids as unknown[]).map(String),
                   ...(typeof args.mode === 'string' ? { mode: args.mode as 'any' | 'all' } : {}),
                   ...(typeof args.block === 'boolean' ? { block: args.block } : {}),
                   ...(typeof args.timeout_ms === 'number' ? { timeoutMs: args.timeout_ms } : {}),
-                }, caller);
+                };
+                if (args.block === true && options.commandSource?.waitForSteer) {
+                  const waitController = new AbortController();
+                  const abortWait = () => waitController.abort(signal.reason ?? 'Main Run ended');
+                  if (signal.aborted) abortWait();
+                  else signal.addEventListener('abort', abortWait, { once: true });
+                  try {
+                    const waitPromise = orchestration.wait(waitInput, { ...caller, signal: waitController.signal });
+                    const interruptionPromise = options.commandSource.waitForSteer({ sessionId, runId, signal: waitController.signal });
+                    const first = await Promise.race([
+                      waitPromise.then((result) => ({ kind: 'wait' as const, result })),
+                      interruptionPromise.then((reason) => ({ kind: 'interruption' as const, reason })),
+                    ]);
+                    if (first.kind === 'wait') {
+                      toolResult = first.result;
+                      waitController.abort('Agent wait settled');
+                    } else {
+                      waitController.abort(first.reason === 'steer' ? 'Steer is pending' : 'Main Run ended');
+                      const interrupted = await waitPromise;
+                      toolResult = first.reason === 'steer'
+                        ? {
+                            ...(interrupted && typeof interrupted === 'object' ? interrupted as Record<string, unknown> : { result: interrupted }),
+                            status: 'interrupted',
+                            code: 'steer_pending',
+                            wait_cancelled: true,
+                            message: 'Foreground Agent wait yielded because a user Steer is pending. The Main Run and Child Runs remain active; handle the Steer before deciding whether to wait again.',
+                          }
+                        : interrupted;
+                    }
+                  } finally {
+                    signal.removeEventListener('abort', abortWait);
+                  }
+                } else {
+                  toolResult = await orchestration.wait(waitInput, caller);
+                }
               } else if (toolName === 'followup_agent') {
                 toolResult = await orchestration.followup({ agentId: String(args.agent_id), task: String(args.task) }, caller);
               } else {

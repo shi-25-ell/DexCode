@@ -292,7 +292,7 @@ export const CONTEXT_TOOL_DEFINITIONS = [
   },
 ];
 
-const SPAWN_AGENT_DESCRIPTION = `Start a persistent child agent asynchronously for a bounded task. The child always runs in the background: do not immediately call blocking wait_agent and do not poll it. Continue independent work; completion is delivered automatically in a later model turn. Use context_mode=fresh for self-contained work that does not need the current conversation; use context_mode=fork when the child needs a bounded snapshot of the main agent's current context. A fork is copied once and parent and child continue independently. Omit context_mode to use the selected agent definition's default. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`;
+const SPAWN_AGENT_DESCRIPTION = `Start a persistent child agent asynchronously for a bounded task. After spawning, choose the coordination mode that fits the task: use wait_agent with block=true for a foreground synchronization barrier when the current user request depends on the child result, or continue independent work and finish the current Main Run for background delivery. Foreground waits yield when a user Steer arrives; background completions are delivered automatically in a later Main Run. Do not tight-poll. Use context_mode=fresh for self-contained work that does not need the current conversation; use context_mode=fork when the child needs a bounded snapshot of the main agent's current context. A fork is copied once and parent and child continue independently. Omit context_mode to use the selected agent definition's default. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`;
 const CONTEXT_MODE_DESCRIPTION = "Optional context strategy. fresh starts from the child agent's own system, workspace, memory, and task context without the main conversation. fork additionally copies a bounded snapshot of the main agent's current context; use it when prior discussion or findings are needed. The snapshot is copied once, so parent and child continue independently. Omit to use the selected agent definition's default.";
 
 export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
@@ -316,7 +316,7 @@ export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
     type: 'function' as const,
     function: {
       name: 'wait_agent',
-      description: 'Inspect current child-agent Run status without polling. block defaults to false and returns immediately. Use block=true only for an explicit synchronization barrier; normal completions are delivered automatically to a later model turn. Cancelling this Main Run only cancels the wait, never the child.',
+      description: 'Inspect current child-agent Run status or explicitly wait in the foreground. block defaults to false and returns immediately. Use block=true for a synchronization barrier when this Main Run needs the result. A foreground wait yields early when a user Steer arrives: only the wait is cancelled, while the Main Run and Child Runs remain active; handle the Steer, then decide whether to wait again. A timeout is normal. Do not tight-poll. If the Main Run ends instead, Child completion is delivered automatically in a later Main Run.',
       parameters: {
         type: 'object', additionalProperties: false, required: ['agent_ids'],
         properties: {
@@ -332,7 +332,7 @@ export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
     type: 'function' as const,
     function: {
       name: 'followup_agent',
-      description: 'Start a new Run for an existing idle child agent using its retained conversation and policy snapshot.',
+      description: 'Start a new asynchronous Run for an existing idle child agent using its retained conversation and policy snapshot. Then choose foreground wait_agent(block=true) or background delivery using the same task-dependent coordination rule as spawn_agent.',
       parameters: { type: 'object', additionalProperties: false, required: ['agent_id', 'task'], properties: { agent_id: { type: 'string' }, task: { type: 'string', minLength: 1 } } },
     },
   },

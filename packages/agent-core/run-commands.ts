@@ -7,6 +7,11 @@ export type RunCommandDecision =
   | { action: 'stop' };
 
 export interface RunCommandSource {
+  waitForSteer?(input: {
+    sessionId: string;
+    runId: string;
+    signal: AbortSignal;
+  }): Promise<'steer' | 'closed'>;
   atSafeBoundary(input: {
     sessionId: string;
     runId: string;

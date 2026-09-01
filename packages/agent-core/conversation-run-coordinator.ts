@@ -56,6 +56,7 @@ type ActiveConversationRun = {
   phase: ActiveRunPhase;
   abortController: AbortController;
   sink: EventSink;
+  steerWaiters: Set<(reason: 'steer' | 'closed') => void>;
   stoppedFor?: QueuePauseReason;
 };
 
@@ -226,9 +227,14 @@ export function createConversationRunCoordinator(dependencies: {
     activeByRunId.set(handle.runId, handle);
   }
 
+  function settleSteerWaiters(handle: ActiveConversationRun, reason: 'steer' | 'closed') {
+    for (const settle of [...handle.steerWaiters]) settle(reason);
+  }
+
   function unregister(handle: ActiveConversationRun) {
     if (activeBySessionId.get(handle.sessionId) === handle) activeBySessionId.delete(handle.sessionId);
     if (activeByRunId.get(handle.runId) === handle) activeByRunId.delete(handle.runId);
+    settleSteerWaiters(handle, 'closed');
     handle.phase = 'terminal';
   }
 
@@ -273,6 +279,39 @@ export function createConversationRunCoordinator(dependencies: {
 
   function commandSource(handle: ActiveConversationRun): RunCommandSource {
     return {
+      async waitForSteer(input) {
+        let waiting: Promise<'steer' | 'closed'> = Promise.resolve('closed');
+        await withSessionLock(handle.sessionId, async () => {
+          if (
+            input.signal.aborted
+            || activeBySessionId.get(handle.sessionId) !== handle
+            || input.runId !== handle.runId
+            || handle.phase === 'closing'
+            || handle.phase === 'stopping'
+            || handle.phase === 'terminal'
+          ) return;
+          const queue = await repository.getQueue(handle.sessionId);
+          if (queue.pending.some((item) => item.delivery === 'steer' && item.targetRunId === handle.runId)) {
+            waiting = Promise.resolve('steer');
+            return;
+          }
+          waiting = new Promise<'steer' | 'closed'>((resolve) => {
+            let settled = false;
+            const finish = (reason: 'steer' | 'closed') => {
+              if (settled) return;
+              settled = true;
+              handle.steerWaiters.delete(finish);
+              input.signal.removeEventListener('abort', onAbort);
+              resolve(reason);
+            };
+            const onAbort = () => finish('closed');
+            handle.steerWaiters.add(finish);
+            input.signal.addEventListener('abort', onAbort, { once: true });
+            if (input.signal.aborted) finish('closed');
+          });
+        });
+        return waiting;
+      },
       atSafeBoundary(input) {
         return withSessionLock(handle.sessionId, async () => {
           if (activeBySessionId.get(handle.sessionId) !== handle || input.runId !== handle.runId || handle.phase === 'stopping' || handle.phase === 'terminal') {
@@ -358,6 +397,7 @@ export function createConversationRunCoordinator(dependencies: {
         phase: 'accepting_commands',
         abortController: new AbortController(),
         sink,
+        steerWaiters: new Set(),
       };
       if (chain.stoppedFor) {
         handle.phase = 'stopping';
@@ -498,6 +538,7 @@ export function createConversationRunCoordinator(dependencies: {
       if (queued.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: input.sessionId, runId: handle?.runId, itemId: queued.item.itemId, operationId: input.operationId });
       observe({ metric: 'queue.pending.count', value: (await repository.getQueue(input.sessionId)).pending.length, sessionId: input.sessionId, runId: handle?.runId });
       handle?.sink({ type: 'queue_item_added', sessionId: input.sessionId, item: queued.item, sessionRevision: queued.sessionRevision });
+      if (steerTarget) settleSteerWaiters(steerTarget, 'steer');
       if (input.delivery !== 'steer' || steerTarget) {
         return steerTarget
           ? { outcome: 'steered', item: queued.item, targetRunId: steerTarget.runId, sessionRevision: queued.sessionRevision }
@@ -525,7 +566,10 @@ export function createConversationRunCoordinator(dependencies: {
         const result = await repository.promoteQueueItem(command);
         observe({ metric: 'queue.promote.count', value: 1, sessionId: command.sessionId, runId: steerTarget.runId, itemId: command.itemId, operationId: command.operationId, outcome: result.outcome });
         if ('replayed' in result && result.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: command.sessionId, runId: steerTarget.runId, itemId: command.itemId, operationId: command.operationId });
-        if (result.outcome === 'steered') queueUpdated(steerTarget.sink, command.sessionId, result.item, result.sessionRevision);
+        if (result.outcome === 'steered') {
+          queueUpdated(steerTarget.sink, command.sessionId, result.item, result.sessionRevision);
+          settleSteerWaiters(steerTarget, 'steer');
+        }
         return result;
       }
       if (command.type === 'cancel') {

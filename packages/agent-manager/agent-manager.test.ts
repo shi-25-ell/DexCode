@@ -128,7 +128,10 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     const missing = await manager.spawn({ task: 'hello', agent: 'greeter' }, caller('spawn-missing')) as { code: string; message: string };
     assert.equal(missing.code, 'definition_not_found');
     assert.match(missing.message, /Available agents: assistant, general-purpose, researcher, reviewer/);
-    const first = await manager.spawn({ task: 'one' }, caller('spawn-1')) as { agent_id: string };
+    const first = await manager.spawn({ task: 'one' }, caller('spawn-1')) as { agent_id: string; message: string; asynchronous: boolean; background?: boolean };
+    assert.equal(first.asynchronous, true);
+    assert.equal(first.background, undefined);
+    assert.match(first.message, /foreground wait_agent\(block=true\).*background completion/i);
     const firstDetail = await manager.detail(sessionId, first.agent_id);
     assert.equal(firstDetail?.agent.definitionName, 'general-purpose');
     assert.deepEqual(firstDetail?.tools, []);
@@ -142,17 +145,25 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     const waited = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all', block: true, timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[]; timed_out: boolean };
     assert.equal(waited.timed_out, false);
     assert.equal(immediate.completed.length + waited.completed.length, 2);
-    const inbox = await store.pendingNotifications(sessionId);
-    assert.equal(inbox.length, 2);
-    assert.ok(inbox.every((item) => item.delegationGroupId === 'group-1'));
-    const followup = await manager.followup({ agentId: first.agent_id, task: 'three' }, caller('followup-1')) as { agent_run_id: string };
+    assert.deepEqual(await store.pendingNotifications(sessionId), []);
+    const deliveredInbox = (await store.load(sessionId, false))!.inbox;
+    assert.equal(deliveredInbox.length, 2);
+    assert.ok(deliveredInbox.every((item) => item.delegationGroupId === 'group-1' && item.status === 'consumed' && item.consumedByRunId === 'main-run'));
+    const followup = await manager.followup({ agentId: first.agent_id, task: 'three' }, caller('followup-1')) as { agent_run_id: string; asynchronous: boolean; background?: boolean };
     assert.match(followup.agent_run_id, /^agent-run-/);
+    assert.equal(followup.asynchronous, true);
+    assert.equal(followup.background, undefined);
     const followupRun = (await manager.detail(sessionId, first.agent_id))?.runs.at(-1);
     assert.equal(followupRun?.trigger, 'followup');
     assert.equal(followupRun?.invokedByTurn, 1);
     assert.equal(followupRun?.invokedByToolCallId, 'followup-1');
     assert.equal(followupRun?.delegationGroupId, 'group-1');
     await manager.wait({ agentIds: [first.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-2'));
+    const afterFollowupDelivery = (await store.load(sessionId, false))!;
+    const firstAgentNotifications = afterFollowupDelivery.inbox.filter((item) => item.agentId === first.agent_id);
+    assert.equal(firstAgentNotifications.length, 2);
+    assert.deepEqual(firstAgentNotifications.map((item) => item.agentRunId), [firstRun!.agentRunId, followup.agent_run_id]);
+    assert.ok(firstAgentNotifications.every((item) => item.status === 'consumed' && item.consumedByRunId === 'main-run'));
     const slow = await manager.spawn({ task: 'slow', agent: 'researcher' }, caller('spawn-3')) as { agent_id: string };
     const waitAbort = new AbortController();
     const cancelledWait = manager.wait(
@@ -168,6 +179,14 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     await manager.wait({ agentIds: [slow.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-4'));
     assert.deepEqual(completedInputs.sort(), ['after-stop', 'one', 'three', 'two'].sort());
     assert.equal((await manager.detail(sessionId, first.agent_id))?.runs.length, 2);
+    const background = await manager.spawn(
+      { task: 'background' },
+      { ...caller('spawn-background'), callerRunId: 'main-background' },
+    ) as { agent_id: string };
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const pendingBackground = await store.pendingNotifications(sessionId);
+    assert.equal(pendingBackground.length, 1);
+    assert.equal(pendingBackground[0]?.agentId, background.agent_id);
   } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }); }
 });
 

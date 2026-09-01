@@ -104,6 +104,47 @@ test('Coordinator promotes and consumes Steer in the active Run without starting
   }
 });
 
+test('Coordinator wakes a foreground Agent wait when Steer arrives', async () => {
+  const repository = createSessionRepository({ projectId: `test-coordinator-wait-steer-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const waitEntered = deferred();
+    const agent = {
+      async runTask(sessionId: string, prompt: string, _selectedFile: string | null, _onEvent: (event: AgentEvent) => void, _hooks: unknown, options: any) {
+        await repository.beginRun({ sessionId, runId: options.runId, userMessage: { role: 'user', content: prompt }, context });
+        const interrupted = options.commandSource.waitForSteer({ sessionId, runId: options.runId, signal: options.signal });
+        waitEntered.release();
+        assert.equal(await interrupted, 'steer');
+        const decision = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 2, wouldNaturallyComplete: false });
+        assert.equal(decision.action, 'continue');
+        assert.equal(decision.directive, 'answer me while waiting');
+        const finish = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 1, wouldNaturallyComplete: true });
+        assert.equal(finish.action, 'finish');
+        const value = terminal(options.runId, prompt);
+        await repository.finishRun({ sessionId, report: value.report, summary: value.summary });
+        return value.summary;
+      },
+    };
+    const coordinator = createConversationRunCoordinator({ repository, resolveEnvironment: async () => ({ agent, context }), createHooks: () => ({}) });
+    const running = coordinator.start({ sessionId: session.sessionId, runId: 'run-wait-steer', prompt: 'delegate and wait', prestarted: false }, () => {});
+    await waitEntered.promise;
+    const outcome = await coordinator.submitDuringRun({
+      sessionId: session.sessionId,
+      content: 'answer me while waiting',
+      delivery: 'steer',
+      expectedRunId: 'run-wait-steer',
+      operationId: 'steer-wakes-wait',
+    });
+    assert.equal(outcome.outcome, 'steered');
+    await running;
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.deepEqual(loaded?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['delegate and wait', 'answer me while waiting']);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('Coordinator accepts Steer while approval is pending and consumes it after approval settles', async () => {
   const repository = createSessionRepository({ projectId: `test-coordinator-approval-steer-${crypto.randomUUID()}` });
   const projectDir = dirname(repository.sessionsDir);

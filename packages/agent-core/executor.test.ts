@@ -113,6 +113,12 @@ function prepared(input: PrepareContextInput): PreparedContext {
   };
 }
 
+function deferred() {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
 function preparedWithActivity(input: PrepareContextInput, summarized: boolean): PreparedContext {
   const base = prepared(input);
   const activity: NonNullable<PreparedContext['activity']> = {
@@ -235,7 +241,59 @@ test('orchestration tools receive immutable caller context and stay out of ordin
   assert.equal(spawn.function.parameters.properties.agent.default, 'general-purpose');
   assert.match(spawn.function.parameters.properties.agent.description ?? '', /Omit to use general-purpose/);
   assert.match(spawn.function.description ?? '', /fresh.*self-contained.*fork.*bounded snapshot.*continue independently/i);
+  assert.match(spawn.function.description ?? '', /block=true.*foreground.*background delivery/i);
   assert.match(spawn.function.parameters.properties.context_mode.description ?? '', /fresh.*without the main conversation.*fork.*current context.*definition's default/i);
+  const wait = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'wait_agent') as { function: { description?: string } };
+  assert.match(wait.function.description ?? '', /foreground.*Steer.*only the wait is cancelled.*Child Runs remain active/i);
+});
+
+test('foreground wait_agent yields promptly to Steer without cancelling Main or Child', async () => {
+  const { host } = toolHost();
+  const waitEntered = deferred();
+  const steerArrived = deferred();
+  let waitCancelled = false;
+  const orchestration = {
+    spawn: async () => ({}),
+    wait: async (_input: unknown, caller: { signal?: AbortSignal }) => {
+      waitEntered.release();
+      await Promise.race([
+        new Promise<void>((resolve) => caller.signal?.addEventListener('abort', () => { waitCancelled = true; resolve(); }, { once: true })),
+        new Promise<void>((resolve) => setTimeout(resolve, 250)),
+      ]);
+      return { status: 'running', cancelled: waitCancelled, running: [{ agent_id: 'agent-a' }] };
+    },
+    followup: async () => ({}),
+    stop: async () => ({}),
+  };
+  let boundaries = 0;
+  const commandSource = {
+    async waitForSteer() { await steerArrived.promise; return 'steer' as const; },
+    async atSafeBoundary() {
+      boundaries += 1;
+      return boundaries === 1
+        ? { action: 'continue' as const, steer: { role: 'user' as const, content: 'answer now' }, itemId: 'steer-1', directive: 'answer now' }
+        : { action: 'finish' as const };
+    },
+  };
+  const model = scriptedModel([
+    { content: '', reasoning: '', toolCalls: [{ id: 'wait-foreground', name: 'wait_agent', arguments: { agent_ids: ['agent-a'], mode: 'all', block: true, timeout_ms: 60_000 } }], finishReason: 'tool_calls' },
+    { content: 'answered during wait', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ]);
+  const startedAt = Date.now();
+  const running = createExecutor(host, undefined, undefined, orchestration).runReActLoop(
+    model,
+    [{ role: 'user', content: 'delegate' }],
+    () => {},
+    undefined,
+    { runId: 'run-foreground-wait', sessionId: 'session-foreground-wait', commandSource },
+  );
+  await waitEntered.promise;
+  steerArrived.release();
+  const result = await running;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.finalContent, 'answered during wait');
+  assert.equal(waitCancelled, true);
+  assert.ok(Date.now() - startedAt < 200, 'Steer should interrupt the foreground wait instead of waiting for its timeout');
 });
 
 test('an orchestration circuit result terminates the Run without another model turn', async () => {

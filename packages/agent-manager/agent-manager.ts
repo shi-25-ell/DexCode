@@ -290,8 +290,8 @@ export function createAgentManager(options: {
     await options.store.createAgentRun(caller.sessionId, agent, run, `${caller.callerRunId}:${caller.toolCallId}`);
     launch(agent, run, [...agent.contextSeed, { role: 'user', content: input.task }]);
     return {
-      agent_id: agentId, agent_run_id: agentRunId, status: 'running', background: true,
-      message: 'Child agent is running in the background. Do not poll or immediately block with wait_agent. Continue independent work; completion will be delivered automatically in a later model turn.',
+      agent_id: agentId, agent_run_id: agentRunId, status: 'running', asynchronous: true,
+      message: 'Child agent started asynchronously. Choose foreground wait_agent(block=true) if this Main Run needs the result, or continue independent work and allow background completion delivery. Foreground waits yield to user Steer; do not tight-poll.',
     };
   }
 
@@ -325,8 +325,8 @@ export function createAgentManager(options: {
       const messages = next.conversations.find((item) => item.agentId === agent.agentId)?.messages ?? [{ role: 'user', content: input.task }];
       launch(agent, run, messages);
       return {
-        agent_id: agent.agentId, agent_run_id: run.agentRunId, status: 'running', background: true,
-        message: 'Child agent follow-up is running in the background. Do not poll or immediately block with wait_agent. Completion will be delivered automatically.',
+        agent_id: agent.agentId, agent_run_id: run.agentRunId, status: 'running', asynchronous: true,
+        message: 'Child agent follow-up started asynchronously. Choose foreground wait_agent(block=true) if this Main Run needs the result, or allow background completion delivery. Foreground waits yield to user Steer; do not tight-poll.',
       };
     });
   }
@@ -382,19 +382,25 @@ export function createAgentManager(options: {
     }
     const latest = (await options.store.load(caller.sessionId, false))!;
     const guard = callerGuard(caller);
+    const newlyObservedRunIds: string[] = [];
     const completed = targets.flatMap(({ agent, run }) => {
       const current = latest.runs.find((item) => item.agentRunId === run.agentRunId)!;
       if (current.status === 'running' || guard.observedTerminalRuns.has(current.agentRunId)) return [];
       guard.observedTerminalRuns.add(current.agentRunId);
+      newlyObservedRunIds.push(current.agentRunId);
       return [{ agent_id: agent.agentId, ...resultView(current, agent.definitionSnapshot.budget.maxResultBytes ?? 64 * 1024) }];
     });
-    const running = targets.filter(({ run }) => latest.runs.find((item) => item.agentRunId === run.agentRunId)?.status === 'running').map(({ agent, run }) => ({ agent_id: agent.agentId, agent_run_id: run.agentRunId }));
+    const deliveredNotifications = latest.inbox.filter((item) => item.status === 'pending' && newlyObservedRunIds.includes(item.agentRunId));
+    const delivered = deliveredNotifications.length > 0
+      ? (await options.store.consumeNotifications(caller.sessionId, deliveredNotifications.map((item) => item.notificationId), caller.callerRunId))!
+      : latest;
+    const running = targets.filter(({ run }) => delivered.runs.find((item) => item.agentRunId === run.agentRunId)?.status === 'running').map(({ agent, run }) => ({ agent_id: agent.agentId, agent_run_id: run.agentRunId }));
     return {
       status: completed.length > 0 ? 'settled' : running.length > 0 ? 'running' : 'no_change',
       mode, block, timed_out: timedOut, cancelled, completed, running,
       settled: running.length === 0,
       ...(completed.length === 0 && running.length === 0 ? { code: 'already_observed', message: 'All selected Agent Runs are terminal and their results were already delivered to this caller. There is no new progress to wait for.' } : {}),
-      revision: latest.revision,
+      revision: delivered.revision,
     };
   }
 
