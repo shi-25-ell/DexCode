@@ -379,8 +379,20 @@ body.resizing { cursor: col-resize; user-select: none; }
 .composer-footer { display: flex; align-items: center; gap: 30px; min-height: 48px; padding: 0 15px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
 .follow-up-setting { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .follow-up-setting select { max-width: 118px; border: 0; background: transparent; color: #475569; font: inherit; outline: none; }
-.model-name, .context-usage { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
-.model-name i { width: 7px; height: 7px; border-radius: 2px; background: var(--purple); transform: rotate(45deg); }
+.model-switcher-trigger { display: inline-flex; min-width: 0; max-width: 220px; align-items: center; gap: 7px; padding: 5px 7px; border: 0; border-radius: 6px; background: transparent; color: #475569; font-size: 12px; cursor: pointer; }
+.model-switcher-trigger:hover, .model-switcher-trigger[data-state="open"] { background: var(--subtle); color: var(--text); }
+.model-switcher-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-switcher-trigger svg:first-child { color: var(--purple); }
+.model-switcher-menu { z-index: 100; width: 260px; padding: 6px; border: 1px solid var(--border); border-radius: 9px; background: #fff; box-shadow: 0 14px 36px rgba(15,23,42,0.16); }
+.model-switcher-heading { padding: 7px 9px 9px; }
+.model-switcher-heading strong { color: var(--text); font-size: 12px; }
+.model-switcher-menu [role="separator"] { height: 1px; margin: 0 4px 5px; background: var(--border); }
+.model-switcher-item { display: grid; grid-template-columns: minmax(0, 1fr) 16px; align-items: center; gap: 8px; min-height: 36px; padding: 0 8px 0 9px; border-radius: 6px; outline: none; color: #334155; font-size: 12px; cursor: pointer; }
+.model-switcher-item:hover, .model-switcher-item:focus { background: var(--subtle); }
+.model-switcher-item > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-switcher-check { display: grid; place-items: center; color: var(--blue); }
+.model-switcher-item svg { width: 14px; height: 14px; }
+.context-usage { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .context-usage { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .context-usage i { width: 32px; height: 4px; border-radius: 99px; background: #e5e7eb; overflow: hidden; }
 .context-usage i b { display: block; height: 100%; border-radius: inherit; background: var(--purple); transition: width 180ms ease; }

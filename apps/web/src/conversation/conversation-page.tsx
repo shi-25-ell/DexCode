@@ -30,6 +30,7 @@ import { AgentActivityCard, AgentDrawer } from './agent-activity';
 import { groupAgentTimeline } from './agent-timeline';
 import { ExecutionHistoryDisclosure } from './execution-history';
 import { abortStreamOnPageHide } from './stream-lifecycle';
+import { ModelSwitcher } from './model-switcher';
 
 type PageAction =
   | { type: 'hydrate'; snapshot: ConversationSnapshot }
@@ -864,7 +865,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
               : <button type="submit" className="send-button" disabled={!prompt.trim()} aria-label="发送"><ArrowUp size={18} /></button>}
           </div>
           <div className="composer-footer">
-            <span className="model-name"><i />{meta.data?.model.displayName ?? '模型信息加载中'}</span>
+            <ModelSwitcher actualModel={meta.data?.model.displayName} />
             {mainHasActiveWork ? <label className="follow-up-setting">
               后续消息
               <select
