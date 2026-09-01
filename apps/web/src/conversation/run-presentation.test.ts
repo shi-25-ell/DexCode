@@ -17,8 +17,8 @@ const snapshot: ConversationSnapshot = {
   contextUsage: { source: 'unknown', timing: 'next_request' },
 };
 
-function envelope(seq: number, event: RunEventPayload): RunEventEnvelope {
-  return { version: 2, runId: 'run-1', seq, at, event };
+function envelope(seq: number, event: RunEventPayload, eventAt = at): RunEventEnvelope {
+  return { version: 2, runId: 'run-1', seq, at: eventAt, event };
 }
 
 function started() {
@@ -38,11 +38,38 @@ describe('RunPresentation', () => {
     expect(draftText(state.activeRun?.assistantDraft ?? null)).toBe('answer');
   });
 
+  it('resumes the reasoning timer when reasoning output continues', () => {
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, { type: 'run_phase_changed', phase: 'thinking' }));
+    state = reduceRunEvent(state, envelope(4, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'think' }));
+    state = reduceRunEvent(state, envelope(5, { type: 'run_phase_changed', phase: 'answering' }));
+    expect(state.activeRun?.reasoningCompletedAt).toBe(at);
+
+    state = reduceRunEvent(state, envelope(6, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: ' more' }));
+    expect(state.activeRun?.reasoningCompletedAt).toBeUndefined();
+    expect(draftReasoning(state.activeRun?.assistantDraft ?? null)?.content).toBe('think more');
+  });
+
+  it('starts a fresh reasoning timer for each assistant message', () => {
+    const firstReasoningAt = '2026-08-31T00:00:01.000Z';
+    const secondReasoningAt = '2026-08-31T00:00:10.000Z';
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'first' }, firstReasoningAt));
+    state = reduceRunEvent(state, envelope(4, { type: 'assistant_message_started', turn: 2, messageId: 'message-2' }));
+    expect(state.activeRun?.reasoningStartedAt).toBeUndefined();
+
+    state = reduceRunEvent(state, envelope(5, { type: 'assistant_content_delta', messageId: 'message-2', contentIndex: 0, kind: 'reasoning', delta: 'second' }, secondReasoningAt));
+    expect(state.activeRun?.reasoningStartedAt).toBe(secondReasoningAt);
+  });
+
   it('clears a streamed draft before an output-limit retry', () => {
     let state = started();
-    state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 1, kind: 'text', delta: 'discarded' }));
-    state = reduceRunEvent(state, envelope(4, { type: 'assistant_message_reset', messageId: 'message-1' }));
+    state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'discarded reasoning' }));
+    state = reduceRunEvent(state, envelope(4, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 1, kind: 'text', delta: 'discarded' }));
+    state = reduceRunEvent(state, envelope(5, { type: 'assistant_message_reset', messageId: 'message-1' }));
     expect(draftText(state.activeRun?.assistantDraft ?? null)).toBe('');
+    expect(state.activeRun?.reasoningStartedAt).toBeUndefined();
+    expect(state.activeRun?.reasoningCompletedAt).toBeUndefined();
   });
 
   it('uses a complete committed message to repair missing deltas without ending a tool Run', () => {

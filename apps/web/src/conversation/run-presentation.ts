@@ -274,10 +274,11 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
     };
   }
   if (event.type === 'assistant_message_started') {
+    const { reasoningStartedAt: _previousReasoningStartedAt, reasoningCompletedAt: _previousReasoningCompletedAt, ...activeWithoutReasoningTime } = active;
     return {
       ...state,
       activeRun: {
-        ...active,
+        ...activeWithoutReasoningTime,
         assistantDraft: { messageId: event.messageId, turn: event.turn, blocks: {}, committed: false, hasToolCalls: false },
         activityOrder: appendActivity(active, { kind: 'assistant', messageId: event.messageId }),
       },
@@ -298,7 +299,7 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
       ...state,
       activeRun: {
         ...active,
-        ...(event.kind === 'reasoning' && !active.reasoningStartedAt ? { reasoningStartedAt: envelope.at } : {}),
+        ...(event.kind === 'reasoning' ? { reasoningStartedAt: active.reasoningStartedAt ?? envelope.at, reasoningCompletedAt: undefined } : {}),
         ...(event.kind !== 'reasoning' && active.reasoningStartedAt && !active.reasoningCompletedAt ? { reasoningCompletedAt: envelope.at } : {}),
         assistantDraft: { ...active.assistantDraft, blocks: { ...active.assistantDraft.blocks, [event.contentIndex]: block } },
       },
@@ -306,10 +307,11 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
   }
   if (event.type === 'assistant_message_reset') {
     if (!active.assistantDraft || active.assistantDraft.messageId !== event.messageId) return { ...state, needsResync: true };
+    const { reasoningStartedAt: _previousReasoningStartedAt, reasoningCompletedAt: _previousReasoningCompletedAt, ...activeWithoutReasoningTime } = active;
     return {
       ...state,
       activeRun: {
-        ...active,
+        ...activeWithoutReasoningTime,
         assistantDraft: { ...active.assistantDraft, blocks: {}, hasToolCalls: false },
       },
     };
