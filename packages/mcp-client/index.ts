@@ -60,7 +60,7 @@ type Transport = {
   listTools(): Promise<ExternalMcpTool[]>;
   callTool(toolName: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
   metadata(): { protocolVersion?: string; serverName?: string };
-  close(): void;
+  close(): Promise<void>;
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -116,7 +116,7 @@ function createHttpTransport(config: Extract<ExternalMcpServerConfig, { type: 'h
     metadata() {
       return {};
     },
-    close() {},
+    async close() {},
   };
 }
 
@@ -289,7 +289,7 @@ function createStdioTransport(config: Extract<ExternalMcpServerConfig, { type: '
     metadata() {
       return { protocolVersion: negotiatedProtocolVersion, serverName: connectedServerName };
     },
-    close() {
+    async close() {
       if (!child) return;
       const current = child;
       child = null;
@@ -297,8 +297,23 @@ function createStdioTransport(config: Extract<ExternalMcpServerConfig, { type: '
       negotiatedProtocolVersion = undefined;
       connectedServerName = undefined;
       rejectPending(new Error(`MCP stdio server closed: ${config.name}`));
-      current.stdin.end();
-      current.kill();
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        let forceTimer: ReturnType<typeof setTimeout> | undefined;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(graceTimer);
+          if (forceTimer) clearTimeout(forceTimer);
+          resolve();
+        };
+        current.on('exit', finish);
+        const graceTimer = setTimeout(() => {
+          current.kill();
+          forceTimer = setTimeout(finish, 1_000);
+        }, 1_000);
+        current.stdin.end();
+      });
     },
   };
 }
@@ -310,8 +325,7 @@ export function createExternalMcpRegistry(configs: ExternalMcpServerConfig[]) {
     status: ExternalMcpServerStatus;
   }> = [];
 
-  function addServer(config: ExternalMcpServerConfig) {
-    removeServer(config.name);
+  function attachServer(config: ExternalMcpServerConfig) {
     const transport = config.type === 'stdio' ? createStdioTransport(config) : createHttpTransport(config);
     transports.push({
       config,
@@ -320,17 +334,27 @@ export function createExternalMcpRegistry(configs: ExternalMcpServerConfig[]) {
     });
   }
 
-  function removeServer(name: string) {
+  async function removeServer(name: string) {
     const idx = transports.findIndex((t) => t.config.name === name);
     if (idx >= 0) {
-      transports[idx].transport.close();
-      transports.splice(idx, 1);
+      const [entry] = transports.splice(idx, 1);
+      await entry!.transport.close();
     }
+  }
+
+  async function addServer(config: ExternalMcpServerConfig) {
+    await removeServer(config.name);
+    attachServer(config);
+  }
+
+  async function close() {
+    const closing = transports.splice(0, transports.length);
+    await Promise.all(closing.map((entry) => entry.transport.close()));
   }
 
   // Initialize from constructor configs
   for (const config of configs) {
-    if (config.enabled !== false && config.name) addServer(config);
+    if (config.enabled !== false && config.name) attachServer(config);
   }
 
   return {
@@ -370,6 +394,7 @@ export function createExternalMcpRegistry(configs: ExternalMcpServerConfig[]) {
     },
     addServer,
     removeServer,
+    close,
     listServers() {
       return transports.map((t) => ({ ...t.config }));
     },

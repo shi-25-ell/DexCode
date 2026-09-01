@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 let initialized = false;
@@ -8,6 +9,9 @@ function respond(id, payload) {
 }
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+process.on('exit', () => {
+  if (process.env.MCP_EXIT_MARKER) writeFileSync(process.env.MCP_EXIT_MARKER, String(process.pid));
+});
 lines.on('line', (line) => {
   let message;
   try {

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createExternalMcpRegistry } from './index.ts';
@@ -33,7 +36,7 @@ test('stdio MCP completes initialization before listing and calling tools', asyn
     const result = await registry.callTool('mcp__fixture__echo', { text: 'ready' });
     assert.deepEqual(result, { content: [{ type: 'text', text: 'ready' }] });
   } finally {
-    registry.removeServer('fixture');
+    await registry.removeServer('fixture');
   }
 });
 
@@ -48,6 +51,30 @@ test('stdio MCP retains a server-scoped discovery error for the UI', async () =>
     assert.equal(status?.state, 'error');
     assert.match(status?.error ?? '', /ENOENT|not found/i);
   } finally {
-    registry.removeServer('missing');
+    await registry.removeServer('missing');
+  }
+});
+
+test('registry close waits for a running stdio MCP child to exit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dexcode-mcp-close-'));
+  const marker = join(root, 'exited.txt');
+  const registry = createExternalMcpRegistry([
+    {
+      name: 'fixture',
+      type: 'stdio',
+      command: process.execPath,
+      args: [fixture],
+      env: { MCP_EXIT_MARKER: marker },
+    },
+  ]);
+
+  try {
+    assert.equal((await registry.listTools()).length, 1);
+    await registry.close();
+    assert.match(await readFile(marker, 'utf8'), /^\d+$/);
+    assert.deepEqual(registry.listServers(), []);
+  } finally {
+    await registry.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

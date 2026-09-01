@@ -1513,9 +1513,9 @@ export function startRuntimeServer() {
         }
         const nextConfigs = servers.map((server) => ({ ...server }));
         await externalMcpConfigStore.write(nextConfigs);
-        for (const server of externalMcpRegistry.listServers()) externalMcpRegistry.removeServer(server.name);
+        for (const server of externalMcpRegistry.listServers()) await externalMcpRegistry.removeServer(server.name);
         externalMcpConfigs = nextConfigs;
-        for (const server of externalMcpConfigs) if (server.enabled !== false) externalMcpRegistry.addServer(server);
+        for (const server of externalMcpConfigs) if (server.enabled !== false) await externalMcpRegistry.addServer(server);
         sendJson(res, 200, { ok: true, servers: externalMcpConfigs });
       } catch (error: unknown) {
         sendJson(res, error instanceof HttpError ? error.status : 500, {
@@ -1530,7 +1530,7 @@ export function startRuntimeServer() {
       const name = decodeURIComponent(url.pathname.replace('/api/external-mcp/servers/', ''));
       const nextConfigs = externalMcpConfigs.filter((server) => server.name !== name);
       await externalMcpConfigStore.write(nextConfigs);
-      externalMcpRegistry.removeServer(name);
+      await externalMcpRegistry.removeServer(name);
       externalMcpConfigs = nextConfigs;
       sendJson(res, 200, { ok: true, servers: externalMcpConfigs });
       return;
@@ -2439,10 +2439,13 @@ export function startRuntimeServer() {
     if (shuttingDown) return;
     shuttingDown = true;
     (server as unknown as { close(callback?: () => void): void }).close();
-    await Promise.allSettled([...workspaceRuntimes.values()].flatMap((runtime) => [
-      runtime.agentManager.shutdown(),
-      runtime.managedMemory.drain({ timeoutMs: 60_000 }),
-    ]));
+    await Promise.allSettled([
+      externalMcpRegistry.close(),
+      ...[...workspaceRuntimes.values()].flatMap((runtime) => [
+        runtime.agentManager.shutdown(),
+        runtime.managedMemory.drain({ timeoutMs: 60_000 }),
+      ]),
+    ]);
   };
   const runtimeProcess = process as unknown as { once(event: 'SIGINT' | 'SIGTERM', listener: () => void): void };
   runtimeProcess.once('SIGINT', () => { void shutdown(); });
