@@ -251,3 +251,54 @@ Child 原先显式使用 `isolated` 上下文策略，绕过 Main 的四层上�
 - TypeScript 检查：通过。
 - Web 生产构建：通过。
 - `9c166d4`：拆分 Main 活动与会话活动语义，修复 Child-only 期间的新消息路由。
+
+## 10. 前台显式等待与后台执行的双模式协议
+
+### 10.1 模式选择
+
+`spawn_agent` 与 `followup_agent` 现在只负责异步启动一个 Child Run，不再把启动本身定义为后台模式。工具结果中的 `background: true` 已改为中性的 `asynchronous: true`，由 Main 根据当前任务依赖关系选择后续动作：
+
+- 当前用户请求依赖 Child 结果时，调用 `wait_agent(block=true)`，形成前台同步点。
+- 当前 Main 可以独立完成时，不调用阻塞等待并自然结束；Child 继续后台运行，结果由后续 Main Run 自动接收。
+
+工具说明同时保留禁止紧密轮询的约束。前台等待使用一次有界阻塞调用，后台执行不调用 wait；模型无需通过短周期 wait 模拟两种模式。
+
+### 10.2 Steer 可唤醒的前台等待
+
+前台 `wait_agent(block=true)` 现在同时等待 Child 进展与当前 Main Run 的持久 Steer。Coordinator 在 Steer 成功写入 Queue 后唤醒该 Run 的等待器；Executor 只取消当前 wait 的派生信号，并返回 `steer_pending`。Main Run 的主取消信号和 Child Run 信号都不受影响。
+
+等待让出后，原有安全边界消费持久 Steer，执行下一次模型请求。模型处理用户消息后可以继续等待同一 Child、给同一 Child 派发 follow-up，或按新指令改变计划。这样不需要等长 timeout 返回，也不会让 Steer 排在持续 wait 的结果之后。
+
+### 10.3 Child Run 级交付与 follow-up
+
+前台 wait 直接取得某个 Child Run 的终态时，会消费该 Run 对应的待处理完成通知，避免同一结果随后又触发一次自动 Main Run。去重键仍是唯一 `agentRunId`，不是 `agentId`：
+
+- 同一 Child 的初始 Run 完成后交付一次。
+- Main 对该 Child 调用 `followup_agent` 会创建新的 `agentRunId`。
+- follow-up Run 完成后生成独立通知，可以再次前台 wait 交付或后台自动交付。
+
+回归测试明确断言同一 Child 的初始请求与 follow-up 请求产生两个不同 Run、两条通知，并各自恰好消费一次。去重不会吞掉对同一 Child 的后续任务结果。
+
+### 10.4 真实宽屏回归
+
+前台会话：`session-48fe21e7-0645-451c-9a5f-7db1a5f8184f`。
+
+- Main Run `10f30e62-568b-47a0-b7a8-8adda88c320c` 创建 Child `agent-1b177c2e-fc7e-4b5f-8d6e-4c26ec434fc6`，随后真实调用 `wait_agent(block=true, mode=all, timeout_ms=60000)`。
+- 页面保持“当前运行”和“后续消息/调整当前方向”，用户显式选择 Steer 后发送测试消息。
+- Steer 入队后 14 ms，wait 返回 `steer_pending`；入队后 19 ms，Steer 已被同一 Main Run 消费。消息立即显示在 Transcript，Main 回复“Steer 已即时收到”，并重新等待同一 Child。
+- Main、Child 均未被 Steer 停止，也没有创建新 Child。该 Child 后续因自身长任务 token 上限结束，属于独立资源限制，不影响等待让出行为。
+
+后台会话：`session-401faa58-c7f4-45cb-8866-212d9936487b`。
+
+- 原 Main 创建一个 Child 后不调用 wait，自然结束；页面保持 `Agents 1/1` 与“停止全部运行”，恢复普通“发送”，不显示后续消息选择器。
+- Child 仍运行时提交新消息，250 ms 内消息已显示；页面没有 Queue 区域或中断恢复卡。
+- 新消息启动独立用户 Main Run，并返回“普通新 Main 已收到”，没有等待、停止或重复创建 Child。
+- 两个会话的浏览器控制台均无 error/warning；测试结束后通过会话级停止清理后台 Child。
+
+### 10.5 自动化验证
+
+- 后端测试：162/162 通过。
+- Web 测试：73/73 通过。
+- TypeScript 检查：通过。
+- Web 生产构建：通过。
+- `5a99be7`：实现可被 Steer 唤醒的前台等待、中性异步启动协议与 Child Run 级通知去重。
