@@ -185,6 +185,7 @@ type ActiveV2Chain = {
   lastSeqByRun: Map<string, number>;
   pendingByRun: Map<string, RunEventPayload[]>;
   finished: boolean;
+  stopOnDisconnect: boolean;
   done: Promise<void>;
   disconnectTimer?: ReturnType<typeof setTimeout>;
 };
@@ -833,7 +834,7 @@ function coordinatorEventToV2(chain: ActiveV2Chain, event: AgentEvent): void {
 }
 
 function scheduleV2Disconnect(chain: ActiveV2Chain): void {
-  if (chain.finished || chain.subscribers.size > 0 || chain.disconnectTimer) return;
+  if (!chain.stopOnDisconnect || chain.finished || chain.subscribers.size > 0 || chain.disconnectTimer) return;
   chain.disconnectTimer = setTimeout(() => {
     chain.disconnectTimer = undefined;
     if (!chain.finished && chain.subscribers.size === 0) {
@@ -849,7 +850,9 @@ async function attachActiveV2Run(chain: ActiveV2Chain, res: ServerResponse, afte
     chain.disconnectTimer = undefined;
   }
   const subscriber: V2Subscriber = {
-    writer: createBoundedRunSseWriter(res, () => { void conversationRunCoordinator.stop({ sessionId: chain.sessionId, reason: 'failure' }); }),
+    writer: createBoundedRunSseWriter(res, () => {
+      if (chain.stopOnDisconnect) void conversationRunCoordinator.stop({ sessionId: chain.sessionId, reason: 'failure' });
+    }),
     response: res,
     closed: false,
   };
@@ -872,7 +875,12 @@ async function attachActiveV2Run(chain: ActiveV2Chain, res: ServerResponse, afte
   res.end();
 }
 
-function createV2Chain(sessionId: string, initialRunId?: string, clientRequestId?: string): ActiveV2Chain {
+function createV2Chain(
+  sessionId: string,
+  initialRunId?: string,
+  clientRequestId?: string,
+  options: { stopOnDisconnect?: boolean } = {},
+): ActiveV2Chain {
   const chain: ActiveV2Chain = {
     sessionId,
     ...(initialRunId ? { initialRunId } : {}),
@@ -883,6 +891,7 @@ function createV2Chain(sessionId: string, initialRunId?: string, clientRequestId
     lastSeqByRun: new Map(),
     pendingByRun: new Map(),
     finished: false,
+    stopOnDisconnect: options.stopOnDisconnect ?? true,
     done: Promise.resolve(),
   };
   if (initialRunId) registerV2Run(chain, initialRunId);
@@ -908,7 +917,7 @@ async function startAgentInboxContinuation(sessionId: string): Promise<void> {
     if (tree?.control.halted || !tree?.inbox.some((item) => item.status === 'pending')) return;
     const runtime = await conversationRunCoordinator.snapshot(sessionId);
     if (runtime.activeRun) return;
-    const chain = createV2Chain(sessionId);
+    const chain = createV2Chain(sessionId, undefined, undefined, { stopOnDisconnect: false });
     chain.done = (async () => {
       try {
         await conversationRunCoordinator.resume(
@@ -1318,6 +1327,18 @@ export function startRuntimeServer() {
         ? await conversationRunCoordinator.stop({ sessionId: activeChain.sessionId, reason: 'user_stop' })
         : await conversationRunCoordinator.stop({ runId: runRef, reason: 'user_stop' });
       sendJson(res, 200, { ok: true, ...result });
+      return;
+    }
+
+    const runEventsMatch = /^\/api\/conversation-runs\/([^/]+)\/events$/.exec(url.pathname);
+    if (runEventsMatch && req.method === 'GET') {
+      const runId = decodeURIComponent(runEventsMatch[1]);
+      const afterSeqRaw = Number(url.searchParams.get('afterSeq') ?? '0');
+      const afterSeq = Number.isSafeInteger(afterSeqRaw) && afterSeqRaw >= 0 ? afterSeqRaw : 0;
+      const chain = activeV2Runs.get(runId) ?? completedV2Chains.get(runId);
+      if (!chain) throw new HttpError(404, '运行流不可用，请重新读取会话');
+      await loadScopedSession(chain.sessionId, conversationScope(url, requestWorkspaceScope));
+      await attachActiveV2Run(chain, res, afterSeq, runId);
       return;
     }
 

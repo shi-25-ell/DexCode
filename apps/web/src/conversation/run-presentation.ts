@@ -72,7 +72,7 @@ export type RunPresentation = {
 };
 
 function interruptedSnapshot(snapshot: ConversationSnapshot): ConversationItem[] {
-  if (snapshot.state !== 'running' && snapshot.state !== 'waiting') return snapshot.items;
+  if ((snapshot.state !== 'running' && snapshot.state !== 'waiting') || snapshot.activeRun) return snapshot.items;
   if (snapshot.items.some((item) => item.kind === 'error' && item.id === 'interrupted-live-run')) return snapshot.items;
   return [...snapshot.items, {
     id: 'interrupted-live-run',
@@ -83,10 +83,26 @@ function interruptedSnapshot(snapshot: ConversationSnapshot): ConversationItem[]
 }
 
 export function hydrateRunPresentation(snapshot: ConversationSnapshot): RunPresentation {
-  const cannotRecoverLiveRun = snapshot.state === 'running' || snapshot.state === 'waiting';
+  const cannotRecoverLiveRun = (snapshot.state === 'running' || snapshot.state === 'waiting') && !snapshot.activeRun;
+  const activeRun: ActiveRunView | null = snapshot.activeRun ? {
+    runId: snapshot.activeRun.runId,
+    startedAt: snapshot.updatedAt,
+    phase: snapshot.activeRun.phase === 'waiting_confirm'
+      ? 'waiting_approval'
+      : snapshot.activeRun.phase === 'closing' || snapshot.activeRun.phase === 'stopping'
+        ? 'finalizing'
+        : 'requesting_model',
+    phaseChangedAt: snapshot.updatedAt,
+    assistantDraft: null,
+    committedMessages: [],
+    toolsByCallId: {},
+    approvalsById: {},
+    contextsById: {},
+    activityOrder: [],
+  } : null;
   return {
     committedItems: interruptedSnapshot(snapshot),
-    activeRun: null,
+    activeRun,
     contextUsage: snapshot.contextUsage,
     title: snapshot.title,
     revision: snapshot.revision,

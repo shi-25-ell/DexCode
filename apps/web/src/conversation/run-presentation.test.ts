@@ -162,6 +162,17 @@ describe('RunPresentation', () => {
     expect(JSON.stringify(interrupted.committedItems)).not.toContain('reasoning');
   });
 
+  it('hydrates an authoritative background Main Run without reporting a recovered interruption', () => {
+    const active = hydrateRunPresentation({
+      ...snapshot,
+      state: 'running',
+      activeRun: { runId: 'background-run-1', phase: 'running' },
+    });
+    expect(active.status).toBe('running');
+    expect(active.activeRun?.runId).toBe('background-run-1');
+    expect(active.committedItems.some((item) => item.kind === 'error' && item.id === 'interrupted-live-run')).toBe(false);
+  });
+
   it.each(['aborted', 'failed', 'limited'] as const)('uses the authoritative snapshot for a %s terminal without inventing success', (status) => {
     let state = started();
     state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'ephemeral' }));

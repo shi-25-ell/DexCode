@@ -185,6 +185,59 @@ export async function streamConversation(input: {
   return { lastSeq, ...(runId ? { runId } : {}), terminal };
 }
 
+export async function streamExistingConversationRun(input: {
+  scope: ConversationScope;
+  runId: string;
+  signal: AbortSignal;
+  onEvent: (event: RunEventEnvelope) => void;
+}): Promise<void> {
+  const lastSeqByRun = new Map<string, number>();
+  let lastSeq = 0;
+  const maxReconnects = 3;
+  for (let reconnect = 0; reconnect <= maxReconnects; reconnect += 1) {
+    try {
+      let lastEventWasTerminal = false;
+      const response = await fetch(`/api/conversation-runs/${encodeURIComponent(input.runId)}/events?afterSeq=${lastSeq}&${scopeQuery(input.scope)}`, {
+        headers: {
+          Accept: 'text/event-stream',
+          'X-DexCode-Stream-Version': '2',
+          ...workspaceHeaders(scopeWorkspaceRef(input.scope)),
+        },
+        signal: input.signal,
+      });
+      if (!response.ok || !response.body) {
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(payload.error || `连接运行失败（${response.status}）`);
+      }
+      const parser = createParser({
+        maxBufferSize: 2 * 1024 * 1024,
+        onEvent(message) {
+          const envelope = parseRunEventEnvelope(JSON.parse(message.data));
+          const previousSeq = lastSeqByRun.get(envelope.runId) ?? 0;
+          if (envelope.seq <= previousSeq) return;
+          lastSeqByRun.set(envelope.runId, envelope.seq);
+          if (envelope.runId === input.runId) lastSeq = envelope.seq;
+          lastEventWasTerminal = envelope.event.type === 'run_finished' || envelope.event.type === 'stream_error';
+          input.onEvent(envelope);
+        },
+      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        parser.feed(decoder.decode(value, { stream: !done }));
+        if (done) break;
+      }
+      parser.reset({ consume: true });
+      if (lastEventWasTerminal) return;
+      throw new Error('运行流在终态前中断');
+    } catch (error) {
+      if (input.signal.aborted || reconnect === maxReconnects) throw error;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150 * (reconnect + 1)));
+    }
+  }
+}
+
 export async function enqueueQueuedMessage(input: {
   scope: ConversationScope;
   sessionId: string;

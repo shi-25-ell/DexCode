@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Square } from 'lucide-react';
 import { Fragment, type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getAgentTree, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopChildAgent, stopConversationRun, stopConversationSession, streamAgentActivity, streamConversation, streamQueueResume } from '../api';
+import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getAgentTree, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopChildAgent, stopConversationRun, stopConversationSession, streamAgentActivity, streamConversation, streamExistingConversationRun, streamQueueResume } from '../api';
 import type { RunEventEnvelope } from '../../../../packages/run-protocol/contracts';
 import { AppShell } from '../shell/app-shell';
 import type { AgentTreeSnapshot, ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueItem, QueueMutationOutcome } from '../types';
@@ -228,6 +228,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     setAtBottom(true);
 
     if (!materializedCurrentDraft && (previousIdentity !== conversationIdentity || !conversationRef)) {
+      controllerRef.current?.abort();
       activeStreamTokenRef.current = null;
       streamingRef.current = false;
       controllerRef.current = null;
@@ -261,6 +262,8 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       dispatch({ type: 'hydrate', snapshot: { ref: 'draft', title: '新会话', state: 'idle', updatedAt: '', items: [], queuedItems: [], queuePaused: false, revision: 0, contextUsage: { source: 'unknown', timing: 'next_request' } } });
     }
   }, [conversationIdentity, conversationRef, scopeIdentity]);
+
+  useEffect(() => () => controllerRef.current?.abort(), []);
 
   useEffect(() => {
     if (agents.data !== undefined) agentDispatch({ type: 'hydrate', tree: agents.data });
@@ -426,6 +429,33 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     dispatch({ type: 'run_event', event: envelope });
     if (presentSteersAfterEvent) presentPendingSteers();
   };
+
+  useEffect(() => {
+    const activeRunId = snapshot.data?.activeRun?.runId;
+    if (!conversationRef || !activeRunId || streamingRef.current) return;
+    const controller = new AbortController();
+    const streamToken: ConversationStreamToken = { identity: conversationIdentity };
+    activeStreamTokenRef.current = streamToken;
+    controllerRef.current = controller;
+    runIdRef.current = activeRunId;
+    streamingRef.current = true;
+    void streamExistingConversationRun({
+      scope,
+      runId: activeRunId,
+      signal: controller.signal,
+      onEvent: (envelope) => handleStreamEvent(envelope, streamToken),
+    }).catch(() => {
+      if (!controller.signal.aborted) void queryClient.invalidateQueries({ queryKey: ['conversation', scope, conversationRef] });
+    }).finally(() => {
+      if (activeStreamTokenRef.current !== streamToken) return;
+      activeStreamTokenRef.current = null;
+      controllerRef.current = null;
+      runIdRef.current = null;
+      streamingRef.current = false;
+      void queryClient.invalidateQueries({ queryKey: ['conversation', scope, conversationRef] });
+      void queryClient.invalidateQueries({ queryKey: ['conversations', scope] });
+    });
+  }, [conversationIdentity, conversationRef, snapshot.data?.activeRun?.runId]);
 
   const applyQueueOutcome = (outcome: QueueMutationOutcome) => {
     if (outcome.outcome === 'queued' || outcome.outcome === 'steered' || outcome.outcome === 'remained_queued') {
