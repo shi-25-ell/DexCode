@@ -347,9 +347,9 @@ Before using ordinary tools, check this list. If any skill description directly 
 ```text
 read file       -> read_file
 write file      -> write_file / patch_file
-search          -> search_in_workspace
+search          -> grep / find
 shell/bash      -> run_command
-ask user        -> ask_user
+ask user        -> 普通对话
 mcp tool        -> externalMcpRegistry
 browser testing -> 未来 Browser MCP 或 Playwright 工具
 ```
@@ -584,7 +584,8 @@ Write and maintain tests for code changes. Use when implementing behavior, fixin
 适配工具：
 
 - `read_file`
-- `search_in_workspace`
+- `find`
+- `grep`
 - `patch_file`
 - `write_file`
 - `run_command`
@@ -606,7 +607,8 @@ Build or modify user-facing frontend interfaces. Use when creating UI, changing 
 适配工具：
 
 - `read_file`
-- `search_in_workspace`
+- `find`
+- `grep`
 - `patch_file`
 - `write_file`
 - `run_command`
@@ -630,7 +632,8 @@ Review code changes for correctness, regressions, security risks, maintainabilit
 适配工具：
 
 - `read_file`
-- `search_in_workspace`
+- `find`
+- `grep`
 - `run_command`
 
 原则上 review skill 默认不修改文件，除非用户明确要求修复。
@@ -652,7 +655,8 @@ Diagnose and recover from failures. Use when tests fail, builds break, runtime e
 适配工具：
 
 - `read_file`
-- `search_in_workspace`
+- `find`
+- `grep`
 - `patch_file`
 - `run_command`
 

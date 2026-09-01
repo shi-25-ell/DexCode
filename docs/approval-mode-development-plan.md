@@ -52,7 +52,7 @@ export type ApprovalMode = 'read_only' | 'allowlist' | 'full_access';
 | `write_file`、`patch_file` | 请求批准 | 自动允许 | 自动允许 |
 | 未知副作用的外部 MCP 工具 | 请求批准 | 请求批准 | 自动允许 |
 | 明确禁止的命令或越界路径 | 拒绝 | 拒绝 | 拒绝 |
-| `ask_user` 等必须与用户交互的工具 | 保持交互 | 保持交互 | 保持交互 |
+| 普通对话中的用户询问 | 保持交互 | 保持交互 | 保持交互 |
 
 白名单在逐次批准和自动文件修改中都生效。两者的主要区别是文件写入和 patch 是否需要逐次批准。完全访问只是跳过普通批准，不绕过以下保护：
 
@@ -217,7 +217,7 @@ export type ToolApprovalRequest = {
 - `write_file`、`patch_file`：`write`
 - `run_command`：先经过命令校验，再判定为只读或 `execute`
 - 外部 MCP：只有可靠 metadata 明确只读时才为 `read`，其余为 `external`
-- `ask_user`：`interactive`
+- 普通对话中的用户询问不进入工具 effect 分类
 
 未知工具默认按有副作用处理，不默认只读。
 

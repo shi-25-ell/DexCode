@@ -6,7 +6,8 @@ export function createMockModelClient(): ModelClient {
     baseUrl: 'mock://localhost',
     displayName: 'Mock Model',
     contextWindow: 128_000,
-    maxOutputTokens: 4096,
+    maxOutputTokens: 16_384,
+    outputTokenLimits: { initial: 16_384, maximum: 16_384 },
     reasoning: { supported: false, requestMode: 'disabled' },
 
     async *streamMessage(_messages, _options) {

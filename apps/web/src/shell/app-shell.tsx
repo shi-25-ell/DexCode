@@ -1,7 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, Menu, X } from 'lucide-react';
+import { Bot, ChevronLeft, Menu, X } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiJson, resolveWorkspace, scopeWorkspaceRef } from '../api';
@@ -23,6 +23,7 @@ export type AppShellProps = {
   title: string;
   status?: 'idle' | 'running' | 'waiting' | 'failed';
   children: ReactNode;
+  agents?: { running: number; total: number; onOpen(): void };
 };
 
 function SidebarContent({ scope, conversationRef, closeMobile }: { scope: ConversationScope; conversationRef?: string; closeMobile?: () => void }) {
@@ -81,7 +82,7 @@ function SidebarContent({ scope, conversationRef, closeMobile }: { scope: Conver
   );
 }
 
-export function AppShell({ scope, conversationRef, title, status = 'idle', children }: AppShellProps) {
+export function AppShell({ scope, conversationRef, title, status = 'idle', children, agents }: AppShellProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(280);
@@ -141,6 +142,7 @@ export function AppShell({ scope, conversationRef, title, status = 'idle', child
               <h1>{title}</h1>
               <span className={`header-status ${status}`}><i />{status === 'running' ? '运行中' : status === 'waiting' ? '等待确认' : status === 'failed' ? '未完成' : '就绪'}</span>
             </div>
+            {agents && agents.total > 0 ? <button className="header-agents" onClick={agents.onOpen}><Bot size={16} />{agents.running > 0 ? `Agents ${agents.running}/${agents.total}` : `Agents ${agents.total} · 全部结束`}</button> : null}
           </header>
           {children}
         </main>

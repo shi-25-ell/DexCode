@@ -75,11 +75,10 @@ function toolHost(timeline: string[] = []) {
       writeFile: (_path: string, next: string) => { timeline.push('effect'); content = next; return { ok: true }; },
       runCommand: () => null,
       listWorkspace: () => [],
-      searchInWorkspace: () => [],
+      find: () => ({ paths: [] }),
+      ls: () => ({ entries: [] }),
+      grep: () => ({ match_count: 0, output: '' }),
       patchFile: () => null,
-      listVersions: () => [],
-      createSnapshot: () => null,
-      restoreSnapshot: () => null,
     },
     read: () => content,
   };
@@ -110,6 +109,59 @@ function prepared(input: PrepareContextInput): PreparedContext {
       includedToolResultIds: input.canonicalMessages.flatMap((message) => message.role === 'tool' ? [message.tool_call_id] : []),
     },
     usage: { usedTokens: 7, contextWindowTokens: 10_000, hardLimitTokens: 8_500, percentage: 0.1, source: 'estimated', timing: 'next_request', asOfTurn: input.turn, asOfAttempt: input.attempt, breakdown, breakdownEstimated: true },
+  };
+}
+
+function deferred() {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+function preparedWithActivity(input: PrepareContextInput, summarized: boolean): PreparedContext {
+  const base = prepared(input);
+  const activity: NonNullable<PreparedContext['activity']> = {
+    operationRef: `context-${input.turn}-${input.attempt}`,
+    layers: [summarized ? 'summary' : 'middle_archive'],
+    beforeTokens: 12,
+    afterTokens: 7,
+    beforeBreakdown: base.manifest.breakdown,
+    afterBreakdown: base.manifest.breakdown,
+    externalizedToolResults: 0,
+    archivedMessages: summarized ? 0 : 4,
+    archivedConversationSegments: summarized ? 0 : 2,
+    compactedToolResults: 0,
+    summarizedMessages: summarized ? 4 : 0,
+    retainedConversationSegments: summarized ? 1 : 0,
+    retainedMessageCount: summarized ? 2 : 0,
+  };
+  const summaryRecord: NonNullable<PreparedContext['summaryRecord']> = {
+    version: 2,
+    id: `summary-${input.turn}-${input.attempt}`,
+    runId: input.runId,
+    turn: input.turn,
+    strategyVersion: 'structured-summary-v2',
+    sourceDigest: 'source-digest',
+    coveredMessageCount: 4,
+    summary: 'summary',
+    retainedTail: [],
+    retainedTailDigest: 'tail-digest',
+    tokensBefore: 12,
+    tokensAfter: 7,
+    summaryModel: 'test-model',
+    createdAt: new Date().toISOString(),
+    artifactRefs: [],
+  };
+  return {
+    ...base,
+    manifest: {
+      ...base.manifest,
+      layers: activity.layers,
+      activity,
+      ...(summarized ? { summaryRecordId: summaryRecord.id } : {}),
+    },
+    activity,
+    ...(summarized ? { summaryRecord } : {}),
   };
 }
 
@@ -147,6 +199,177 @@ test('streams text deltas and completes a no-tool Run', async () => {
   assert.equal(result.status, 'completed');
   assert.equal(result.finalContent, 'done');
   assert.deepEqual(events.find((event) => (event as { type?: string }).type === 'chunk'), { type: 'chunk', chunk: 'done' });
+});
+
+test('read_artifact remains internal and emits no frontend tool lifecycle', async () => {
+  const { host } = toolHost();
+  const runEvents: RunEventPayload[] = [];
+  let reads = 0;
+  const engine: ContextEngine = {
+    async prepare(input) { return prepared(input); },
+    async recoverFromOverflow(input) { return prepared({ ...input, forceSummary: true }); },
+    async recordProviderUsage() {},
+  };
+  const context = {
+    ...contextRuntime(engine),
+    readArtifact: async () => { reads += 1; return { content: 'artifact body' }; },
+  };
+  const result = await createExecutor(host).runReActLoop(scriptedModel([{
+    content: '', reasoning: '',
+    toolCalls: [{ id: 'artifact-call', name: 'read_artifact', arguments: { ref: 'artifact-ref' } }],
+    finishReason: 'tool_calls',
+  }, {
+    content: 'done', reasoning: '', toolCalls: [], finishReason: 'stop',
+  }]), [{ role: 'user', content: 'read it' }], () => {}, undefined, {
+    context,
+    presentation: { emit: (event) => runEvents.push(event) },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(reads, 1);
+  assert.equal(runEvents.some((event) => (
+    (event.type === 'tool_started' || event.type === 'tool_progress' || event.type === 'tool_finished')
+    && event.callId === 'artifact-call'
+  )), false);
+});
+
+test('orchestration tools receive immutable caller context and stay out of ordinary Tool Cards', async () => {
+  const { host } = toolHost();
+  const events: AgentEvent[] = [];
+  const calls: unknown[] = [];
+  const requestedTools: unknown[][] = [];
+  const orchestration = {
+    definitions: () => [
+      { name: 'general-purpose', description: 'Default general-purpose child agent.' },
+      { name: 'researcher', description: 'Read-only investigation agent.' },
+    ],
+    spawn: async (input: unknown, caller: unknown) => { calls.push({ input, caller }); return { agent_id: 'agent-a', status: 'running' }; },
+    wait: async (input: unknown, caller: unknown) => { calls.push({ input, caller }); return { completed: [] }; },
+    followup: async () => ({}), stop: async () => ({}),
+  };
+  const scripted = scriptedModel([
+    { content: '', reasoning: '', toolCalls: [{ id: 'spawn-1', name: 'spawn_agent', arguments: { task: 'inspect', context_mode: 'fork' } }], finishReason: 'tool_calls' },
+    { content: '', reasoning: '', toolCalls: [{ id: 'wait-1', name: 'wait_agent', arguments: { agent_ids: ['agent-a'], mode: 'all', timeout_ms: 30_000 } }], finishReason: 'tool_calls' },
+    { content: 'delegated', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ]);
+  const model: ModelClient = {
+    ...scripted,
+    streamMessage(messages, options) {
+      requestedTools.push((options?.tools ?? []) as unknown[]);
+      return scripted.streamMessage(messages, options);
+    },
+  };
+  const result = await createExecutor(host, undefined, undefined, orchestration).runReActLoop(model, [{ role: 'user', content: 'delegate this' }], (event) => events.push(event), undefined, { runId: 'main-1', sessionId: 'session-1' });
+  assert.equal(result.status, 'completed');
+  assert.equal(calls.length, 2);
+  assert.deepEqual((calls[0] as { input: unknown }).input, { task: 'inspect', contextMode: 'fork' });
+  assert.equal((calls[0] as { caller: { forkSnapshot: ChatMessage[] } }).caller.forkSnapshot.at(-1)?.role, 'user');
+  assert.deepEqual((calls[1] as { input: unknown }).input, { agentIds: ['agent-a'], mode: 'all', timeoutMs: 30_000 });
+  assert.equal(events.some((event) => event.type === 'tool' || event.type === 'tool_view' || event.type === 'tool_status'), false);
+  const spawn = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'spawn_agent') as { function: { description?: string; parameters: { required: string[]; properties: { agent: { enum?: string[]; default?: string; description?: string }; context_mode: { description?: string } } } } };
+  assert.deepEqual(spawn.function.parameters.required, ['task']);
+  assert.deepEqual(spawn.function.parameters.properties.agent.enum, ['general-purpose', 'researcher']);
+  assert.equal(spawn.function.parameters.properties.agent.default, 'general-purpose');
+  assert.match(spawn.function.parameters.properties.agent.description ?? '', /Omit to use general-purpose/);
+  assert.match(spawn.function.description ?? '', /fresh.*self-contained.*fork.*bounded snapshot.*continue independently/i);
+  assert.match(spawn.function.description ?? '', /block=true.*foreground.*background delivery/i);
+  assert.match(spawn.function.parameters.properties.context_mode.description ?? '', /fresh.*without the main conversation.*fork.*current context.*definition's default/i);
+  const wait = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'wait_agent') as { function: { description?: string } };
+  assert.match(wait.function.description ?? '', /foreground.*Steer.*only the wait is cancelled.*Child Runs remain active/i);
+});
+
+test('foreground wait_agent yields promptly to Steer without cancelling Main or Child', async () => {
+  const { host } = toolHost();
+  const waitEntered = deferred();
+  const steerArrived = deferred();
+  let waitCancelled = false;
+  const orchestration = {
+    spawn: async () => ({}),
+    wait: async (_input: unknown, caller: { signal?: AbortSignal }) => {
+      waitEntered.release();
+      await Promise.race([
+        new Promise<void>((resolve) => caller.signal?.addEventListener('abort', () => { waitCancelled = true; resolve(); }, { once: true })),
+        new Promise<void>((resolve) => setTimeout(resolve, 250)),
+      ]);
+      return { status: 'running', cancelled: waitCancelled, running: [{ agent_id: 'agent-a' }] };
+    },
+    followup: async () => ({}),
+    stop: async () => ({}),
+  };
+  let boundaries = 0;
+  const commandSource = {
+    async waitForSteer() { await steerArrived.promise; return 'steer' as const; },
+    async atSafeBoundary() {
+      boundaries += 1;
+      return boundaries === 1
+        ? { action: 'continue' as const, steer: { role: 'user' as const, content: 'answer now' }, itemId: 'steer-1', directive: 'answer now' }
+        : { action: 'finish' as const };
+    },
+  };
+  const model = scriptedModel([
+    { content: '', reasoning: '', toolCalls: [{ id: 'wait-foreground', name: 'wait_agent', arguments: { agent_ids: ['agent-a'], mode: 'all', block: true, timeout_ms: 60_000 } }], finishReason: 'tool_calls' },
+    { content: 'answered during wait', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ]);
+  const startedAt = Date.now();
+  const running = createExecutor(host, undefined, undefined, orchestration).runReActLoop(
+    model,
+    [{ role: 'user', content: 'delegate' }],
+    () => {},
+    undefined,
+    { runId: 'run-foreground-wait', sessionId: 'session-foreground-wait', commandSource },
+  );
+  await waitEntered.promise;
+  steerArrived.release();
+  const result = await running;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.finalContent, 'answered during wait');
+  assert.equal(waitCancelled, true);
+  assert.ok(Date.now() - startedAt < 200, 'Steer should interrupt the foreground wait instead of waiting for its timeout');
+});
+
+test('an orchestration circuit result terminates the Run without another model turn', async () => {
+  const { host } = toolHost();
+  const model = scriptedModel([
+    { content: '', reasoning: '', toolCalls: [{ id: 'wait-circuit', name: 'wait_agent', arguments: { agent_ids: ['agent-a'] } }], finishReason: 'tool_calls' },
+  ]);
+  const orchestration = {
+    spawn: async () => ({}),
+    wait: async () => ({ status: 'circuit_open', code: 'orchestration_stalled', orchestration_circuit_open: true }),
+    followup: async () => ({}),
+    stop: async () => ({}),
+  };
+  const result = await createExecutor(host, undefined, undefined, orchestration).runReActLoop(
+    model,
+    [{ role: 'user', content: 'wait' }],
+    () => {},
+    undefined,
+    { runId: 'run-circuit', sessionId: 'session-circuit', maxIterations: 20 },
+  );
+  assert.equal(result.status, 'limited');
+  assert.equal(result.terminationReason, 'orchestration_stalled');
+  assert.equal(result.modelTurnCount, 1);
+  assert.equal(result.error?.code, 'ORCHESTRATION_STALLED');
+});
+
+test('model request timeout is forwarded and cumulative token usage is bounded', async () => {
+  const { host } = toolHost();
+  let timeoutMs: number | undefined;
+  const model: ModelClient = {
+    model: 'budgeted', baseUrl: 'memory://budgeted', reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+    async *streamMessage(_messages, options) {
+      timeoutMs = options?.timeoutMs;
+      yield { version: 1, type: 'turn_started', attemptId: 'budget-attempt' };
+      yield { version: 1, type: 'text_delta', delta: 'bounded answer' };
+      yield { version: 1, type: 'turn_completed', response: { content: 'bounded answer', reasoning: '', toolCalls: [], finishReason: 'stop', usage: { inputTokens: 9, outputTokens: 2, totalTokens: 11 } } };
+    },
+  };
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'work' }], () => {}, undefined, {
+    modelRequestTimeoutMs: 300_000,
+    maxTotalTokens: 10,
+  });
+  assert.equal(timeoutMs, 300_000);
+  assert.equal(result.status, 'limited');
+  assert.equal(result.terminationReason, 'total_token_limit');
+  assert.equal(result.finalContent, 'bounded answer');
 });
 
 test('consumes one Steer at a natural safe boundary before the next model request', async () => {
@@ -395,35 +618,49 @@ test('returns limited rather than completed when the model turn budget is exhaus
   assert.equal(result.terminationReason, 'model_turn_limit');
 });
 
-test('continues a later Run after an empty length-limited response without persisting an invalid assistant message', async () => {
+test('escalates 16k to 32k to 64k, then continues a length-limited response', async () => {
   const { host } = toolHost();
-  const canonicalMessages: ChatMessage[] = [{ role: 'user', content: 'count the files' }];
-  const semantic = {
-    assistantCommitted: async (message: ChatMessage) => { canonicalMessages.push(message); },
-    toolStarted: async () => {},
-    toolOutcome: async () => {},
+  const budgets: number[] = [];
+  const responses: ModelResponse[] = [
+    { content: 'discard-16', reasoning: '', toolCalls: [], finishReason: 'length' },
+    { content: 'discard-32', reasoning: '', toolCalls: [], finishReason: 'length' },
+    { content: 'first ', reasoning: '', toolCalls: [], finishReason: 'length' },
+    { content: 'second', reasoning: '', toolCalls: [], finishReason: 'stop' },
+  ];
+  let index = 0;
+  const model: ModelClient = {
+    model: 'large',
+    baseUrl: 'memory://large',
+    reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+    outputTokenLimits: { initial: 16_384, maximum: 128_000 },
+    async *streamMessage(_messages, options): AsyncIterable<ModelEvent> {
+      budgets.push(options?.max_tokens ?? 0);
+      const response = responses[index++];
+      yield { version: 1, type: 'turn_started', attemptId: `attempt-${index}` };
+      if (response.content) yield { version: 1, type: 'text_delta', delta: response.content };
+      yield { version: 1, type: 'turn_completed', response };
+    },
   };
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'answer' }], () => {});
+  assert.equal(result.status, 'completed');
+  assert.equal(result.finalContent, 'first second');
+  assert.equal(result.modelTurnCount, 1);
+  assert.deepEqual(budgets, [16_384, 32_768, 65_536, 65_536]);
+});
 
-  const limited = await createExecutor(host).runReActLoop(scriptedModel([{
+test('does not impose a fixed turn limit when no model turn budget is configured', async () => {
+  const { host } = toolHost();
+  const turns: ModelResponse[] = Array.from({ length: 21 }, (_, index) => ({
     content: '',
     reasoning: '',
-    toolCalls: [],
-    finishReason: 'length',
-  }]), canonicalMessages, () => {}, undefined, { semantic });
-
-  assert.equal(limited.status, 'limited');
-  assert.equal(limited.terminationReason, 'model_turn_limit');
-
-  canonicalMessages.push({ role: 'user', content: 'why did you stop?' });
-  const continued = await createExecutor(host).runReActLoop(modelRejectingInvalidAssistantHistory(), canonicalMessages, () => {}, undefined, { semantic });
-  assert.equal(continued.status, 'completed');
-  assert.equal(continued.finalContent, 'continued');
-  assert.equal(limited.finalMessageId, undefined);
-  assert.equal(canonicalMessages.some((message) => (
-    message.role === 'assistant'
-    && message.content === null
-    && (message.tool_calls?.length ?? 0) === 0
-  )), false);
+    toolCalls: [{ id: `call-${index}`, name: 'read_file', arguments: { path: 'a.ts' } }],
+    finishReason: 'tool_calls',
+  }));
+  turns.push({ content: 'finished after twenty turns', reasoning: '', toolCalls: [], finishReason: 'stop' });
+  const result = await createExecutor(host).runReActLoop(scriptedModel(turns), [], () => {});
+  assert.equal(result.status, 'completed');
+  assert.equal(result.modelTurnCount, 22);
+  assert.equal(result.finalContent, 'finished after twenty turns');
 });
 
 test('projects a valid request from a session that already contains an orphan empty assistant message', async () => {
@@ -445,26 +682,24 @@ test('projects a valid request from a session that already contains an orphan em
   assert.deepEqual(legacyMessages[1], { role: 'assistant', content: null });
 });
 
-test('keeps readable partial content when a response reaches the model length limit', async () => {
+test('never exceeds a smaller model limit and reports exhausted continuations separately', async () => {
   const { host } = toolHost();
-  const committed: ChatMessage[] = [];
-  const result = await createExecutor(host).runReActLoop(scriptedModel([{
-    content: 'partial answer',
-    reasoning: '',
-    toolCalls: [],
-    finishReason: 'length',
-  }]), [{ role: 'user', content: 'answer at length' }], () => {}, undefined, {
-    semantic: {
-      assistantCommitted: async (message) => { committed.push(message); },
-      toolStarted: async () => {},
-      toolOutcome: async () => {},
+  const budgets: number[] = [];
+  const model: ModelClient = {
+    model: 'small', baseUrl: 'memory://small',
+    reasoning: { supported: false, requestMode: 'disabled' },
+    outputTokenLimits: { initial: 16_384, maximum: 8_192 },
+    async *streamMessage(_messages, options): AsyncIterable<ModelEvent> {
+      budgets.push(options?.max_tokens ?? 0);
+      yield { version: 1, type: 'turn_started', attemptId: `attempt-${budgets.length}` };
+      yield { version: 1, type: 'turn_completed', response: { content: '', reasoning: '', toolCalls: [], finishReason: 'length' } };
     },
-  });
-
+  };
+  const result = await createExecutor(host).runReActLoop(model, [{ role: 'user', content: 'answer' }], () => {});
   assert.equal(result.status, 'limited');
-  assert.equal(result.finalContent, 'partial answer');
-  assert.equal(typeof result.finalMessageId, 'string');
-  assert.deepEqual(committed, [{ role: 'assistant', content: 'partial answer' }]);
+  assert.equal(result.terminationReason, 'output_token_limit');
+  assert.deepEqual(budgets, [8_192, 8_192, 8_192, 8_192]);
+  assert.equal(result.modelTurnCount, 1);
 });
 
 test('prepares and durably commits every model request in a multi-turn Run', async () => {
@@ -561,7 +796,11 @@ test('active compaction waits for the full tool batch and is not shown as a norm
   const { host } = toolHost(timeline);
   const forceFlags: Array<boolean | undefined> = [];
   const engine: ContextEngine = {
-    async prepare(input) { forceFlags.push(input.forceSummary); timeline.push(`prepare-${input.turn}`); return prepared(input); },
+    async prepare(input) {
+      forceFlags.push(input.forceSummary);
+      timeline.push(`prepare-${input.turn}`);
+      return preparedWithActivity(input, input.forceSummary === true);
+    },
     async recoverFromOverflow(input) { return prepared({ ...input, forceSummary: true }); },
     async recordProviderUsage() {},
   };
@@ -590,6 +829,9 @@ test('active compaction waits for the full tool batch and is not shown as a norm
   assert.deepEqual(forceFlags, [false, true]);
   assert.equal(timeline.indexOf('outcome-write-after-compact') < timeline.indexOf('prepare-2'), true);
   assert.equal(events.some((event) => event.type === 'tool_view' && event.presentation.callRef === 'compact-hidden'), false);
+  const contextEvents = events.filter((event) => event.type === 'context_activity');
+  assert.equal(contextEvents.length, 1);
+  assert.equal(contextEvents[0]?.type === 'context_activity' ? contextEvents[0].presentation.summarizedMessages : 0, 4);
 });
 
 test('sequential tools in one model turn authorize against live state independently', async () => {

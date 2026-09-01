@@ -1,4 +1,5 @@
 export * from './types.ts';
+export * from './tool-result.ts';
 
 export const APP_NAME = 'DexCode';
 export const DEFAULT_PROJECT_ID = 'demo-project';

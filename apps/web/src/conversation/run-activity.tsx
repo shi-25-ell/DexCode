@@ -1,14 +1,20 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { ChevronDown, LoaderCircle } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { RunPhase } from '../../../../packages/run-protocol/contracts';
+import type { AgentTreeSnapshot } from '../types';
 import { ApprovalCard } from './approval-card';
+import { AgentActivityCard, AgentInvocationPlaceholder } from './agent-activity';
+import type { AgentTimelineGroup } from './agent-timeline';
 import { AssistantMessage } from './assistant-message';
 import { ContextCard } from './context-card';
-import { draftReasoning, draftText, type ActiveRunView } from './run-presentation';
+import { draftReasoning, draftText, type ActiveRunView, type RunActivityEntry } from './run-presentation';
 import { ToolCard } from './tool-card';
+import { ToolBatchCard } from './tool-batch-card';
+import { UserMessage } from './user-message';
+import { batchToolSequence } from '../../../../packages/conversation-view/tool-batching';
 
 export const phaseLabels: Record<RunPhase, string> = {
   preparing_context: '正在准备上下文……',
@@ -61,27 +67,130 @@ function ReasoningDisclosure({ content, truncated, textStarted, startedAt, compl
   );
 }
 
-export function RunActivity({ run, workspaceRef, needsResync }: { run: ActiveRunView; workspaceRef?: string; needsResync: boolean }) {
-  const text = draftText(run.assistantDraft);
-  const reasoning = draftReasoning(run.assistantDraft);
-  const tools = Object.values(run.toolsByCallId);
-  const approvals = Object.values(run.approvalsById);
-  const contexts = Object.values(run.contextsById);
+function activityKey(entry: RunActivityEntry): string {
+  if (entry.kind === 'assistant') return `assistant:${entry.messageId}`;
+  if (entry.kind === 'user') return `user:${entry.itemId}`;
+  if (entry.kind === 'tool') return `tool:${entry.callId}`;
+  if (entry.kind === 'agent') return `agent:${entry.callId}`;
+  if (entry.kind === 'approval') return `approval:${entry.approvalId}`;
+  return `context:${entry.operationRef}`;
+}
+
+function RunActivityItem({ entry, run, workspaceRef }: { entry: RunActivityEntry; run: ActiveRunView; workspaceRef?: string }) {
+  if (entry.kind === 'user') return <UserMessage content={entry.content} />;
+  if (entry.kind === 'assistant') {
+    const committed = run.committedMessages.find((item) => item.kind === 'assistant' && (item.messageId === entry.messageId || item.id === entry.messageId));
+    if (committed?.kind === 'assistant') return <AssistantMessage content={committed.content} showCopy={false} />;
+    if (run.assistantDraft?.messageId !== entry.messageId) return null;
+    const text = draftText(run.assistantDraft);
+    const reasoning = draftReasoning(run.assistantDraft);
+    return (
+      <>
+        {reasoning ? <ReasoningDisclosure content={reasoning.content} truncated={reasoning.truncated} textStarted={Boolean(text)} startedAt={run.reasoningStartedAt ?? run.startedAt} completedAt={run.reasoningCompletedAt} /> : null}
+        {text ? <AssistantMessage content={text} showCopy={false} /> : null}
+      </>
+    );
+  }
+  if (entry.kind === 'context') {
+    const context = run.contextsById[entry.operationRef];
+    return context ? <ContextCard context={context} /> : null;
+  }
+  if (entry.kind === 'tool') {
+    const tool = run.toolsByCallId[entry.callId];
+    return tool ? <ToolCard tool={tool} /> : null;
+  }
+  if (entry.kind === 'agent') return null;
+  const approval = run.approvalsById[entry.approvalId];
+  return approval ? <ApprovalCard item={approval} workspaceRef={workspaceRef} /> : null;
+}
+
+function turnForActivity(run: ActiveRunView, entry: RunActivityEntry): number | undefined {
+  if (entry.kind !== 'assistant') return undefined;
+  const committed = run.committedMessages.find((item) => item.kind === 'assistant' && (item.messageId === entry.messageId || item.id === entry.messageId));
+  if (committed?.kind === 'assistant') return committed.turn;
+  return run.assistantDraft?.messageId === entry.messageId ? run.assistantDraft.turn : undefined;
+}
+
+export function RunActivity({ run, workspaceRef, needsResync, agentTree, agentGroups = [], onOpenAgent, onStopAgent }: {
+  run: ActiveRunView;
+  workspaceRef?: string;
+  needsResync: boolean;
+  agentTree?: AgentTreeSnapshot | null;
+  agentGroups?: AgentTimelineGroup[];
+  onOpenAgent?(agentId: string): void;
+  onStopAgent?(agentId: string): void;
+}) {
+  const exactAgentRunIds = useMemo(() => new Set(run.activityOrder.flatMap((entry) => entry.kind === 'agent' ? [entry.agentRunId] : [])), [run.activityOrder]);
+  const displayOrder = useMemo(() => {
+    const approvalByCall = new Map<string, Extract<import('../types').ConversationItem, { kind: 'approval' }>>();
+    const callByApproval = new Map<string, string>();
+    let awaitingCommand: string | undefined;
+    for (const entry of run.activityOrder) {
+      if (entry.kind === 'tool') awaitingCommand = run.toolsByCallId[entry.callId]?.toolName === 'run_command' ? entry.callId : undefined;
+      else if (entry.kind === 'approval' && awaitingCommand) {
+        const approval = run.approvalsById[entry.approvalId];
+        if (approval && (approval.approvalKind === 'command' || approval.toolName === 'run_command')) {
+          approvalByCall.set(awaitingCommand, approval);
+          callByApproval.set(entry.approvalId, awaitingCommand);
+        }
+        awaitingCommand = undefined;
+      } else if (entry.kind !== 'approval') awaitingCommand = undefined;
+    }
+    return batchToolSequence(run.activityOrder.map((entry) => {
+      if (entry.kind === 'tool') {
+        const stored = run.toolsByCallId[entry.callId];
+        if (stored) {
+          const approval = approvalByCall.get(entry.callId);
+          const tool = stored.toolName === 'run_command' ? {
+            ...stored,
+            approval: approval ? {
+              status: approval.resolved === 'deny' ? 'denied' as const : approval.resolved ? 'approved' as const : 'pending' as const,
+              addedToWhitelist: approval.resolved === 'allow_whitelist',
+            } : { status: 'not_required' as const, addedToWhitelist: false },
+          } : stored;
+          return { kind: 'tool' as const, key: activityKey(entry), tool };
+        }
+      }
+      return {
+        kind: 'boundary' as const, key: activityKey(entry), value: entry,
+        ...(entry.kind === 'approval' && callByApproval.has(entry.approvalId) ? { transparentFor: ['command' as const] } : {}),
+      };
+    }));
+  }, [run.activityOrder, run.approvalsById, run.toolsByCallId]);
   return (
     <section className="run-activity" aria-label="当前运行" aria-live="polite">
+      {needsResync ? <div className="run-resync-note">实时片段有缺失，完成后将使用已提交会话校准。</div> : null}
+      {displayOrder.map((displayEntry) => {
+        if (displayEntry.kind === 'tool_batch') return <ToolBatchCard key={displayEntry.key} batch={displayEntry.batch} />;
+        if (displayEntry.kind === 'tool') return <ToolCard key={displayEntry.key} tool={displayEntry.tool} />;
+        const entry = displayEntry.value;
+        const turn = turnForActivity(run, entry);
+        const anchoredGroups = turn === undefined ? [] : agentGroups
+          .filter((group) => group.sourceTurn === turn)
+          .map((group) => ({ ...group, agentRunIds: group.agentRunIds.filter((agentRunId) => !exactAgentRunIds.has(agentRunId)) }))
+          .filter((group) => group.agentRunIds.length > 0);
+        const invocationReady = entry.kind === 'agent' && agentTree
+          ? agentTree.runs.some((candidate) => candidate.agentRunId === entry.agentRunId)
+          : false;
+        return (
+          <Fragment key={displayEntry.key}>
+            {entry.kind === 'agent'
+              ? invocationReady && agentTree && onOpenAgent && onStopAgent
+                ? <AgentActivityCard tree={agentTree} agentRunIds={[entry.agentRunId]} onOpen={onOpenAgent} onStop={onStopAgent} />
+                : <AgentInvocationPlaceholder />
+              : <RunActivityItem entry={entry} run={run} workspaceRef={workspaceRef} />}
+            {agentTree && onOpenAgent && onStopAgent ? anchoredGroups.map((group) => (
+              <AgentActivityCard key={group.key} tree={agentTree} agentRunIds={group.agentRunIds} onOpen={onOpenAgent} onStop={onStopAgent} />
+            )) : null}
+          </Fragment>
+        );
+      })}
       <div className={`run-phase ${run.phase}`} role="status">
         <LoaderCircle className="run-phase-spinner" size={16} aria-hidden="true" />
         <span>{phaseLabels[run.phase]}</span>
         <ElapsedTime key={run.phaseChangedAt} startedAt={run.phaseChangedAt} />
         {run.note ? <small>{run.note}</small> : null}
       </div>
-      {needsResync ? <div className="run-resync-note">实时片段有缺失，完成后将使用已提交会话校准。</div> : null}
-      {run.committedMessages.map((item) => item.kind === 'assistant' ? <AssistantMessage key={item.id} content={item.content} showCopy={false} /> : null)}
-      {reasoning ? <ReasoningDisclosure content={reasoning.content} truncated={reasoning.truncated} textStarted={Boolean(text)} startedAt={run.reasoningStartedAt ?? run.startedAt} completedAt={run.reasoningCompletedAt} /> : null}
-      {text ? <AssistantMessage key={run.assistantDraft?.messageId} content={text} showCopy={false} /> : null}
-      {contexts.map((context) => <ContextCard key={context.operationRef} context={context} />)}
-      {tools.map((tool) => <ToolCard key={tool.callRef} tool={tool} />)}
-      {approvals.map((approval) => <ApprovalCard key={approval.approvalRef} item={approval} workspaceRef={workspaceRef} />)}
     </section>
   );
 }

@@ -1,6 +1,6 @@
 import type { ContextEngine, ContextSection } from '../context-engine/index.ts';
 import type { ModelClient } from '../llm-client/index.ts';
-import type { AgentEvent, ChatMessage, ContextPolicy, FileDiff, ToolCall, ToolPresentation, ToolResultMessage } from '../shared/types.ts';
+import type { AgentEvent, ChatMessage, ContextOwner, ContextPolicy, FileDiff, ToolCall, ToolPresentation, ToolResultMessage } from '../shared/types.ts';
 import type { RunEventPayload } from '../run-protocol/index.ts';
 import {
   createExecutor,
@@ -15,9 +15,10 @@ import {
   type ToolPolicy,
 } from './executor.ts';
 import type { RunCommandSource } from './run-commands.ts';
+import type { AgentOrchestrationPort } from '../agent-manager/contracts.ts';
 
-export type AgentProfile = 'main' | 'memory' | 'internal' | 'internal-readonly';
-export type AgentOrigin = 'user' | 'internal';
+export type AgentProfile = 'main' | 'child' | 'memory' | 'internal' | 'internal-readonly';
+export type AgentOrigin = 'user' | 'orchestrated' | 'internal';
 export type AgentPersistencePolicy = 'session' | 'none' | 'child';
 
 export type AgentRunIdentity = {
@@ -28,10 +29,12 @@ export type AgentRunIdentity = {
 };
 
 export type AgentRunBudget = {
-  maxModelTurns: number;
+  maxModelTurns?: number;
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
   maxOutputTokens?: number;
+  modelRequestTimeoutMs?: number;
+  maxTotalTokens?: number;
 };
 
 export type AgentContextPolicy =
@@ -40,6 +43,7 @@ export type AgentContextPolicy =
       mode: 'managed';
       engine: ContextEngine;
       sessionId: string;
+      contextOwner?: ContextOwner;
       activeRequest: string;
       policy: ContextPolicy;
       readArtifact: (input: { ref: string; offset?: number; limit?: number }) => Promise<unknown>;
@@ -104,7 +108,7 @@ export interface AgentLifecycleHooks {
 
 export type AgentPersistenceHooks = Pick<
   ExecutorSemanticHooks,
-  'assistantCommitted' | 'toolStarted' | 'toolOutcome' | 'contextPrepared'
+  'assistantCommitted' | 'toolStarted' | 'toolOutcome' | 'contextPrepared' | 'usageUpdated'
 >;
 
 export interface AgentRunSpec {
@@ -125,6 +129,7 @@ export interface AgentRunSpec {
   productSessionId?: string;
   modelClient?: ModelClient;
   toolHost?: CodingToolHost;
+  skillRegistry?: SkillRegistry;
   executorHooks?: ConfirmHook | ExecutorHooks;
   commandSource?: RunCommandSource;
   refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
@@ -164,7 +169,7 @@ export interface AgentRunResult {
 }
 
 export const INTERNAL_READONLY_TOOL_POLICY: Readonly<ToolPolicy> = {
-  allow: ['read_file', 'search_in_workspace', 'list_workspace'],
+  allow: ['read_file', 'find', 'ls', 'list_workspace', 'grep'],
   allowExternalMcp: false,
   allowSkills: false,
 };
@@ -174,6 +179,7 @@ type AgentRuntimeDependencies = {
   modelClient: ModelClient;
   externalMcpRegistry?: ExternalMcpRegistry;
   skillRegistry?: SkillRegistry;
+  orchestration?: AgentOrchestrationPort;
 };
 
 type InternalAgentRunSpec = Omit<
@@ -219,6 +225,8 @@ function validateBudget(budget: AgentRunBudget): void {
   positiveInteger('maxModelTurns', budget.maxModelTurns);
   positiveInteger('maxModelAttempts', budget.maxModelAttempts);
   positiveInteger('maxOutputTokens', budget.maxOutputTokens);
+  positiveInteger('modelRequestTimeoutMs', budget.modelRequestTimeoutMs);
+  positiveInteger('maxTotalTokens', budget.maxTotalTokens);
   if (budget.maxRetriesPerTurn !== undefined
     && (!Number.isInteger(budget.maxRetriesPerTurn) || budget.maxRetriesPerTurn < 0)) {
     throw new Error('maxRetriesPerTurn must be a non-negative integer');
@@ -232,12 +240,11 @@ function systemMessage(sections: ContextSection[]): ChatMessage[] {
 
 export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
   async function runAgent(spec: AgentRunSpec): Promise<AgentRunResult> {
-    if (spec.persistence === 'child') throw new Error('UnsupportedPersistencePolicy: child');
     if (spec.persistence === 'none' && spec.persistenceHooks) {
       throw new Error('persistenceHooks are not allowed when persistence is none');
     }
-    if (spec.persistence === 'session' && !spec.persistenceHooks) {
-      throw new Error('persistenceHooks are required when persistence is session');
+    if (spec.persistence !== 'none' && !spec.persistenceHooks) {
+      throw new Error(`persistenceHooks are required when persistence is ${spec.persistence}`);
     }
     validateBudget(spec.budget);
 
@@ -288,6 +295,9 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
       contextPrepared: persistence?.contextPrepared
         ? (prepared) => persistence.contextPrepared!(prepared)
         : undefined,
+      usageUpdated: persistence?.usageUpdated
+        ? (usage) => persistence.usageUpdated!(usage)
+        : undefined,
       turnEnded: async ({ turn, toolCalls, finishReason }) => {
         const event: AgentTurnEndedEvent = { type: 'turn_end', identity, turn, toolCalls, finishReason };
         await emit(event);
@@ -304,7 +314,8 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
     const executor = createExecutor(
       spec.toolHost ?? dependencies.toolHost,
       dependencies.externalMcpRegistry,
-      dependencies.skillRegistry,
+      spec.skillRegistry ?? dependencies.skillRegistry,
+      dependencies.orchestration,
     );
 
     let loop: LoopResult;
@@ -322,7 +333,10 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
           maxModelAttempts: spec.budget.maxModelAttempts,
           maxRetriesPerTurn: spec.budget.maxRetriesPerTurn,
           maxOutputTokens: spec.budget.maxOutputTokens,
+          modelRequestTimeoutMs: spec.budget.modelRequestTimeoutMs,
+          maxTotalTokens: spec.budget.maxTotalTokens,
           toolPolicy: spec.toolPolicy,
+          nonInteractive: identity.origin === 'orchestrated',
           semantic,
           commandSource: spec.commandSource,
           presentation: spec.presentation,
@@ -332,6 +346,7 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
             context: {
               engine: contextPolicy.engine,
               sessionId: contextPolicy.sessionId,
+              ...(contextPolicy.contextOwner ? { contextOwner: contextPolicy.contextOwner } : {}),
               activeRequest: contextPolicy.activeRequest,
               systemSections: sections,
               policy: contextPolicy.policy,
@@ -397,6 +412,8 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
         ...(spec.budget?.maxModelAttempts !== undefined ? { maxModelAttempts: spec.budget.maxModelAttempts } : {}),
         ...(spec.budget?.maxRetriesPerTurn !== undefined ? { maxRetriesPerTurn: spec.budget.maxRetriesPerTurn } : {}),
         ...(spec.budget?.maxOutputTokens !== undefined ? { maxOutputTokens: spec.budget.maxOutputTokens } : {}),
+        ...(spec.budget?.modelRequestTimeoutMs !== undefined ? { modelRequestTimeoutMs: spec.budget.modelRequestTimeoutMs } : {}),
+        ...(spec.budget?.maxTotalTokens !== undefined ? { maxTotalTokens: spec.budget.maxTotalTokens } : {}),
       },
     });
   }

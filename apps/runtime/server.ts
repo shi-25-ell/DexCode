@@ -23,6 +23,17 @@ import { createCapabilityRegistry } from '../../packages/capability-registry/ind
 import { presentTool, projectConversation, projectConversationListItem } from '../../packages/conversation-view/index.ts';
 import { createManagedMemorySystem } from '../../packages/managed-memory/index.ts';
 import {
+  activityEventsFromStore,
+  createAgentActivityStream,
+} from '../../packages/run-protocol/agent-activity.ts';
+import {
+  createAgentDefinitionRegistry,
+  createAgentManager,
+  createAgentStore,
+  multiAgentEnabled,
+  type AgentManager,
+} from '../../packages/agent-manager/index.ts';
+import {
   createRunReplayBuffer,
   isDroppableRunEvent,
   safeRunNote,
@@ -41,7 +52,6 @@ type RequestContext = {
   selectedFile?: string | null;
   name?: string;
   description?: string;
-  snapshotId?: string;
 };
 
 type WorkspaceFile = {
@@ -51,10 +61,6 @@ type WorkspaceFile = {
 
 type WorkspaceTreeResponse = {
   tree: unknown[];
-};
-
-type VersionListResponse = {
-  versions: unknown[];
 };
 
 type FileUpdateResponse = {
@@ -174,6 +180,7 @@ type ActiveV2Chain = {
   lastSeqByRun: Map<string, number>;
   pendingByRun: Map<string, RunEventPayload[]>;
   finished: boolean;
+  stopOnDisconnect: boolean;
   done: Promise<void>;
   disconnectTimer?: ReturnType<typeof setTimeout>;
 };
@@ -363,6 +370,25 @@ function cancelPendingRun(runId: string, reason: string) {
 // ── 模块级初始化 ──
 const modelClient = createModelClient();
 const sessionRepository: SessionRepository = createSessionRepository();
+const multiAgentFeatureEnabled = multiAgentEnabled();
+const configuredCommandShell = process.env.DEX_COMMAND_SHELL?.trim().toLowerCase();
+if (configuredCommandShell && configuredCommandShell !== 'powershell' && configuredCommandShell !== 'bash') {
+  throw new Error(`DEX_COMMAND_SHELL must be powershell or bash, received: ${configuredCommandShell}`);
+}
+const commandShellOptions = {
+  ...(configuredCommandShell ? { preferred: configuredCommandShell as 'powershell' | 'bash' } : {}),
+  ...(process.env.DEX_POWERSHELL_PATH?.trim() ? { powershellPath: process.env.DEX_POWERSHELL_PATH.trim() } : {}),
+  ...(process.env.DEX_GIT_BASH_PATH?.trim() ? { bashPath: process.env.DEX_GIT_BASH_PATH.trim() } : {}),
+};
+const agentActivityStream = createAgentActivityStream();
+let agentInboxWake: (sessionId: string) => void = () => undefined;
+const agentStore = createAgentStore({
+  sessionsDir: sessionRepository.sessionsDir,
+  observe(sessionId, events, snapshot) {
+    for (const event of activityEventsFromStore(events, snapshot)) agentActivityStream.publish(sessionId, event);
+    if (!snapshot.control.halted && events.some((event) => event.type === 'agent_completion_notification')) agentInboxWake(sessionId);
+  },
+});
 const approvalModeStore = await createApprovalModeStore({
   file: join(process.cwd(), 'workspaces', 'approval-settings.json'),
 });
@@ -396,6 +422,8 @@ type WorkspaceRuntime = {
   skillRegistry: SkillRegistry;
   codingAgent: CodingAgent;
   managedMemory: ReturnType<typeof createManagedMemorySystem>;
+  agentManager: AgentManager;
+  agentDefinitions: ReturnType<typeof createAgentDefinitionRegistry>;
 };
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -444,7 +472,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     stateDir,
   });
   await nextWorkspaceService.loadFromDisk();
-  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService, { approvalModeStore });
+  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService, { approvalModeStore, shell: commandShellOptions });
   const nextContextManager = createContextManager(nextCodingToolHost);
   const nextSkillRegistry = createSkillRegistry({ workspaceRoot: workspace.canonicalRootPath });
   await nextSkillRegistry.loadAll();
@@ -454,7 +482,19 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     modelClient,
     observe: (event) => console.info(JSON.stringify({ type: 'metric', ...event })),
   });
-  const nextCodingAgent = createCodingAgent(
+  const definitionRegistry = createAgentDefinitionRegistry({
+    userRoot: join(process.env.USERPROFILE ?? process.cwd(), '.dexcode', 'agents'),
+    workspaceRoot: join(workspace.canonicalRootPath, '.dexcode', 'agents'),
+  });
+  await definitionRegistry.reload();
+  let nextCodingAgent!: CodingAgent;
+  const nextAgentManager = createAgentManager({
+    enabled: multiAgentFeatureEnabled,
+    store: agentStore,
+    definitions: definitionRegistry,
+    runChild: (input) => nextCodingAgent.runChild(input),
+  });
+  nextCodingAgent = createCodingAgent(
     nextContextManager,
     nextCodingToolHost,
     modelClient,
@@ -463,6 +503,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     nextSkillRegistry,
     { scope: { kind: 'workspace', workspaceId: workspace.workspaceId }, rootPath: workspace.canonicalRootPath },
     nextManagedMemory,
+    { orchestration: multiAgentFeatureEnabled ? nextAgentManager : undefined },
   );
   const runtime = {
     workspace,
@@ -471,6 +512,8 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     skillRegistry: nextSkillRegistry,
     codingAgent: nextCodingAgent,
     managedMemory: nextManagedMemory,
+    agentManager: nextAgentManager,
+    agentDefinitions: definitionRegistry,
   };
   workspaceRuntimes.set(workspace.workspaceId, runtime);
   return runtime;
@@ -518,8 +561,50 @@ const conversationRunCoordinator = createConversationRunCoordinator({
     onApproval: createToolApprovalHook(sessionId, runId, sink, emit),
   }),
   cancelPending: (_sessionId, runId, reason) => cancelPendingRun(runId, reason),
+  agentInbox: {
+    pending: (sessionId) => agentStore.pendingNotifications(sessionId),
+    consume: (sessionId, notificationIds, consumedByRunId) => agentStore.consumeNotifications(sessionId, notificationIds, consumedByRunId),
+  },
   observe: (observation) => console.info(JSON.stringify({ type: 'metric', ...observation })),
 });
+
+const agentInboxWakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function scheduleAgentInboxWake(sessionId: string): void {
+  const existing = agentInboxWakeTimers.get(sessionId);
+  if (existing) clearTimeout(existing);
+  agentInboxWakeTimers.set(sessionId, setTimeout(() => {
+    agentInboxWakeTimers.delete(sessionId);
+    void startAgentInboxContinuation(sessionId);
+  }, 100));
+}
+agentInboxWake = scheduleAgentInboxWake;
+
+async function stopConversationSession(session: Session, reason = 'user_stop') {
+  const timer = agentInboxWakeTimers.get(session.sessionId);
+  if (timer) clearTimeout(timer);
+  agentInboxWakeTimers.delete(session.sessionId);
+  await agentStore.haltSession(session.sessionId, reason);
+  const main = await conversationRunCoordinator.stop({ sessionId: session.sessionId, reason: 'user_stop' });
+  const agents = session.scope.kind === 'workspace'
+    ? await (await runtimeForSession(session)).agentManager.stopSession(session.sessionId, reason)
+    : { stoppedAgents: 0, pendingNotificationsConsumed: 0, tree: null };
+  const runtime = await conversationRunCoordinator.snapshot(session.sessionId);
+  return {
+    stopped: main.stopped || agents.stoppedAgents > 0 || agents.pendingNotificationsConsumed > 0,
+    stoppedMain: main.stopped,
+    stoppedAgents: agents.stoppedAgents,
+    pendingNotificationsConsumed: agents.pendingNotificationsConsumed,
+    activeRun: runtime.activeRun ?? null,
+    agents: agents.tree,
+  };
+}
+
+void (async () => {
+  for (const session of await sessionRepository.listSessions()) {
+    const tree = await agentStore.load(session.sessionId, true);
+    if (!tree?.control.halted && tree?.inbox.some((item) => item.status === 'pending')) scheduleAgentInboxWake(session.sessionId);
+  }
+})().catch((error) => console.error('Failed to recover Agent Inbox', error));
 
 function workspaceScope(runtime: WorkspaceRuntime): SessionScope {
   return { kind: 'workspace', workspaceId: runtime.workspace.workspaceId };
@@ -753,7 +838,7 @@ function coordinatorEventToV2(chain: ActiveV2Chain, event: AgentEvent): void {
 }
 
 function scheduleV2Disconnect(chain: ActiveV2Chain): void {
-  if (chain.finished || chain.subscribers.size > 0 || chain.disconnectTimer) return;
+  if (!chain.stopOnDisconnect || chain.finished || chain.subscribers.size > 0 || chain.disconnectTimer) return;
   chain.disconnectTimer = setTimeout(() => {
     chain.disconnectTimer = undefined;
     if (!chain.finished && chain.subscribers.size === 0) {
@@ -769,7 +854,9 @@ async function attachActiveV2Run(chain: ActiveV2Chain, res: ServerResponse, afte
     chain.disconnectTimer = undefined;
   }
   const subscriber: V2Subscriber = {
-    writer: createBoundedRunSseWriter(res, () => { void conversationRunCoordinator.stop({ sessionId: chain.sessionId, reason: 'failure' }); }),
+    writer: createBoundedRunSseWriter(res, () => {
+      if (chain.stopOnDisconnect) void conversationRunCoordinator.stop({ sessionId: chain.sessionId, reason: 'failure' });
+    }),
     response: res,
     closed: false,
   };
@@ -792,7 +879,12 @@ async function attachActiveV2Run(chain: ActiveV2Chain, res: ServerResponse, afte
   res.end();
 }
 
-function createV2Chain(sessionId: string, initialRunId?: string, clientRequestId?: string): ActiveV2Chain {
+function createV2Chain(
+  sessionId: string,
+  initialRunId?: string,
+  clientRequestId?: string,
+  options: { stopOnDisconnect?: boolean } = {},
+): ActiveV2Chain {
   const chain: ActiveV2Chain = {
     sessionId,
     ...(initialRunId ? { initialRunId } : {}),
@@ -803,6 +895,7 @@ function createV2Chain(sessionId: string, initialRunId?: string, clientRequestId
     lastSeqByRun: new Map(),
     pendingByRun: new Map(),
     finished: false,
+    stopOnDisconnect: options.stopOnDisconnect ?? true,
     done: Promise.resolve(),
   };
   if (initialRunId) registerV2Run(chain, initialRunId);
@@ -819,6 +912,34 @@ function completeV2Chain(chain: ActiveV2Chain): void {
     completedV2Chains.delete(chain.initialRunId);
     completedV2Chains.set(chain.initialRunId, chain);
     while (completedV2Chains.size > 64) completedV2Chains.delete(completedV2Chains.keys().next().value!);
+  }
+}
+
+async function startAgentInboxContinuation(sessionId: string): Promise<void> {
+  try {
+    const tree = await agentStore.load(sessionId, false);
+    if (tree?.control.halted || !tree?.inbox.some((item) => item.status === 'pending')) return;
+    const runtime = await conversationRunCoordinator.snapshot(sessionId);
+    if (runtime.activeRun) return;
+    const chain = createV2Chain(sessionId, undefined, undefined, { stopOnDisconnect: false });
+    chain.done = (async () => {
+      try {
+        await conversationRunCoordinator.resume(
+          sessionId,
+          (event) => coordinatorEventToV2(chain, event),
+          { onRunEvent: (event) => publishActiveV2(chain, event), legacyEvents: false },
+        );
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes('already has an active Run')) {
+          console.error('Failed to deliver Agent Inbox', error);
+        }
+      } finally {
+        completeV2Chain(chain);
+      }
+    })();
+    await chain.done;
+  } catch (error) {
+    console.error('Failed to schedule Agent Inbox continuation', error);
   }
 }
 
@@ -1012,7 +1133,10 @@ export function startRuntimeServer() {
         : runtimeSnapshot.activeRun?.phase === 'terminal'
           ? undefined
           : runtimeSnapshot.activeRun?.phase;
-      sendJson(res, 200, { conversation: projectConversation(latestSession, { contextWindow: modelClient.contextWindow, ...(activePhase ? { activePhase } : {}) }) });
+      const agents = multiAgentFeatureEnabled && latestSession.scope.kind === 'workspace'
+        ? await (await runtimeForSession(latestSession)).agentManager.list(latestSession.sessionId)
+        : null;
+      sendJson(res, 200, { conversation: projectConversation(latestSession, { contextWindow: modelClient.contextWindow, ...(activePhase ? { activePhase } : {}), agents }) });
       return;
     }
 
@@ -1166,12 +1290,23 @@ export function startRuntimeServer() {
       return;
     }
 
+    const conversationCommandMatch = /^\/api\/conversations\/([^/]+)\/commands$/.exec(url.pathname);
+    if (conversationCommandMatch && req.method === 'POST') {
+      const conversationRef = decodeURIComponent(conversationCommandMatch[1]!);
+      const session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
+      const { action } = await parseBody<{ action?: 'stop_all' }>(req);
+      if (action !== 'stop_all') throw new HttpError(400, '不支持的会话命令');
+      sendJson(res, 200, { ok: true, ...(await stopConversationSession(session)) });
+      return;
+    }
+
     const conversationMutationMatch = /^\/api\/conversations\/([^/]+)$/.exec(url.pathname);
     if (conversationMutationMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
       const conversationRef = decodeURIComponent(conversationMutationMatch[1]);
       const session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
       if (req.method === 'DELETE') {
         if (session.activeTaskId) throw new HttpError(409, '正在运行的会话不能删除，请先停止运行');
+        if (session.scope.kind === 'workspace') await (await runtimeForSession(session)).agentManager.stopSession(conversationRef, 'Session deleted');
         await sessionRepository.deleteSession(conversationRef);
         sendJson(res, 200, { ok: true });
         return;
@@ -1196,6 +1331,18 @@ export function startRuntimeServer() {
         ? await conversationRunCoordinator.stop({ sessionId: activeChain.sessionId, reason: 'user_stop' })
         : await conversationRunCoordinator.stop({ runId: runRef, reason: 'user_stop' });
       sendJson(res, 200, { ok: true, ...result });
+      return;
+    }
+
+    const runEventsMatch = /^\/api\/conversation-runs\/([^/]+)\/events$/.exec(url.pathname);
+    if (runEventsMatch && req.method === 'GET') {
+      const runId = decodeURIComponent(runEventsMatch[1]);
+      const afterSeqRaw = Number(url.searchParams.get('afterSeq') ?? '0');
+      const afterSeq = Number.isSafeInteger(afterSeqRaw) && afterSeqRaw >= 0 ? afterSeqRaw : 0;
+      const chain = activeV2Runs.get(runId) ?? completedV2Chains.get(runId);
+      if (!chain) throw new HttpError(404, '运行流不可用，请重新读取会话');
+      await loadScopedSession(chain.sessionId, conversationScope(url, requestWorkspaceScope));
+      await attachActiveV2Run(chain, res, afterSeq, runId);
       return;
     }
 
@@ -1276,6 +1423,8 @@ export function startRuntimeServer() {
           return;
         }
       }
+
+      if (session.scope.kind === 'workspace') await (await runtimeForSession(session)).agentManager.resumeSession(session.sessionId);
 
       if (streamVersion === 2) {
         const chain = createV2Chain(session.sessionId, runId, clientRequestId);
@@ -1419,6 +1568,7 @@ export function startRuntimeServer() {
           ...(modelClient.contextWindow ? { contextWindow: modelClient.contextWindow } : {}),
           ...(modelClient.providerDisplayName ? { providerDisplayName: modelClient.providerDisplayName } : {}),
         },
+        multiAgentEnabled: multiAgentFeatureEnabled,
         workspace: {
           ref: requestRuntime.workspace.workspaceId,
           displayName: requestRuntime.workspace.canonicalRootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? '项目',
@@ -1485,11 +1635,55 @@ export function startRuntimeServer() {
       return;
     }
 
+    // ── Session-scoped child Agent state and activity ──
+    const agentRoute = url.pathname.match(/^\/api\/session\/([^/]+)\/agents(?:\/(events)|\/([^/]+)(?:\/(stop))?)?$/);
+    if (agentRoute) {
+      if (!multiAgentFeatureEnabled) throw new HttpError(404, 'Multi-Agent is disabled');
+      const sessionId = decodeURIComponent(agentRoute[1]!);
+      const eventsRoute = agentRoute[2] === 'events';
+      const agentId = agentRoute[3] ? decodeURIComponent(agentRoute[3]) : undefined;
+      const action = agentRoute[4];
+      const session = await loadScopedSession(sessionId, requestWorkspaceScope);
+      const runtime = await runtimeForSession(session);
+      if (!agentId && !action && !eventsRoute && req.method === 'GET') {
+        sendJson(res, 200, { agents: await runtime.agentManager.list(sessionId) });
+        return;
+      }
+      if (agentId && !action && req.method === 'GET') {
+        const detail = await runtime.agentManager.detail(sessionId, agentId);
+        sendJson(res, detail ? 200 : 404, detail ?? { error: 'Agent not found' });
+        return;
+      }
+      if (agentId && action === 'stop' && req.method === 'POST') {
+        const body = await parseBody<{ reason?: string }>(req);
+        const result = await runtime.agentManager.stop({ agentId, ...(body.reason ? { reason: body.reason } : {}) }, {
+          sessionId, callerRunId: 'web-control', callerTurn: 0, toolCallId: crypto.randomUUID(), delegationGroupId: 'web-control', forkSnapshot: [],
+        });
+        sendJson(res, 200, result);
+        return;
+      }
+      if (!agentId && eventsRoute && req.method === 'GET') {
+        res.writeHead(200, sseHeaders());
+        const afterSeq = Number(url.searchParams.get('afterSeq') ?? '0');
+        const replay = agentActivityStream.replay(sessionId, Number.isSafeInteger(afterSeq) && afterSeq >= 0 ? afterSeq : 0);
+        if (replay.resyncRequired) {
+          res.write(`data: ${JSON.stringify({ version: 1, sessionId, seq: replay.latestSeq + 1, at: new Date().toISOString(), event: { type: 'agent_resync_required', revision: (await runtime.agentManager.list(sessionId))?.revision ?? 0 } })}\n\n`);
+        } else {
+          for (const event of replay.events) res.write(`data: ${JSON.stringify(event)}\n\n`);
+        }
+        const unsubscribe = agentActivityStream.subscribe(sessionId, (event) => res.write(`data: ${JSON.stringify(event)}\n\n`));
+        res.on('close', unsubscribe);
+        return;
+      }
+      throw new HttpError(404, 'Agent route not found');
+    }
+
     // ── DELETE /api/session/:id ──
     if (url.pathname.startsWith('/api/session/') && !url.pathname.includes('/export') && req.method === 'DELETE') {
       const sessionId = decodeURIComponent(url.pathname.replace('/api/session/', ''));
       const session = await loadScopedSession(sessionId, requestWorkspaceScope);
       if (session.activeTaskId) throw new HttpError(409, 'Cannot delete a Session with an active Run');
+      if (session.scope.kind === 'workspace') await (await runtimeForSession(session)).agentManager.stopSession(sessionId, 'Session deleted');
       const ok = await sessionRepository.deleteSession(sessionId);
       sendJson(res, ok ? 200 : 404, ok ? { ok: true, sessionId } : { error: 'Session not found' });
       return;
@@ -1535,6 +1729,13 @@ export function startRuntimeServer() {
     }
 
     // ── Skill 管理 API ──
+    if (url.pathname === '/api/agent-definitions' && req.method === 'GET') {
+      if (!multiAgentFeatureEnabled) throw new HttpError(404, 'Multi-Agent is disabled');
+      const result = await requestRuntime.agentDefinitions.reload();
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (url.pathname === '/api/skills' && req.method === 'GET') {
       sendJson(res, 200, { skills: skillRegistry.listSkills() });
       return;
@@ -1666,12 +1867,6 @@ export function startRuntimeServer() {
     if (url.pathname === '/api/workspace') {
       const treeResponse: WorkspaceTreeResponse = { tree: workspaceService.listTree() };
       sendJson(res, 200, treeResponse);
-      return;
-    }
-
-    if (url.pathname === '/api/versions' && req.method === 'GET') {
-      const versionsResponse: VersionListResponse = { versions: await workspaceService.listVersions() };
-      sendJson(res, 200, versionsResponse);
       return;
     }
 
@@ -1918,28 +2113,6 @@ export function startRuntimeServer() {
       return;
     }
 
-    if (url.pathname === '/api/version/snapshot' && req.method === 'POST') {
-      const parsed = await parseBody<RequestContext>(req);
-      try {
-        const result = await workspaceService.createSnapshot(parsed.name ?? '', parsed.description ?? '');
-        sendJson(res, 200, result);
-      } catch (error: unknown) {
-        sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'Failed to create snapshot' });
-      }
-      return;
-    }
-
-    if (url.pathname === '/api/version/restore' && req.method === 'POST') {
-      const parsed = await parseBody<RequestContext>(req);
-      try {
-        const result = await workspaceService.restoreSnapshot(parsed.snapshotId ?? '');
-        sendJson(res, 200, result);
-      } catch (error: unknown) {
-        sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'Failed to restore snapshot' });
-      }
-      return;
-    }
-
     // ── POST /api/agent/chat（主要 agent 接口，SSE）──
     if (url.pathname === '/api/agent/chat' && req.method === 'POST') {
       const { prompt, selectedFile, sessionId: reqSessionId } = await parseBody<ChatPayload>(req);
@@ -1951,6 +2124,7 @@ export function startRuntimeServer() {
         session = await sessionRepository.createSession(requestWorkspaceScope);
       }
       const sessionRuntime = await runtimeForSession(session);
+      await sessionRuntime.agentManager.resumeSession(session.sessionId);
 
       res.writeHead(200, sseHeaders());
 
@@ -2221,7 +2395,10 @@ export function startRuntimeServer() {
     if (shuttingDown) return;
     shuttingDown = true;
     (server as unknown as { close(callback?: () => void): void }).close();
-    await Promise.allSettled([...workspaceRuntimes.values()].map((runtime) => runtime.managedMemory.drain({ timeoutMs: 60_000 })));
+    await Promise.allSettled([...workspaceRuntimes.values()].flatMap((runtime) => [
+      runtime.agentManager.shutdown(),
+      runtime.managedMemory.drain({ timeoutMs: 60_000 }),
+    ]));
   };
   const runtimeProcess = process as unknown as { once(event: 'SIGINT' | 'SIGTERM', listener: () => void): void };
   runtimeProcess.once('SIGINT', () => { void shutdown(); });

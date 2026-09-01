@@ -1,53 +1,67 @@
 import type { FileDiff, ToolPresentation, ToolViewStatus } from '../shared/types.ts';
+import { createTwoFilesPatch, structuredPatch } from 'diff';
 import type { ManagedMemoryType } from '../managed-memory/contracts.ts';
 import { serializeTopic } from '../managed-memory/format.ts';
 import { safeDisplayOutput } from './output-policy.ts';
+import { codingToolSpec } from '../tool-gateway/tool-registry.ts';
+import { normalizeToolResult } from '../shared/tool-result.ts';
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function normalizedLines(value: string | null): string[] {
-  if (value === null || value === '') return [];
-  return value.replace(/\r\n/g, '\n').split('\n');
-}
+const MAX_FILE_DIFF_CHARS = 64_000;
 
-export function diffStat(diff?: FileDiff): { additions: number; deletions: number } | undefined {
+export function fileChangePresentation(diff?: FileDiff): ToolPresentation['fileChange'] {
   if (!diff) return undefined;
-  const before = normalizedLines(diff.before);
-  const after = normalizedLines(diff.after);
-  const prefixLimit = Math.min(before.length, after.length);
-  let prefix = 0;
-  while (prefix < prefixLimit && before[prefix] === after[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < before.length - prefix
-    && suffix < after.length - prefix
-    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-  ) suffix += 1;
+  const path = diff.path.replaceAll('\\', '/');
+  const before = (diff.before ?? '').replace(/\r\n/g, '\n');
+  const after = (diff.after ?? '').replace(/\r\n/g, '\n');
+  const oldName = diff.before === null ? '/dev/null' : `a/${path}`;
+  const newName = `b/${path}`;
+  const structured = structuredPatch(oldName, newName, before, after, '', '', { context: 3 });
+  let additions = 0;
+  let deletions = 0;
+  for (const hunk of structured.hunks) {
+    for (const line of hunk.lines) {
+      if (line.startsWith('+')) additions += 1;
+      else if (line.startsWith('-')) deletions += 1;
+    }
+  }
+  const complete = createTwoFilesPatch(oldName, newName, before, after, '', '', { context: 3 });
+  const truncated = complete.length > MAX_FILE_DIFF_CHARS;
   return {
-    additions: Math.max(0, after.length - prefix - suffix),
-    deletions: Math.max(0, before.length - prefix - suffix),
+    path,
+    kind: diff.before === null ? 'created' : 'modified',
+    additions,
+    deletions,
+    diff: truncated ? `${complete.slice(0, MAX_FILE_DIFF_CHARS)}\n… unified diff 已截断 …\n` : complete,
+    truncated,
   };
 }
 
 function outcomeStatus(result: unknown): ToolViewStatus {
-  const object = objectValue(result);
-  const status = String(object.status ?? '').toLowerCase();
-  if (status === 'denied' || status === 'rejected') return 'denied';
-  if (status === 'cancelled' || status === 'aborted') return 'cancelled';
-  if ('error' in object && object.error) return 'failed';
-  return 'succeeded';
+  const normalized = normalizeToolResult(result);
+  if (normalized.ok) return 'succeeded';
+  if (normalized.status === 'invalid_arguments') return 'invalid';
+  return normalized.status;
 }
 
 function descriptor(tool: string, args: Record<string, unknown>) {
   const targetPath = typeof args.path === 'string' ? args.path.replaceAll('\\', '/') : undefined;
-  if (tool === 'read_file') return { category: 'read' as const, name: '读取文件', target: targetPath };
-  if (tool === 'write_file' || tool === 'patch_file') return { category: 'file' as const, name: '修改文件', target: targetPath };
-  if (tool === 'run_command') return { category: 'command' as const, name: '执行命令', target: String(args.command ?? '') };
-  if (tool === 'search_in_workspace') return { category: 'search' as const, name: '搜索代码', target: [args.query, args.path].filter(Boolean).join(' · ') };
-  if (tool === 'list_workspace') return { category: 'read' as const, name: '浏览目录', target: targetPath ?? '当前项目' };
-  if (tool === 'read_lints') return { category: 'read' as const, name: '检查问题', target: targetPath ?? '当前项目' };
+  const coding = codingToolSpec(tool);
+  if (coding) {
+    const target = tool === 'run_command'
+      ? String(args.command ?? '')
+      : tool === 'read_command_output' || tool === 'stop_command'
+        ? String(args.task_id ?? '')
+        : tool === 'find' || tool === 'grep'
+          ? [args.pattern, args.path, tool === 'grep' ? args.glob : undefined].filter(Boolean).join(' · ')
+          : tool === 'list_workspace'
+            ? '当前项目'
+            : targetPath;
+    return { category: coding.presentation.category, name: coding.presentation.label, target };
+  }
   if (tool === 'list_skills') return { category: 'skill' as const, name: '浏览 Skill', target: '可用能力' };
   if (tool.startsWith('memory_')) {
     const names: Record<string, string> = { memory_list: '浏览记忆', memory_read: '读取记忆', memory_search: '搜索记忆', memory_upsert: '更新记忆', memory_remove: '删除记忆' };
@@ -56,27 +70,44 @@ function descriptor(tool: string, args: Record<string, unknown>) {
   if (tool === 'read_skill' || tool === 'activate_skill' || tool === 'deactivate_skill') {
     return { category: 'skill' as const, name: tool === 'deactivate_skill' ? '停用 Skill' : '使用 Skill', target: String(args.name ?? 'Skill') };
   }
+  if (tool === 'spawn_agent') return { category: 'other' as const, name: '启动子 Agent', target: undefined };
+  if (tool === 'wait_agent') {
+    const agentCount = Array.isArray(args.agent_ids) ? args.agent_ids.length : 0;
+    const timeoutSeconds = typeof args.timeout_ms === 'number' ? Math.max(0, Math.round(args.timeout_ms / 1_000)) : 0;
+    const target = [agentCount ? `${agentCount} 个 Agent` : '', timeoutSeconds ? `最长 ${timeoutSeconds} 秒` : ''].filter(Boolean).join(' · ');
+    return { category: 'other' as const, name: '等待子 Agent', target: target || undefined };
+  }
+  if (tool === 'followup_agent') return { category: 'other' as const, name: '继续子 Agent', target: undefined };
+  if (tool === 'stop_agent') return { category: 'other' as const, name: '停止子 Agent', target: undefined };
   if (tool.startsWith('mcp__')) {
     const parts = tool.split('__').filter(Boolean);
     return { category: 'mcp' as const, name: '调用 MCP', target: parts.length > 1 ? parts.slice(1).join(' · ') : '外部工具' };
   }
-  if (tool === 'create_snapshot' || tool === 'restore_snapshot' || tool === 'list_versions') {
-    return { category: 'snapshot' as const, name: tool === 'restore_snapshot' ? '恢复快照' : tool === 'create_snapshot' ? '创建快照' : '查看快照', target: String(args.name ?? args.snapshotId ?? '当前项目') };
-  }
-  return { category: 'other' as const, name: '调用工具', target: undefined };
+  return { category: 'other' as const, name: '调用工具', target: tool };
 }
 
 function successSummary(tool: string, result: unknown, status: ToolViewStatus): string {
+  const normalized = normalizeToolResult(result);
+  if (status === 'invalid') return `参数错误：${normalized.ok ? '参数不符合工具契约' : normalized.error.message}`.slice(0, 160);
+  if (status === 'blocked') return `已阻止：${normalized.ok ? '操作被策略阻止' : normalized.error.message}`.slice(0, 160);
   if (status === 'denied') return '已拒绝执行';
   if (status === 'cancelled') return '已取消';
-  if (status === 'failed') return String(objectValue(result).error ?? '执行失败').slice(0, 160);
+  if (status === 'failed') return (normalized.ok ? '执行失败' : normalized.error.message).slice(0, 160);
   if (tool === 'read_file') {
     const object = objectValue(result);
-    const content = typeof object.content === 'string' ? object.content : typeof result === 'string' ? result : '';
-    return content ? `已读取 ${content.replace(/\r\n/g, '\n').split('\n').length.toLocaleString('zh-CN')} 行` : '读取完成';
+    const start = Number(object.start_line ?? 0);
+    const end = Number(object.end_line ?? 0);
+    const total = Number(object.total_lines ?? 0);
+    if (start > 0 && end >= start) return `已读取第 ${start.toLocaleString('zh-CN')}–${end.toLocaleString('zh-CN')} 行，共 ${total.toLocaleString('zh-CN')} 行`;
+    return total === 0 ? '已读取空文件' : '读取完成';
   }
+  if (tool === 'find' || tool === 'ls') return `找到 ${Number(objectValue(result).total ?? 0).toLocaleString('zh-CN')} 项`;
+  if (tool === 'list_workspace') return `已列出 ${Number(objectValue(result).node_count ?? 0).toLocaleString('zh-CN')} 个节点`;
+  if (tool === 'grep') return `找到 ${Number(objectValue(result).match_count ?? 0).toLocaleString('zh-CN')} 个匹配`;
   if (tool === 'write_file' || tool === 'patch_file') return '文件已更新';
-  if (tool === 'run_command') return '命令执行完成';
+  if (tool === 'run_command') return String(objectValue(result).status ?? '') === 'background' ? '命令已转入后台' : '命令执行完成';
+  if (tool === 'read_command_output') return String(objectValue(result).status ?? '') === 'background' ? '命令仍在后台运行' : '后台命令已结束';
+  if (tool === 'stop_command') return '后台命令已停止';
   if (tool === 'activate_skill' || tool === 'read_skill') return '已加载能力说明';
   if (tool === 'memory_upsert') return '项目记忆已更新';
   if (tool === 'memory_remove') return '项目记忆已删除';
@@ -103,22 +134,19 @@ export function presentTool(input: {
         body: String(args.body ?? ''),
       })
     : undefined;
-  const raw = input.result === undefined || (input.tool === 'memory_remove' && status === 'succeeded')
+  const isFileMutation = input.tool === 'write_file' || input.tool === 'patch_file';
+  const raw = input.result === undefined || isFileMutation || (input.tool === 'memory_remove' && status === 'succeeded')
     ? { truncated: false }
     : safeDisplayOutput(memoryUpsertContent ?? input.result);
-  const stat = diffStat(input.fileDiff);
+  const fileChange = fileChangePresentation(input.fileDiff);
   return {
     callRef: input.callRef,
+    toolName: input.tool,
     ...details,
     status,
     summary: status === 'queued' ? '准备执行…' : status === 'running' ? '正在执行…' : successSummary(input.tool, input.result, status),
     ...(raw.text ? { rawOutput: raw.text } : {}),
     ...(raw.truncated ? { truncated: true } : {}),
-    ...(input.fileDiff ? {
-      fileChange: {
-        path: input.fileDiff.path.replaceAll('\\', '/'),
-        ...(stat ?? {}),
-      },
-    } : {}),
+    ...(fileChange ? { fileChange } : {}),
   };
 }

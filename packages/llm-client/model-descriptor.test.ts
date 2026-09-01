@@ -6,6 +6,7 @@ test('known DeepSeek API models receive their official context window and produc
   assert.deepEqual(describeModel('deepseek-v4-flash', 'https://api.deepseek.com'), {
     displayName: 'DeepSeek V4 Flash',
     contextWindow: 1_000_000,
+    outputTokens: { initial: 16_384, maximum: 384_000 },
     reasoning: { supported: 'unknown', requestMode: 'provider_default' },
   });
 });

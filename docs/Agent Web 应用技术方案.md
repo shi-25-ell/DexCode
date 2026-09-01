@@ -646,15 +646,16 @@ Tool Gateway 是所有执行动作的统一出口。
 
 ### 主要工具
 
-- `list_files`
+- `find`
+- `ls`
+- `list_workspace`
 - `read_file`
-- `write_file`
-- `patch_file`
-- `search_in_workspace`
+- `grep`
 - `run_command`
-- `create_snapshot`
-- `restore_snapshot`
-- `read_logs`
+- `patch_file`
+- `write_file`
+- `read_command_output`
+- `stop_command`
 
 ## 5.5 Workspace Manager
 

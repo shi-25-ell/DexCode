@@ -300,6 +300,7 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
       if (!settings.enabled) return { enabled: false, generation: settings.generation, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none', durationMs: 0 } };
       const prepared = await recall.prepare({
         sessionId: input.sessionId, query: input.query, generation: settings.generation,
+        ...(input.contextOwnerId ? { contextOwnerId: input.contextOwnerId } : {}),
         inject: options.mode === 'on', recallEnabled: settings.recallEnabled, signal: input.signal,
       });
       metric('managed_memory.recall.completed', { candidateCount: prepared.recall.candidateCount, selectedCount: prepared.recall.selectedCount, selector: prepared.recall.selector, durationMs: prepared.recall.durationMs });

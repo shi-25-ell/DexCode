@@ -1,16 +1,51 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import type { ConversationItem } from '../types';
+import type { AgentTreeSnapshot, ConversationItem } from '../types';
 import { ApprovalCard } from './approval-card';
-import { assistantResponseCopyText, isCompleteAssistantResponse } from './response-boundary';
+import { assistantResponseCopyText, groupConversationHistory, isCompleteAssistantResponse } from './response-boundary';
 import { ToolCard } from './tool-card';
 import { ContextCard } from './context-card';
-import { shouldShowConversationLoading } from './conversation-page';
+import { hasActiveConversationWork, shouldQueueConversationSubmission, shouldShowConversationLoading, terminalTitle, toolCallIdsRequiringPresentationSettlement } from './conversation-page';
+import { abortStreamOnPageHide } from './stream-lifecycle';
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-id' });
 
 describe('conversation presentation', () => {
+  it('labels independent run limits without collapsing them into one message', () => {
+    expect(terminalTitle('limited', 'model_turn_limit')).toBe('模型回合数达到限制');
+    expect(terminalTitle('limited', 'model_attempt_limit')).toBe('模型尝试次数达到限制');
+    expect(terminalTitle('limited', 'output_token_limit')).toBe('单次模型输出达到长度限制');
+    expect(terminalTitle('limited', 'total_token_limit')).toBe('累计令牌达到限制');
+    expect(terminalTitle('limited', 'orchestration_stalled')).toBe('多智能体编排因无进展已停止');
+  });
+
+  it('keeps session controls active for a backend Main Run or a background Child Run', () => {
+    const idle: AgentTreeSnapshot = { version: 1, sessionId: 'session-a', rootAgentId: 'root', revision: 1, agents: [], runs: [] };
+    const childRunning: AgentTreeSnapshot = {
+      ...idle,
+      runs: [{ agentRunId: 'agent-run-1', agentId: 'agent-1', invokedByRunId: 'main-1', trigger: 'spawn', status: 'running', input: 'work', startedAt: '' }],
+    };
+    expect(hasActiveConversationWork({ agents: idle })).toBe(false);
+    expect(hasActiveConversationWork({ agents: childRunning })).toBe(true);
+    expect(hasActiveConversationWork({ activeRun: { runId: 'main-2' }, agents: idle })).toBe(true);
+  });
+
+  it('starts a new Main Run when only background Child Runs remain', () => {
+    const childRunning: AgentTreeSnapshot = {
+      version: 1,
+      sessionId: 'session-a',
+      rootAgentId: 'root',
+      revision: 1,
+      agents: [],
+      runs: [{ agentRunId: 'agent-run-1', agentId: 'agent-1', invokedByRunId: 'main-1', trigger: 'spawn', status: 'running', input: 'work', startedAt: '' }],
+    };
+
+    expect(hasActiveConversationWork({ agents: childRunning })).toBe(true);
+    expect(shouldQueueConversationSubmission({ localStreamActive: false })).toBe(false);
+    expect(shouldQueueConversationSubmission({ localStreamActive: false, authoritativeActiveRun: { runId: 'main-2' } })).toBe(true);
+  });
+
   it('keeps the optimistic timeline visible while a new draft Session is materializing', () => {
     expect(shouldShowConversationLoading({
       hasConversationRef: true,
@@ -20,22 +55,96 @@ describe('conversation presentation', () => {
     })).toBe(false);
   });
 
-  it('only marks the terminal assistant segment of each completed response as copyable', () => {
+  it('does not wait for hidden orchestration tools before presenting a Steer message', () => {
+    expect(toolCallIdsRequiringPresentationSettlement([
+      { callId: 'read-1', name: 'read_artifact' },
+      { callId: 'spawn-1', name: 'spawn_agent' },
+      { callId: 'wait-1', name: 'wait_agent' },
+      { callId: 'context-1', name: 'compact_context' },
+    ])).toEqual(['read-1']);
+  });
+
+  it.each(['beforeunload', 'pagehide'])('aborts the Agent activity stream on %s', (eventName) => {
+    const controller = new AbortController();
+    const removeListener = abortStreamOnPageHide(controller);
+
+    window.dispatchEvent(new Event(eventName));
+
+    expect(controller.signal.aborted).toBe(true);
+    removeListener();
+  });
+
+  it('collapses committed process items behind each final answer and copies only the final answer', () => {
     const items: ConversationItem[] = [
       { id: 'u1', kind: 'user', content: '搜索仓库' },
       { id: 'a1', kind: 'assistant', content: '我先搜索' },
-      { id: 't1', kind: 'tool', tool: { callRef: 'call-1', category: 'mcp', name: '调用 MCP', status: 'succeeded', summary: '完成' } },
+      { id: 't1', kind: 'tool', tool: { callRef: 'call-1', toolName: 'mcp__one', category: 'mcp', name: '调用 MCP', status: 'succeeded', summary: '完成' } },
       { id: 'a2', kind: 'assistant', content: '请完成授权', final: true },
       { id: 'u2', kind: 'user', content: '授权完成' },
       { id: 'a3', kind: 'assistant', content: '我重新尝试' },
-      { id: 't2', kind: 'tool', tool: { callRef: 'call-2', category: 'mcp', name: '调用 MCP', status: 'succeeded', summary: '完成' } },
+      { id: 't2', kind: 'tool', tool: { callRef: 'call-2', toolName: 'mcp__two', category: 'mcp', name: '调用 MCP', status: 'succeeded', summary: '完成' } },
       { id: 'a4', kind: 'assistant', content: '这是最终结果', final: true },
     ];
 
     expect(items.map((item) => isCompleteAssistantResponse(item, 'idle'))).toEqual([false, false, false, true, false, false, false, true]);
     expect(isCompleteAssistantResponse(items[7]!, 'running')).toBe(false);
-    expect(assistantResponseCopyText(items, 3)).toBe('我先搜索\n\n请完成授权');
-    expect(assistantResponseCopyText(items, 7)).toBe('我重新尝试\n\n这是最终结果');
+    expect(assistantResponseCopyText(items[3]!)).toBe('请完成授权');
+    expect(assistantResponseCopyText(items[7]!)).toBe('这是最终结果');
+    expect(groupConversationHistory(items)).toMatchObject([
+      { kind: 'item', entry: { item: { id: 'u1' } } },
+      { kind: 'completed_response', history: [{ item: { id: 'a1' } }, { item: { id: 't1' } }], final: { item: { id: 'a2' } } },
+      { kind: 'item', entry: { item: { id: 'u2' } } },
+      { kind: 'completed_response', history: [{ item: { id: 'a3' } }, { item: { id: 't2' } }], final: { item: { id: 'a4' } } },
+    ]);
+  });
+
+  it('folds execution on both sides of Steer messages only after the Run has a final answer', () => {
+    const items: ConversationItem[] = [
+      { id: 'u1', kind: 'user', content: '原始任务' },
+      { id: 'a1', kind: 'assistant', content: 'Steer 前执行', runId: 'run-1' },
+      { id: 't1', kind: 'tool', tool: { callRef: 'call-1', toolName: 'read_file', category: 'read', name: '读取文件', status: 'succeeded', summary: '完成' } },
+      { id: 'u2', kind: 'user', content: '第一次调整方向', delivery: 'steer' },
+      { id: 'a2', kind: 'assistant', content: '第一次 Steer 后执行', runId: 'run-1' },
+      { id: 't2', kind: 'tool', tool: { callRef: 'call-2', toolName: 'grep', category: 'search', name: '搜索代码', status: 'succeeded', summary: '完成' } },
+      { id: 'u3', kind: 'user', content: '第二次调整方向', delivery: 'steer' },
+      { id: 'a3', kind: 'assistant', content: '第二次 Steer 后执行', runId: 'run-1' },
+      { id: 't3', kind: 'tool', tool: { callRef: 'call-3', toolName: 'run_command', category: 'command', name: '执行命令', status: 'succeeded', summary: '完成' } },
+      { id: 'a4', kind: 'assistant', content: '最终结果', runId: 'run-1', final: true },
+    ];
+
+    expect(groupConversationHistory(items.slice(0, -1)).some((group) => group.kind === 'execution_history')).toBe(false);
+    expect(groupConversationHistory(items)).toMatchObject([
+      { kind: 'item', entry: { item: { id: 'u1' } } },
+      { kind: 'execution_history', history: [{ item: { id: 'a1' } }, { item: { id: 't1' } }] },
+      { kind: 'item', entry: { item: { id: 'u2', delivery: 'steer' } } },
+      { kind: 'execution_history', history: [{ item: { id: 'a2' } }, { item: { id: 't2' } }] },
+      { kind: 'item', entry: { item: { id: 'u3', delivery: 'steer' } } },
+      { kind: 'completed_response', history: [{ item: { id: 'a3' } }, { item: { id: 't3' } }], final: { item: { id: 'a4' } } },
+    ]);
+  });
+
+  it('keeps unfinished and failed response items expanded when no final answer exists', () => {
+    const items: ConversationItem[] = [
+      { id: 'u1', kind: 'user', content: '运行测试' },
+      { id: 'a1', kind: 'assistant', content: '正在运行' },
+      { id: 'e1', kind: 'error', title: '本次运行未完成', message: '测试失败' },
+    ];
+    expect(groupConversationHistory(items).map((group) => group.kind)).toEqual(['item', 'item', 'item']);
+  });
+
+  it('keeps a failed command inside the completed response execution history', () => {
+    const items: ConversationItem[] = [
+      { id: 'u1', kind: 'user', content: '运行测试' },
+      { id: 'a1', kind: 'assistant', content: '我来运行测试' },
+      { id: 't1', kind: 'tool', tool: { callRef: 'call-1', toolName: 'run_command', category: 'command', name: '执行命令', status: 'failed', summary: '测试失败' } },
+      { id: 'a2', kind: 'assistant', content: '测试失败，原因如下', final: true },
+    ];
+    const response = groupConversationHistory(items)[1];
+    expect(response).toMatchObject({
+      kind: 'completed_response',
+      history: [{ item: { id: 'a1' } }, { item: { id: 't1', tool: { status: 'failed' } } }],
+      final: { item: { id: 'a2' } },
+    });
   });
 
   it('does not expose a copy action before a pending approval', () => {
@@ -51,12 +160,13 @@ describe('conversation presentation', () => {
   it('renders file stats and keeps readable output behind an explicit disclosure', () => {
     render(createElement(ToolCard, { tool: {
       callRef: 'opaque-ref',
+      toolName: 'patch_file',
       category: 'file',
       name: '修改文件',
       target: 'src/app.ts',
       status: 'succeeded',
       summary: '文件已更新',
-      fileChange: { path: 'src/app.ts', additions: 18, deletions: 6 },
+      fileChange: { path: 'src/app.ts', kind: 'modified', additions: 18, deletions: 6, diff: '--- a/src/app.ts\n+++ b/src/app.ts\n', truncated: false },
       rawOutput: '受控原始输出',
     } }));
     expect(screen.getByText('+18')).toBeInTheDocument();
@@ -70,30 +180,47 @@ describe('conversation presentation', () => {
   it('shows only memory mutations and expands an upsert with its actual markdown content', () => {
     const hiddenMemoryTools = ['浏览记忆', '读取记忆', '搜索记忆'];
     const { rerender } = render(createElement(ToolCard, { tool: {
-      callRef: 'memory-read', category: 'memory', name: '读取记忆', target: 'project.md', status: 'succeeded', summary: '执行完成', rawOutput: '内部读取结果',
+      callRef: 'memory-read', toolName: 'memory_read', category: 'memory', name: '读取记忆', target: 'project.md', status: 'succeeded', summary: '执行完成', rawOutput: '内部读取结果',
     } }));
     expect(screen.queryByText('读取记忆')).not.toBeInTheDocument();
 
     for (const name of hiddenMemoryTools) {
       rerender(createElement(ToolCard, { tool: {
-        callRef: name, category: 'memory', name, status: 'succeeded', summary: '执行完成',
+        callRef: name, toolName: 'memory_list', category: 'memory', name, status: 'succeeded', summary: '执行完成',
       } }));
       expect(screen.queryByText(name)).not.toBeInTheDocument();
     }
 
     rerender(createElement(ToolCard, { tool: {
-      callRef: 'memory-remove', category: 'memory', name: '删除记忆', target: 'obsolete.md', status: 'succeeded', summary: '项目记忆已删除',
+      callRef: 'memory-remove', toolName: 'memory_remove', category: 'memory', name: '删除记忆', target: 'obsolete.md', status: 'succeeded', summary: '项目记忆已删除',
     } }));
     expect(screen.getByText('删除记忆')).toBeInTheDocument();
     expect(screen.getByText('项目记忆已删除')).toBeInTheDocument();
 
     rerender(createElement(ToolCard, { tool: {
-      callRef: 'memory-upsert', category: 'memory', name: '更新记忆', target: 'project.md', status: 'succeeded', summary: '项目记忆已更新',
+      callRef: 'memory-upsert', toolName: 'memory_upsert', category: 'memory', name: '更新记忆', target: 'project.md', status: 'succeeded', summary: '项目记忆已更新',
       rawOutput: '---\nname: Project\ndescription: Current project facts\ntype: project\n---\n\n# Build\n\nUse npm test.\n',
     } }));
     fireEvent.click(screen.getByRole('button', { name: '更新记忆，展开输出内容' }));
     expect(screen.getByText(/name: Project/)).toBeInTheDocument();
     expect(screen.queryByText(/operationId|digest/)).not.toBeInTheDocument();
+  });
+
+  it('shows a Skill card only for activate_skill', () => {
+    const { rerender } = render(createElement(ToolCard, { tool: {
+      callRef: 'skill-read', toolName: 'read_skill', category: 'skill', name: '使用 Skill', target: 'codebase-design', status: 'succeeded', summary: '已加载能力说明',
+    } }));
+    expect(screen.queryByText('codebase-design')).not.toBeInTheDocument();
+
+    rerender(createElement(ToolCard, { tool: {
+      callRef: 'skill-activate', toolName: 'activate_skill', category: 'skill', name: '使用 Skill', target: 'codebase-design', status: 'succeeded', summary: '已加载能力说明',
+    } }));
+    expect(screen.getByText('codebase-design')).toBeInTheDocument();
+
+    rerender(createElement(ToolCard, { tool: {
+      callRef: 'skill-deactivate', toolName: 'deactivate_skill', category: 'skill', name: '停用 Skill', target: 'codebase-design', status: 'succeeded', summary: '执行完成',
+    } }));
+    expect(screen.queryByText('codebase-design')).not.toBeInTheDocument();
   });
 
   it('updates one Context Card by operation ref and reports only actions that occurred', () => {

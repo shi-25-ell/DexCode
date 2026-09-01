@@ -4,9 +4,21 @@ import { useState } from 'react';
 import type { ToolPresentation } from '../types';
 import { statusIcons, toolIcons } from '../shared/icons';
 
+const statusLabels: Record<ToolPresentation['status'], string> = {
+  queued: '准备中',
+  running: '运行中',
+  succeeded: '成功',
+  invalid: '参数错误',
+  blocked: '已阻止',
+  failed: '失败',
+  denied: '已拒绝',
+  cancelled: '已取消',
+};
+
 export function ToolCard({ tool }: { tool: ToolPresentation }) {
   const [open, setOpen] = useState(false);
-  if (tool.category === 'memory' && tool.name !== '更新记忆' && tool.name !== '删除记忆') return null;
+  if (tool.category === 'skill' && tool.toolName !== 'activate_skill') return null;
+  if (tool.category === 'memory' && tool.toolName !== 'memory_upsert' && tool.toolName !== 'memory_remove') return null;
   const ToolIcon = toolIcons[tool.category];
   const StatusIcon = statusIcons[tool.status];
   const hasDetails = Boolean(tool.rawOutput);
@@ -24,7 +36,7 @@ export function ToolCard({ tool }: { tool: ToolPresentation }) {
           </span>
           <span className="tool-summary">{tool.summary}</span>
         </span>
-        <span className={`tool-status ${tool.status}`}><StatusIcon size={14} />{tool.status === 'succeeded' ? '成功' : tool.status === 'queued' ? '准备中' : tool.status === 'running' ? '运行中' : tool.status === 'failed' ? '失败' : tool.status === 'denied' ? '已拒绝' : '已取消'}</span>
+        <span className={`tool-status ${tool.status}`}><StatusIcon size={14} />{statusLabels[tool.status]}</span>
         {hasDetails ? <ChevronDown className={open ? 'chevron open' : 'chevron'} size={16} /> : null}
       </Collapsible.Trigger>
       {hasDetails ? (

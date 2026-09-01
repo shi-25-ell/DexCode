@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: Review code changes for correctness, regressions, security risks, maintainability issues, and missing tests. 用于代码审查、review、检查 diff、合并前质量检查、查找缺陷、回归风险、安全问题、可维护性问题和测试缺口。
-allowed-tools: read_file search_in_workspace run_command
+allowed-tools: read_file find grep run_command
 ---
 
 # Code Review

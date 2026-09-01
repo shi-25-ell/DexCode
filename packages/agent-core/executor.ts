@@ -28,24 +28,36 @@ import type {
 import { captureFileDiff } from './file-diff.ts';
 import { presentTool } from '../conversation-view/tool-presentation.ts';
 import type { ContextEngine, ContextSection, PreparedContext } from '../context-engine/index.ts';
+import { projectAgentFork } from '../context-engine/index.ts';
 import type { ContextPolicy, ContextUsageSnapshot } from '../shared/types.ts';
 import type { CommittedAssistantMessage, RunEventPayload, RunPhase } from '../run-protocol/index.ts';
 import { CONTEXT_TOOL_DEFINITIONS, LOCAL_TOOL_DEFINITIONS, SKILL_TOOL_DEFINITIONS } from './tool-definitions.ts';
 import { MEMORY_TOOL_DEFINITIONS, isMemoryTool } from '../managed-memory/tools.ts';
 import type { RunCommandSource } from './run-commands.ts';
+import {
+  isAgentOrchestrationTool,
+  validateOrchestrationToolInput,
+  type AgentOrchestrationPort,
+} from '../agent-manager/contracts.ts';
+import { agentOrchestrationToolDefinitions } from './tool-definitions.ts';
+import { validateJsonSchema } from '../shared/json-schema.ts';
+import { normalizeToolResult, toolFailure } from '../shared/tool-result.ts';
+import type { PatchFileInput } from '../tool-gateway/structured-edit.ts';
 
 export type CodingToolHost = {
-  readFile: (path: string) => Promise<unknown> | unknown;
-  writeFile: (path: string, content: string) => unknown;
-  runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook; signal?: AbortSignal }) => unknown;
-  readLints?: (path?: string) => unknown;
-  diffFile?: (path: string, snapshotId?: string) => unknown;
-  listWorkspace: () => unknown;
-  searchInWorkspace: (query: string, path?: string) => unknown;
-  patchFile: (path: string, patch: string) => unknown;
-  listVersions: () => unknown;
-  createSnapshot: (name?: string, description?: string) => unknown;
-  restoreSnapshot: (snapshotId: string) => unknown;
+  readFile: (path: string, options?: { offset?: number; limit?: number }, signal?: AbortSignal) => Promise<unknown> | unknown;
+  readFileForDiff?: (path: string) => Promise<unknown> | unknown;
+  writeFile: (path: string, content: string, signal?: AbortSignal) => unknown;
+  runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook; signal?: AbortSignal; timeoutMs?: number; runInBackground?: boolean }) => unknown;
+  readCommandOutput?: (taskId: string, waitMs?: number) => unknown;
+  stopCommand?: (taskId: string) => unknown;
+  find: (input: { pattern: string; path?: string; limit?: number }, signal?: AbortSignal) => unknown;
+  ls: (input?: { path?: string; limit?: number }) => unknown;
+  listWorkspace: (input?: { depth?: number }, signal?: AbortSignal) => unknown;
+  listWorkspaceFiles?: () => unknown;
+  grep: (input: { pattern: string; path?: string; glob?: string; ignoreCase?: boolean; literal?: boolean; context?: number; limit?: number }, signal?: AbortSignal) => unknown;
+  patchFile: (input: PatchFileInput) => unknown;
+  getToolDefinitions?: () => typeof LOCAL_TOOL_DEFINITIONS;
   executeAgentTool?: (toolName: string, args: Record<string, unknown>, context: AgentToolExecutionContext) => Promise<unknown>;
   executeManagedMemoryTool?: (toolName: string, args: Record<string, unknown>, context: { runId: string; sessionId?: string; signal: AbortSignal }) => Promise<unknown>;
   isToolEnabled?: (name: string) => boolean;
@@ -73,12 +85,14 @@ export type ExecutorSemanticHooks = {
   toolOutcome(message: ToolResultMessage, presentation: import('../shared/types.ts').ToolPresentation): Promise<void>;
   contextPrepared?(prepared: PreparedContext): Promise<void>;
   turnEnded?(event: { turn: number; toolCalls: ToolCall[]; finishReason: ModelResponse['finishReason'] }): Promise<void>;
+  usageUpdated?(usage: { inputTokens: number; outputTokens: number; totalTokens: number; unknown: number }): Promise<void>;
 };
 export type ToolPolicy = {
   allow?: string[];
   deny?: string[];
   allowExternalMcp?: boolean;
   allowSkills?: boolean;
+  allowOrchestration?: boolean;
 };
 export type RunStatus = 'completed' | 'aborted' | 'failed' | 'limited';
 export type TerminationReason =
@@ -87,7 +101,10 @@ export type TerminationReason =
   | 'model_failure'
   | 'invalid_model_response'
   | 'model_attempt_limit'
-  | 'model_turn_limit';
+  | 'output_token_limit'
+  | 'model_turn_limit'
+  | 'total_token_limit'
+  | 'orchestration_stalled';
 
 export type LoopResult = {
   messages: ChatMessage[];
@@ -117,7 +134,11 @@ export type ReActLoopOptions = {
   maxModelAttempts?: number;
   maxRetriesPerTurn?: number;
   maxOutputTokens?: number;
+  modelRequestTimeoutMs?: number;
+  maxTotalTokens?: number;
   toolPolicy?: ToolPolicy;
+  callerAgentId?: string;
+  nonInteractive?: boolean;
   semantic?: ExecutorSemanticHooks;
   commandSource?: RunCommandSource;
   refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
@@ -125,6 +146,7 @@ export type ReActLoopOptions = {
   context?: {
     engine: ContextEngine;
     sessionId: string;
+    contextOwner?: import('../shared/types.ts').ContextOwner;
     activeRequest: string;
     systemSections: ContextSection[];
     policy: ContextPolicy;
@@ -135,7 +157,19 @@ export type ReActLoopOptions = {
 
 export type Executor = ReturnType<typeof createExecutor>;
 
-const MAX_ITERATIONS = 20;
+const INITIAL_OUTPUT_TOKENS = 16_384;
+const SECOND_OUTPUT_TOKENS = 32_768;
+const MAX_RECOVERY_OUTPUT_TOKENS = 65_536;
+const MAX_CONTINUATIONS = 3;
+const CONTINUE_AFTER_LENGTH = 'Output token limit reached. Resume directly from the exact stopping point. Do not apologize, recap, or repeat completed content; keep the remaining work concise.';
+
+function outputTokenBudgets(model: ModelClient, runMaximum?: number): number[] {
+  const declaredInitial = model.outputTokenLimits?.initial ?? model.maxOutputTokens ?? INITIAL_OUTPUT_TOKENS;
+  const declaredMaximum = model.outputTokenLimits?.maximum ?? model.maxOutputTokens ?? INITIAL_OUTPUT_TOKENS;
+  const maximum = Math.max(1, Math.floor(Math.min(declaredMaximum, runMaximum ?? Number.POSITIVE_INFINITY, MAX_RECOVERY_OUTPUT_TOKENS)));
+  const initial = Math.max(1, Math.floor(Math.min(INITIAL_OUTPUT_TOKENS, declaredInitial, maximum)));
+  return [...new Set([initial, Math.min(SECOND_OUTPUT_TOKENS, maximum), maximum])].sort((left, right) => left - right);
+}
 
 function aborted(base: Omit<LoopResult, 'status' | 'terminationReason'>): LoopResult {
   return { ...base, status: 'aborted', terminationReason: 'user_abort' };
@@ -225,25 +259,7 @@ function validationError(
 ): string | undefined {
   const definition = definitions.find((item) => item.function.name === name);
   if (!definition) return `unknown or disabled tool: ${name}`;
-  const schema = definition.function.parameters;
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
-  const shape = schema as { required?: unknown; properties?: unknown; additionalProperties?: unknown };
-  const required = Array.isArray(shape.required) ? shape.required.filter((value): value is string => typeof value === 'string') : [];
-  for (const key of required) if (!(key in args)) return `missing required tool argument: ${key}`;
-  const properties = shape.properties && typeof shape.properties === 'object' && !Array.isArray(shape.properties)
-    ? shape.properties as Record<string, { type?: unknown }>
-    : {};
-  if (shape.additionalProperties === false) {
-    const unknown = Object.keys(args).find((key) => !(key in properties));
-    if (unknown) return `unknown tool argument: ${unknown}`;
-  }
-  for (const [key, value] of Object.entries(args)) {
-    const expected = properties[key]?.type;
-    if (typeof expected !== 'string') continue;
-    const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
-    if (actual !== expected) return `tool argument ${key} must be ${expected}`;
-  }
-  return undefined;
+  return validateJsonSchema(args, definition.function.parameters as Record<string, unknown>) ?? undefined;
 }
 
 async function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -313,6 +329,7 @@ export function createExecutor(
   codingToolHost: CodingToolHost,
   externalMcpRegistry?: ExternalMcpRegistry,
   skillRegistry?: SkillRegistry,
+  orchestration?: AgentOrchestrationPort,
 ) {
   const skillToolNames = new Set(SKILL_TOOL_DEFINITIONS.map((tool) => tool.function.name));
 
@@ -321,31 +338,41 @@ export function createExecutor(
     if (policy.deny?.includes(toolName)) return false;
     if (toolName.startsWith('mcp__') && policy.allowExternalMcp === false) return false;
     if (skillToolNames.has(toolName) && policy.allowSkills === false) return false;
+    if (isAgentOrchestrationTool(toolName) && policy.allowOrchestration === false) return false;
     return !policy.allow || policy.allow.includes(toolName);
   }
 
   const toolFns: Record<string, (args: Record<string, unknown>) => unknown> = {
-    read_file: ({ path }) => codingToolHost.readFile(path as string),
+    read_file: ({ path, offset, limit }) => codingToolHost.readFile(path as string, {
+      ...(typeof offset === 'number' ? { offset } : {}),
+      ...(typeof limit === 'number' ? { limit } : {}),
+    }),
     write_file: ({ path, content }) => codingToolHost.writeFile(path as string, content as string),
-    patch_file: ({ path, patch }) => codingToolHost.patchFile(path as string, patch as string),
-    search_in_workspace: ({ query, path }) => codingToolHost.searchInWorkspace(query as string, path as string | undefined),
-    run_command: ({ command }) => codingToolHost.runCommand(command as string),
-    read_lints: ({ path }) => codingToolHost.readLints?.(path as string | undefined) ?? { error: 'read_lints unavailable' },
-    diff_file: ({ path, snapshotId }) => codingToolHost.diffFile?.(path as string, snapshotId as string | undefined) ?? { error: 'diff_file unavailable' },
-    list_workspace: () => codingToolHost.listWorkspace(),
-    list_versions: () => codingToolHost.listVersions(),
-    create_snapshot: ({ name, description }) => codingToolHost.createSnapshot(name as string | undefined, description as string | undefined),
-    restore_snapshot: ({ snapshotId }) => codingToolHost.restoreSnapshot(snapshotId as string),
+    find: (args) => codingToolHost.find(args as Parameters<CodingToolHost['find']>[0]),
+    ls: (args) => codingToolHost.ls(args as Parameters<CodingToolHost['ls']>[0]),
+    list_workspace: (args) => codingToolHost.listWorkspace(args as Parameters<CodingToolHost['listWorkspace']>[0]),
+    grep: (args) => codingToolHost.grep(args as Parameters<CodingToolHost['grep']>[0]),
+    patch_file: (args) => codingToolHost.patchFile(args as PatchFileInput),
+    run_command: ({ command, timeout_ms, run_in_background }) => codingToolHost.runCommand(command as string, {
+      ...(typeof timeout_ms === 'number' ? { timeoutMs: timeout_ms } : {}),
+      ...(typeof run_in_background === 'boolean' ? { runInBackground: run_in_background } : {}),
+    }),
+    read_command_output: ({ task_id, wait_ms }) => codingToolHost.readCommandOutput?.(String(task_id ?? ''), typeof wait_ms === 'number' ? wait_ms : undefined) ?? { error: 'read_command_output unavailable' },
+    stop_command: ({ task_id }) => codingToolHost.stopCommand?.(String(task_id ?? '')) ?? { error: 'stop_command unavailable' },
   };
 
   async function buildToolDefinitions(includeContextTools = false, policy?: ToolPolicy) {
+    const codingTools = codingToolHost.getToolDefinitions?.() ?? LOCAL_TOOL_DEFINITIONS;
     const local = skillRegistry && policy?.allowSkills !== false
-      ? [...LOCAL_TOOL_DEFINITIONS, ...MEMORY_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS]
-      : [...LOCAL_TOOL_DEFINITIONS, ...MEMORY_TOOL_DEFINITIONS];
+      ? [...codingTools, ...MEMORY_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS]
+      : [...codingTools, ...MEMORY_TOOL_DEFINITIONS];
     const enabled = codingToolHost.isToolEnabled
       ? local.filter((tool) => codingToolHost.isToolEnabled?.(tool.function.name))
       : local;
-    const builtIn = (includeContextTools ? [...enabled, ...CONTEXT_TOOL_DEFINITIONS] : enabled)
+    const withOrchestration = orchestration && policy?.allowOrchestration !== false
+      ? [...enabled, ...agentOrchestrationToolDefinitions(orchestration.definitions?.() ?? [])]
+      : enabled;
+    const builtIn = (includeContextTools ? [...withOrchestration, ...CONTEXT_TOOL_DEFINITIONS] : withOrchestration)
       .filter((tool) => policyAllows(tool.function.name, policy));
     if (policy?.allowExternalMcp === false || !externalMcpRegistry?.hasExternalTools()) return builtIn;
     const external = await externalMcpRegistry.listTools();
@@ -394,18 +421,21 @@ export function createExecutor(
       const contextSummaryUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
       const contextRefreshWarnings: Array<{ itemId: string; message: string }> = [];
       let forceSummaryNext = false;
+      let orchestrationCircuitOpen = false;
       let currentDefinitions: Awaited<ReturnType<typeof buildToolDefinitions>> = [];
+      let forkSnapshot: ChatMessage[] = [];
       const base = () => ({ messages: loopMessages, finalContent, ...(finalMessageId ? { finalMessageId } : {}), toolsUsed, filesModified, fileChanges, skillsUsed, modelTurnCount, modelAttemptCount, usage, latestInputTokens, latestContextUsage, contextSummaryUsage, contextRefreshWarnings });
-      const maxTurns = options.maxIterations ?? MAX_ITERATIONS;
-      const maxAttempts = options.maxModelAttempts ?? maxTurns * 2;
+      const maxTurns = options.maxIterations ?? Number.POSITIVE_INFINITY;
+      const maxAttempts = options.maxModelAttempts
+        ?? (Number.isFinite(maxTurns) ? maxTurns * (MAX_CONTINUATIONS + 3) : Number.POSITIVE_INFINITY);
       const maxRetries = options.maxRetriesPerTurn ?? 1;
       const sessionId = options.sessionId ?? options.context?.sessionId ?? '';
 
       const applySteer = async (decision: Extract<Awaited<ReturnType<RunCommandSource['atSafeBoundary']>>, { action: 'continue' }>) => {
         workingMessages.push(decision.steer);
         loopMessages.push(decision.steer);
-        if (options.context) options.context.activeRequest = decision.directive;
-        if (!options.refreshDirective) return;
+        if (options.context && decision.updateActiveRequest !== false) options.context.activeRequest = decision.directive;
+        if (!options.refreshDirective || decision.refreshContext === false) return;
         onEvent({ type: 'context_refresh_started', sessionId, runId, itemId: decision.itemId });
         try {
           const refreshed = await options.refreshDirective(decision.directive);
@@ -441,8 +471,19 @@ export function createExecutor(
         let overflowRecovered = false;
         let recoverNext = false;
         let response: ModelResponse | undefined;
+        const outputBudgets = outputTokenBudgets(modelClient, options.maxOutputTokens);
+        let outputBudgetIndex = 0;
+        let continuationCount = 0;
+        let continuedContent = '';
+        let continuedReasoning = '';
         const messageId = `${runId}:message:${modelTurnCount}`;
         let messageStarted = false;
+        const resetDraft = () => {
+          if (!options.presentation || !messageStarted) return;
+          emitPresentation({ type: 'assistant_message_reset', messageId });
+          if (continuedReasoning) emitPresentation({ type: 'assistant_content_delta', messageId, contentIndex: 0, kind: 'reasoning', delta: continuedReasoning });
+          if (continuedContent) emitPresentation({ type: 'assistant_content_delta', messageId, contentIndex: 1, kind: 'text', delta: continuedContent });
+        };
         while (!response) {
           if (modelAttemptCount >= maxAttempts) {
             return { ...base(), status: 'limited', terminationReason: 'model_attempt_limit' };
@@ -452,18 +493,28 @@ export function createExecutor(
           const definitions = await buildToolDefinitions(Boolean(options.context), options.toolPolicy);
           currentDefinitions = definitions;
           let prepared: PreparedContext | undefined;
-          let requestMessages: ChatMessage[] = workingMessages;
+          const continuationMessages: ChatMessage[] = continuationCount > 0
+            ? [
+                ...(continuedContent ? [{ role: 'assistant' as const, content: continuedContent }] : []),
+                { role: 'user', content: CONTINUE_AFTER_LENGTH },
+              ]
+            : [];
+          const requestCanonicalMessages = continuationMessages.length > 0
+            ? [...workingMessages, ...continuationMessages]
+            : workingMessages;
+          let requestMessages: ChatMessage[] = requestCanonicalMessages;
           if (options.context) {
             const prepareInput = {
               sessionId: options.context.sessionId,
               runId,
+              ...(options.context.contextOwner ? { contextOwner: options.context.contextOwner } : {}),
               turn: modelTurnCount,
               attempt: modelAttemptCount,
               activeRequest: options.context.activeRequest,
               systemSections: options.context.systemSections,
-              canonicalMessages: workingMessages,
+              canonicalMessages: requestCanonicalMessages,
               toolDefinitions: definitions,
-              policy: options.context.policy,
+              policy: { ...options.context.policy, maxOutputTokens: outputBudgets[outputBudgetIndex] },
               forceSummary: forceSummaryNext,
               signal,
               onActivity: (presentation: import('../shared/types.ts').ContextPresentation) => {
@@ -482,7 +533,7 @@ export function createExecutor(
             latestContextUsage = prepared.usage;
             if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: prepared.usage });
             else onEvent({ type: 'context_usage', ...prepared.usage });
-            if (prepared.activity) {
+            if (prepared.activity && prepared.summaryRecord) {
               const contextPresentation = {
                   operationRef: prepared.activity.operationRef,
                   status: 'completed',
@@ -512,12 +563,14 @@ export function createExecutor(
             messageStarted = true;
             emitPresentation({ type: 'assistant_message_started', turn: modelTurnCount, messageId });
           }
+          forkSnapshot = structuredClone(requestMessages);
           const turn = await collectModelTurn(observeModelEvents(modelClient.streamMessage(requestMessages, {
             tools: definitions,
             tool_choice: 'auto',
             parallel_tool_calls: false,
-            ...(options.maxOutputTokens !== undefined ? { max_tokens: options.maxOutputTokens } : {}),
+            max_tokens: outputBudgets[outputBudgetIndex],
             signal,
+            ...(options.modelRequestTimeoutMs !== undefined ? { timeoutMs: options.modelRequestTimeoutMs } : {}),
           }), onEvent, options.presentation ? { messageId, emit: emitPresentation, phase: emitPhase } : undefined));
           if (signal.aborted || (turn.status === 'failed' && turn.failure.category === 'cancelled')) {
             return aborted(base());
@@ -586,11 +639,37 @@ export function createExecutor(
             if (options.presentation) emitPresentation({ type: 'context_usage_changed', usage: latestContextUsage });
             else onEvent({ type: 'context_usage', ...latestContextUsage });
           }
-          response = turn.response;
+          usage = usageSummary(usage, turn.response.usage);
+          await options.semantic?.usageUpdated?.(usage);
+          latestInputTokens = turn.response.usage?.inputTokens;
+          if (turn.response.finishReason === 'length') {
+            if (outputBudgetIndex < outputBudgets.length - 1) {
+              outputBudgetIndex += 1;
+              emitPhase('retrying');
+              resetDraft();
+              continue;
+            }
+            continuedContent += turn.response.content;
+            continuedReasoning += turn.response.reasoning;
+            if (continuationCount < MAX_CONTINUATIONS) {
+              continuationCount += 1;
+              emitPhase('retrying');
+              resetDraft();
+              continue;
+            }
+            response = { ...turn.response, content: continuedContent, reasoning: continuedReasoning, toolCalls: [] };
+            continue;
+          }
+          response = continuedContent || continuedReasoning
+            ? {
+                ...turn.response,
+                content: continuedContent + turn.response.content,
+                reasoning: continuedReasoning + turn.response.reasoning,
+              }
+            : turn.response;
         }
 
-        usage = usageSummary(usage, response.usage);
-        latestInputTokens = response.usage?.inputTokens;
+        latestInputTokens = response.usage?.inputTokens ?? latestInputTokens;
         if (!options.context) {
           latestContextUsage = {
             ...(latestInputTokens !== undefined ? { usedTokens: latestInputTokens } : {}),
@@ -604,7 +683,7 @@ export function createExecutor(
           else onEvent({ type: 'context_usage', ...latestContextUsage });
         }
         if (response.finishReason === 'length' && response.toolCalls.length === 0 && response.content.length === 0) {
-          return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
+          return { ...base(), status: 'limited', terminationReason: 'output_token_limit' };
         }
         finalContent = response.content || finalContent;
         const assistant = assistantMessage(response);
@@ -612,11 +691,20 @@ export function createExecutor(
         emitPresentation({ type: 'assistant_message_committed', turn: modelTurnCount, message: committedAssistantMessage(response, modelTurnCount, messageId) });
         workingMessages.push(assistant);
         loopMessages.push(assistant);
+        if (options.maxTotalTokens !== undefined && usage.totalTokens > options.maxTotalTokens) {
+          finalMessageId = messageId;
+          await options.semantic?.turnEnded?.({ turn: modelTurnCount, toolCalls: response.toolCalls.map((call) => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+          })), finishReason: response.finishReason });
+          return { ...base(), status: 'limited', terminationReason: 'total_token_limit' };
+        }
         if (response.toolCalls.length === 0) {
           finalMessageId = messageId;
           await options.semantic?.turnEnded?.({ turn: modelTurnCount, toolCalls: [], finishReason: response.finishReason });
           if (response.finishReason === 'length') {
-            return { ...base(), status: 'limited', terminationReason: 'model_turn_limit' };
+            return { ...base(), status: 'limited', terminationReason: 'output_token_limit' };
           }
           const decision = await options.commandSource?.atSafeBoundary({
             sessionId,
@@ -665,11 +753,12 @@ export function createExecutor(
           toolsUsed.push(toolName);
           let toolResult: unknown;
           let fileDiff: FileDiff | undefined;
-          const semanticContextTool = toolName === 'compact_context';
+          const semanticContextTool = toolName === 'read_artifact' || toolName === 'compact_context' || isAgentOrchestrationTool(toolName);
           const policyDenied = !policyAllows(toolName, options.toolPolicy);
+          const orchestrationInvalid = isAgentOrchestrationTool(toolName) ? validateOrchestrationToolInput(toolName, args) : undefined;
           const invalid = policyDenied
             ? `tool forbidden by policy: ${toolName}`
-            : validationError(currentDefinitions, toolName, args);
+            : orchestrationInvalid ?? validationError(currentDefinitions, toolName, args);
           let toolRunning = false;
           const markToolRunning = () => {
             if (semanticContextTool || toolRunning) return;
@@ -697,17 +786,12 @@ export function createExecutor(
                 });
               }
             }
-            if (invalid) toolResult = { status: 'rejected', error: invalid };
+            if (invalid) toolResult = policyDenied
+              ? toolFailure('blocked', 'BLOCKED_BY_POLICY', invalid, { tool: toolName })
+              : toolFailure('invalid_arguments', 'INVALID_ARGUMENTS', invalid, { tool: toolName });
             if (invalid) {
               // Rejected calls still receive a paired tool result but never reach an execution adapter.
-            } else if (toolName === 'ask_user') {
-              if (!onConfirm) toolResult = { error: 'confirmation unavailable' };
-              else {
-                if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
-                toolResult = { answer: await onConfirm(String(args.question ?? 'Please confirm'), Array.isArray(args.options) ? args.options.map(String) : undefined) };
-              }
             } else if (toolName === 'read_artifact' && options.context) {
-              markToolRunning();
               toolResult = await options.context.readArtifact({
                 ref: String(args.ref ?? ''),
                 ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
@@ -716,6 +800,77 @@ export function createExecutor(
             } else if (toolName === 'compact_context' && options.context) {
               toolResult = { status: 'scheduled', message: '上下文将在当前工具批次完成后整理' };
               forceSummaryNext = true;
+            } else if (isAgentOrchestrationTool(toolName) && orchestration) {
+              const caller = {
+                sessionId,
+                ...(options.callerAgentId ? { callerAgentId: options.callerAgentId } : {}),
+                callerRunId: runId,
+                callerTurn: modelTurnCount,
+                toolCallId: call.id,
+                delegationGroupId: `delegation-${runId}-${modelTurnCount}`,
+                forkSnapshot: projectAgentFork(forkSnapshot, {
+                  maxSegments: 4,
+                  maxTokens: Math.max(1_000, Math.floor((modelClient.contextWindow ?? 32_000) * 0.25)),
+                }).messages,
+                signal,
+              };
+              if (toolName === 'spawn_agent') {
+                toolResult = await orchestration.spawn({
+                  task: String(args.task),
+                  ...(typeof args.agent === 'string' ? { agent: args.agent } : {}),
+                  ...(typeof args.context_mode === 'string' ? { contextMode: args.context_mode as 'fresh' | 'fork' } : {}),
+                  ...(typeof args.name === 'string' ? { name: args.name } : {}),
+                  ...(typeof args.isolation === 'string' ? { isolation: args.isolation as 'shared' | 'worktree' } : {}),
+                }, caller);
+              } else if (toolName === 'wait_agent') {
+                const waitInput = {
+                  agentIds: (args.agent_ids as unknown[]).map(String),
+                  ...(typeof args.mode === 'string' ? { mode: args.mode as 'any' | 'all' } : {}),
+                  ...(typeof args.block === 'boolean' ? { block: args.block } : {}),
+                  ...(typeof args.timeout_ms === 'number' ? { timeoutMs: args.timeout_ms } : {}),
+                };
+                if (args.block === true && options.commandSource?.waitForSteer) {
+                  const waitController = new AbortController();
+                  const abortWait = () => waitController.abort(signal.reason ?? 'Main Run ended');
+                  if (signal.aborted) abortWait();
+                  else signal.addEventListener('abort', abortWait, { once: true });
+                  try {
+                    const waitPromise = orchestration.wait(waitInput, { ...caller, signal: waitController.signal });
+                    const interruptionPromise = options.commandSource.waitForSteer({ sessionId, runId, signal: waitController.signal });
+                    const first = await Promise.race([
+                      waitPromise.then((result) => ({ kind: 'wait' as const, result })),
+                      interruptionPromise.then((reason) => ({ kind: 'interruption' as const, reason })),
+                    ]);
+                    if (first.kind === 'wait') {
+                      toolResult = first.result;
+                      waitController.abort('Agent wait settled');
+                    } else {
+                      waitController.abort(first.reason === 'steer' ? 'Steer is pending' : 'Main Run ended');
+                      const interrupted = await waitPromise;
+                      toolResult = first.reason === 'steer'
+                        ? {
+                            ...(interrupted && typeof interrupted === 'object' ? interrupted as Record<string, unknown> : { result: interrupted }),
+                            status: 'interrupted',
+                            code: 'steer_pending',
+                            wait_cancelled: true,
+                            message: 'Foreground Agent wait yielded because a user Steer is pending. The Main Run and Child Runs remain active; handle the Steer before deciding whether to wait again.',
+                          }
+                        : interrupted;
+                    }
+                  } finally {
+                    signal.removeEventListener('abort', abortWait);
+                  }
+                } else {
+                  toolResult = await orchestration.wait(waitInput, caller);
+                }
+              } else if (toolName === 'followup_agent') {
+                toolResult = await orchestration.followup({ agentId: String(args.agent_id), task: String(args.task) }, caller);
+              } else {
+                toolResult = await orchestration.stop({ agentId: String(args.agent_id), ...(typeof args.reason === 'string' ? { reason: args.reason } : {}) }, caller);
+              }
+              if (toolResult && typeof toolResult === 'object' && (toolResult as Record<string, unknown>).orchestration_circuit_open === true) {
+                orchestrationCircuitOpen = true;
+              }
             } else if (isMemoryTool(toolName) && codingToolHost.executeManagedMemoryTool) {
               markToolRunning();
               toolResult = await codingToolHost.executeManagedMemoryTool(toolName, args, { runId, ...(options.sessionId ? { sessionId: options.sessionId } : {}), signal });
@@ -755,11 +910,12 @@ export function createExecutor(
                   const execute = () => codingToolHost.executeAgentTool!(toolName, args, {
                     origin: 'agent',
                     onApproval,
+                    nonInteractive: options.nonInteractive,
                     signal,
                     onEffectStart: markToolRunning,
                   });
                   if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
-                    const captured = await captureFileDiff(codingToolHost.readFile, args.path, execute);
+                    const captured = await captureFileDiff(codingToolHost.readFileForDiff ?? codingToolHost.readFile, args.path, execute);
                     toolResult = captured.result;
                     fileDiff = captured.diff;
                     if (captured.diff.before !== captured.diff.after) {
@@ -774,7 +930,7 @@ export function createExecutor(
                   toolResult = await codingToolHost.runCommand(String(args.command ?? ''), { onCommandConfirm, signal });
                 } else if ((toolName === 'write_file' || toolName === 'patch_file') && typeof args.path === 'string') {
                   markToolRunning();
-                  const captured = await captureFileDiff(codingToolHost.readFile, args.path, () => fn(args));
+                  const captured = await captureFileDiff(codingToolHost.readFileForDiff ?? codingToolHost.readFile, args.path, () => fn(args));
                   toolResult = captured.result;
                   fileDiff = captured.diff;
                   fileChanges.push(captured.diff);
@@ -788,27 +944,43 @@ export function createExecutor(
                   toolResult = await codingToolHost.executeAgentTool(toolName, args, {
                     origin: 'agent',
                     onApproval,
+                    nonInteractive: options.nonInteractive,
                     signal,
                     onEffectStart: markToolRunning,
                     executeExternal: (name, input, executionSignal) => externalMcpRegistry.callTool(name, input, executionSignal),
                   });
                 } else if (!onConfirm) {
-                  toolResult = { status: 'denied', error: 'external MCP tool requires an approval channel' };
+                  toolResult = toolFailure('denied', 'APPROVAL_REQUIRED', 'External MCP tool requires an approval channel');
                 } else {
                   if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
                   const decision = await onConfirm(`Allow external MCP tool ${toolName}?`, ['allow', 'deny']);
                   toolResult = decision === 'allow'
                     ? await (async () => { markToolRunning(); return externalMcpRegistry.callTool(toolName, args, signal); })()
-                    : { status: 'denied', error: 'external MCP tool denied' };
+                    : toolFailure('denied', 'APPROVAL_DENIED', 'External MCP tool denied');
                 }
               } else {
-                toolResult = { error: `unknown tool: ${toolName}` };
+                toolResult = toolFailure('failed', 'UNSUPPORTED_TOOL', `Unknown tool: ${toolName}`, { tool: toolName });
               }
-              toolResult = enrichToolResult(toolName, toolResult);
-              if (toolName === 'restore_snapshot') filesModified.push('[workspace restored from snapshot]');
             }
           } catch (error) {
-            toolResult = { error: error instanceof Error ? error.message : String(error) };
+            toolResult = signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
+              ? toolFailure('cancelled', 'CANCELLED', 'Tool execution was cancelled', { tool: toolName })
+              : toolFailure('failed', 'EXECUTION_FAILED', error instanceof Error ? error.message : String(error), { tool: toolName });
+          }
+          toolResult = enrichToolResult(toolName, toolResult);
+          const normalizedToolResult = normalizeToolResult(toolResult);
+          if (!normalizedToolResult.ok) toolResult = normalizedToolResult;
+          if (options.presentation && (toolName === 'spawn_agent' || toolName === 'followup_agent') && toolResult && typeof toolResult === 'object') {
+            const result = toolResult as Record<string, unknown>;
+            if (typeof result.agent_id === 'string' && typeof result.agent_run_id === 'string') {
+              emitPresentation({
+                type: 'agent_invocation_started',
+                callId: call.id,
+                agentId: result.agent_id,
+                agentRunId: result.agent_run_id,
+                turn: modelTurnCount,
+              });
+            }
           }
           if (!semanticContextTool) {
             onEvent({ type: 'tool', tool: toolName, summary: `Tool call: ${toolName}`, detail: toolSummary(toolResult) });
@@ -836,6 +1008,14 @@ export function createExecutor(
           })),
           finishReason: response.finishReason,
         });
+        if (orchestrationCircuitOpen) {
+          return {
+            ...base(),
+            status: 'limited',
+            terminationReason: 'orchestration_stalled',
+            error: { code: 'ORCHESTRATION_STALLED', message: 'Multi-Agent orchestration was stopped after repeated operations made no state progress.' },
+          };
+        }
         const decision = await options.commandSource?.atSafeBoundary({
           sessionId,
           runId,

@@ -1,7 +1,7 @@
 import { createParser } from 'eventsource-parser';
 import type { RunEventEnvelope } from '../../../packages/run-protocol/contracts';
 import { isDroppableRunEvent, parseRunEventEnvelope } from '../../../packages/run-protocol/validation';
-import type { Capability, ConversationListItem, ConversationScope, ConversationSnapshot, QueueDelivery, QueueMutationOutcome } from './types';
+import type { AgentActivityEnvelope, AgentDetail, AgentTreeSnapshot, Capability, ConversationListItem, ConversationScope, ConversationSnapshot, QueueDelivery, QueueMutationOutcome } from './types';
 
 function workspaceHeaders(workspaceRef?: string): HeadersInit {
   return workspaceRef ? { 'X-Workspace-Ref': workspaceRef } : {};
@@ -185,6 +185,59 @@ export async function streamConversation(input: {
   return { lastSeq, ...(runId ? { runId } : {}), terminal };
 }
 
+export async function streamExistingConversationRun(input: {
+  scope: ConversationScope;
+  runId: string;
+  signal: AbortSignal;
+  onEvent: (event: RunEventEnvelope) => void;
+}): Promise<void> {
+  const lastSeqByRun = new Map<string, number>();
+  let lastSeq = 0;
+  const maxReconnects = 3;
+  for (let reconnect = 0; reconnect <= maxReconnects; reconnect += 1) {
+    try {
+      let lastEventWasTerminal = false;
+      const response = await fetch(`/api/conversation-runs/${encodeURIComponent(input.runId)}/events?afterSeq=${lastSeq}&${scopeQuery(input.scope)}`, {
+        headers: {
+          Accept: 'text/event-stream',
+          'X-DexCode-Stream-Version': '2',
+          ...workspaceHeaders(scopeWorkspaceRef(input.scope)),
+        },
+        signal: input.signal,
+      });
+      if (!response.ok || !response.body) {
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(payload.error || `连接运行失败（${response.status}）`);
+      }
+      const parser = createParser({
+        maxBufferSize: 2 * 1024 * 1024,
+        onEvent(message) {
+          const envelope = parseRunEventEnvelope(JSON.parse(message.data));
+          const previousSeq = lastSeqByRun.get(envelope.runId) ?? 0;
+          if (envelope.seq <= previousSeq) return;
+          lastSeqByRun.set(envelope.runId, envelope.seq);
+          if (envelope.runId === input.runId) lastSeq = envelope.seq;
+          lastEventWasTerminal = envelope.event.type === 'run_finished' || envelope.event.type === 'stream_error';
+          input.onEvent(envelope);
+        },
+      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        parser.feed(decoder.decode(value, { stream: !done }));
+        if (done) break;
+      }
+      parser.reset({ consume: true });
+      if (lastEventWasTerminal) return;
+      throw new Error('运行流在终态前中断');
+    } catch (error) {
+      if (input.signal.aborted || reconnect === maxReconnects) throw error;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150 * (reconnect + 1)));
+    }
+  }
+}
+
 export async function enqueueQueuedMessage(input: {
   scope: ConversationScope;
   sessionId: string;
@@ -255,6 +308,65 @@ export async function streamQueueResume(input: { scope: ConversationScope; sessi
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : '服务端返回了无法解析的流式事件');
       }
+    },
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { value, done } = await reader.read();
+    parser.feed(decoder.decode(value, { stream: !done }));
+    if (done) break;
+  }
+  parser.reset({ consume: true });
+}
+
+export async function stopConversationSession(scope: ConversationScope, sessionId: string): Promise<{
+  ok: true;
+  stopped: boolean;
+  stoppedMain: boolean;
+  stoppedAgents: number;
+  pendingNotificationsConsumed: number;
+  activeRun: { runId: string; phase: string } | null;
+  agents: AgentTreeSnapshot | null;
+}> {
+  return apiJson(`/api/conversations/${encodeURIComponent(sessionId)}/commands?${scopeQuery(scope)}`, {
+    method: 'POST',
+    workspaceRef: scopeWorkspaceRef(scope),
+    body: JSON.stringify({ action: 'stop_all' }),
+  });
+}
+
+export async function getAgentTree(scope: ConversationScope, sessionId: string): Promise<AgentTreeSnapshot | null> {
+  return (await apiJson<{ agents: AgentTreeSnapshot | null }>(`/api/session/${encodeURIComponent(sessionId)}/agents`, {
+    workspaceRef: scopeWorkspaceRef(scope),
+  })).agents;
+}
+
+export async function getAgentDetail(scope: ConversationScope, sessionId: string, agentId: string): Promise<AgentDetail> {
+  return apiJson<AgentDetail>(`/api/session/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`, {
+    workspaceRef: scopeWorkspaceRef(scope),
+  });
+}
+
+export async function stopChildAgent(scope: ConversationScope, sessionId: string, agentId: string): Promise<void> {
+  await apiJson(`/api/session/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}/stop`, {
+    method: 'POST', workspaceRef: scopeWorkspaceRef(scope), body: JSON.stringify({ reason: 'Stopped from Agent activity view' }),
+  });
+}
+
+export async function streamAgentActivity(input: {
+  scope: ConversationScope; sessionId: string; afterSeq?: number; signal: AbortSignal; onEvent(event: AgentActivityEnvelope): void;
+}): Promise<void> {
+  const response = await fetch(`/api/session/${encodeURIComponent(input.sessionId)}/agents/events?afterSeq=${input.afterSeq ?? 0}`, {
+    headers: { Accept: 'text/event-stream', ...workspaceHeaders(scopeWorkspaceRef(input.scope)) }, signal: input.signal,
+  });
+  if (!response.ok || !response.body) throw new Error(`Agent activity stream failed (${response.status})`);
+  const parser = createParser({
+    maxBufferSize: 512 * 1024,
+    onEvent(message) {
+      const envelope = JSON.parse(message.data) as AgentActivityEnvelope;
+      if (envelope.version !== 1 || envelope.sessionId !== input.sessionId || !Number.isSafeInteger(envelope.seq) || !envelope.event?.type) return;
+      input.onEvent(envelope);
     },
   });
   const reader = response.body.getReader();

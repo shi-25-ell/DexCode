@@ -5,7 +5,7 @@
 ## 功能
 
 - **聊天驱动**：向 AI 下达自然语言编码指令，单 Agent Run 通过 ReAct 循环直接执行，不包含 Orchestrator 或多 Agent 调度
-- **智能文件编辑**：Agent 优先用 `patch_file` 做局部修改，仅在新建或整文件重写时使用 `write_file`；支持 `search_in_workspace` 先定位再修改
+- **智能文件编辑**：Agent 优先用严格的 `patch_file` 做局部修改，仅在新建或整文件重写时使用 `write_file`；通过 `find`、`ls`、`grep` 和 `list_workspace` 定位代码
 - **文件管理**：浏览、编辑、创建、重命名、删除工作区文件
 - **真实流式输出**：OpenAI-compatible SSE 会被解析为统一的文本、reasoning、tool call 和 terminal 事件，再通过有界 SSE 队列输出
 - **可恢复会话**：多会话独立隔离，持久化 Run ledger、终态报告、上下文清单和压缩 checkpoint
@@ -69,6 +69,12 @@ MCP、工具、Skill、白名单、项目知识均从统一 React 外壳进入�
 # 逗号分隔；移除注册项后，侧边栏和设置路由同时收口
 DEX_DISABLED_CAPABILITIES=project-knowledge
 
+# 命令工具默认使用 PowerShell；仅在 Git Bash 探测可用时选择 bash
+DEX_COMMAND_SHELL=powershell
+# 可选：显式指定可执行文件，启动时会探测版本，不可用则明确失败
+DEX_POWERSHELL_PATH=C:\Program Files\PowerShell\7\pwsh.exe
+DEX_GIT_BASH_PATH=C:\Program Files\Git\bin\bash.exe
+
 # 构建时替换品牌图标；缺省使用 public/dexcode-icon.png
 VITE_BRAND_ICON_URL=/my-brand.svg
 ```
@@ -125,7 +131,8 @@ LLM_PROVIDER=doubao
 | `LLM_BASE_URL` | 否 | API 地址，默认 `https://api.openai.com/v1` |
 | `LLM_PROVIDER` | 否 | Provider 标识，目前仅 `doubao` 有特殊行为 |
 | `LLM_TEMPERATURE` | 否 | 温度，默认 `0.7` |
-| `LLM_MAX_TOKENS` | 否 | 最大 token 数，默认 `4096` |
+| `LLM_MAX_OUTPUT_TOKENS` | 否 | 模型真实支持的单次输出上限；请求从 16k 起，截断后最多提升到 64k |
+| `LLM_MAX_TOKENS` | 否 | `LLM_MAX_OUTPUT_TOKENS` 的兼容别名 |
 | `LLM_TOP_P` | 否 | Top-p 采样，不填则不传给 API |
 | `LLM_TIMEOUT` | 否 | 请求超时（毫秒） |
 | `LLM_MAX_RETRIES` | 否 | 最大重试次数 |

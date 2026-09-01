@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
-import { FolderClock, FolderSearch2 } from 'lucide-react';
+import { FolderClock, FolderSearch2, X } from 'lucide-react';
 import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { listRecentWorkspaces, suggestWorkspacePaths } from '../api';
 
 export const WORKSPACE_HISTORY_KEY = 'dexcode.workspaceHistory.v1';
+export const WORKSPACE_HIDDEN_HISTORY_KEY = 'dexcode.hiddenWorkspaceHistory.v1';
 const HISTORY_LIMIT = 10;
 
 export type WorkspaceSuggestion = { path: string; source: 'recent' | 'filesystem' };
@@ -36,6 +37,21 @@ function readLocalHistory(): string[] {
   }
 }
 
+function readHiddenHistory(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(WORKSPACE_HIDDEN_HISTORY_KEY) ?? '[]') as unknown;
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeHiddenHistory(paths: string[]): string[] {
+  const next = paths.slice(0, HISTORY_LIMIT);
+  localStorage.setItem(WORKSPACE_HIDDEN_HISTORY_KEY, JSON.stringify(next));
+  return next;
+}
+
 function writeLocalHistory(path: string): string[] {
   const next = [path, ...readLocalHistory().filter((item) => comparablePath(item) !== comparablePath(path))].slice(0, HISTORY_LIMIT);
   localStorage.setItem(WORKSPACE_HISTORY_KEY, JSON.stringify(next));
@@ -59,6 +75,7 @@ export function WorkspacePicker({
   const [debounced, setDebounced] = useState(value);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [localHistory, setLocalHistory] = useState<string[]>(() => readLocalHistory());
+  const [hiddenHistory, setHiddenHistory] = useState<string[]>(() => readHiddenHistory());
   const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -78,11 +95,14 @@ export function WorkspacePicker({
     enabled: focused && Boolean(debounced),
     retry: false,
   });
-  const suggestions = useMemo(() => mergeWorkspaceSuggestions(
-    value,
-    [...localHistory, ...(recent.data ?? []).map((workspace) => workspace.path)],
-    filesystem.data ?? [],
-  ), [filesystem.data, localHistory, recent.data, value]);
+  const suggestions = useMemo(() => {
+    const hidden = new Set(hiddenHistory.map(comparablePath));
+    return mergeWorkspaceSuggestions(
+      value,
+      [...localHistory, ...(recent.data ?? []).map((workspace) => workspace.path)].filter((path) => !hidden.has(comparablePath(path))),
+      filesystem.data ?? [],
+    );
+  }, [filesystem.data, hiddenHistory, localHistory, recent.data, value]);
   const open = focused && suggestions.length > 0;
 
   useEffect(() => setActiveIndex((index) => Math.min(index, suggestions.length - 1)), [suggestions.length]);
@@ -91,11 +111,22 @@ export function WorkspacePicker({
     onChange(path);
     setActiveIndex(-1);
   };
+  const forgetRecent = (path: string) => {
+    const key = comparablePath(path);
+    const nextLocal = readLocalHistory().filter((item) => comparablePath(item) !== key);
+    localStorage.setItem(WORKSPACE_HISTORY_KEY, JSON.stringify(nextLocal));
+    setLocalHistory(nextLocal);
+    setHiddenHistory((current) => writeHiddenHistory([path, ...current.filter((item) => comparablePath(item) !== key)]));
+    setActiveIndex(-1);
+  };
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const path = value.trim();
     if (await onResolve(path)) {
-      if (path) setLocalHistory(writeLocalHistory(path));
+      if (path) {
+        setLocalHistory(writeLocalHistory(path));
+        setHiddenHistory((current) => writeHiddenHistory(current.filter((item) => comparablePath(item) !== comparablePath(path))));
+      }
       setFocused(false);
     }
   };
@@ -156,6 +187,18 @@ export function WorkspacePicker({
                   {suggestion.source === 'recent' ? <FolderClock size={15} /> : <FolderSearch2 size={15} />}
                   <span title={suggestion.path}>{suggestion.path}</span>
                   <small>{suggestion.source === 'recent' ? '最近项目' : '路径建议'}</small>
+                  {suggestion.source === 'recent' ? (
+                    <button
+                      type="button"
+                      className="workspace-suggestion-delete"
+                      aria-label={`从最近项目移除 ${suggestion.path}`}
+                      title="从最近项目移除"
+                      onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                      onClick={(event) => { event.preventDefault(); event.stopPropagation(); forgetRecent(suggestion.path); }}
+                    >
+                      <X size={13} />
+                    </button>
+                  ) : null}
                 </li>
               ))}
             </ul>

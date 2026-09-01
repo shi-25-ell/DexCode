@@ -15,6 +15,7 @@ type OpenAiCompatibleModelOptions = {
   model: string;
   displayName?: string;
   contextWindow?: number;
+  outputTokenLimits?: { initial: number; maximum: number };
   providerDisplayName?: string;
   doubaoCompat?: boolean;
   reasoning?: ReasoningCapability;
@@ -136,7 +137,7 @@ function thrownFailure(error: unknown, callerSignal: AbortSignal | undefined, ti
 }
 
 export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModelOptions): ModelClient {
-  const { baseUrl, apiKey, model, displayName, contextWindow, providerDisplayName, doubaoCompat = false, defaults = {} } = options;
+  const { baseUrl, apiKey, model, displayName, contextWindow, outputTokenLimits, providerDisplayName, doubaoCompat = false, defaults = {} } = options;
   const reasoning = options.reasoning ?? { supported: 'unknown' as const, requestMode: 'provider_default' as const };
   if (reasoning.supported === false && reasoning.requestMode === 'enabled') {
     throw new Error('Reasoning cannot be enabled for a model declared unsupported');
@@ -161,7 +162,7 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
       messages,
       temperature: options.temperature ?? defaults.temperature ?? 0.7,
       top_p: options.top_p ?? defaults.top_p,
-      max_tokens: options.max_tokens ?? defaults.max_tokens ?? 4096,
+      max_tokens: options.max_tokens ?? defaults.max_tokens ?? outputTokenLimits?.initial ?? 16_384,
       stream_options: options.stream_options ?? { include_usage: true },
     };
     if (payload.top_p === undefined) delete payload.top_p;
@@ -279,7 +280,11 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
     baseUrl,
     displayName: displayName ?? model,
     contextWindow,
-    maxOutputTokens: defaults.max_tokens ?? 4096,
+    maxOutputTokens: outputTokenLimits?.initial ?? defaults.max_tokens ?? 16_384,
+    outputTokenLimits: outputTokenLimits ?? {
+      initial: defaults.max_tokens ?? 16_384,
+      maximum: defaults.max_tokens ?? 16_384,
+    },
     providerDisplayName,
     reasoning,
     streamMessage,

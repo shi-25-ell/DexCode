@@ -17,8 +17,8 @@ const snapshot: ConversationSnapshot = {
   contextUsage: { source: 'unknown', timing: 'next_request' },
 };
 
-function envelope(seq: number, event: RunEventPayload): RunEventEnvelope {
-  return { version: 2, runId: 'run-1', seq, at, event };
+function envelope(seq: number, event: RunEventPayload, eventAt = at): RunEventEnvelope {
+  return { version: 2, runId: 'run-1', seq, at: eventAt, event };
 }
 
 function started() {
@@ -36,6 +36,40 @@ describe('RunPresentation', () => {
     expect(state.committedItems).toEqual(snapshot.items);
     expect(draftReasoning(state.activeRun?.assistantDraft ?? null)?.content).toBe('think');
     expect(draftText(state.activeRun?.assistantDraft ?? null)).toBe('answer');
+  });
+
+  it('resumes the reasoning timer when reasoning output continues', () => {
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, { type: 'run_phase_changed', phase: 'thinking' }));
+    state = reduceRunEvent(state, envelope(4, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'think' }));
+    state = reduceRunEvent(state, envelope(5, { type: 'run_phase_changed', phase: 'answering' }));
+    expect(state.activeRun?.reasoningCompletedAt).toBe(at);
+
+    state = reduceRunEvent(state, envelope(6, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: ' more' }));
+    expect(state.activeRun?.reasoningCompletedAt).toBeUndefined();
+    expect(draftReasoning(state.activeRun?.assistantDraft ?? null)?.content).toBe('think more');
+  });
+
+  it('starts a fresh reasoning timer for each assistant message', () => {
+    const firstReasoningAt = '2026-08-31T00:00:01.000Z';
+    const secondReasoningAt = '2026-08-31T00:00:10.000Z';
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'first' }, firstReasoningAt));
+    state = reduceRunEvent(state, envelope(4, { type: 'assistant_message_started', turn: 2, messageId: 'message-2' }));
+    expect(state.activeRun?.reasoningStartedAt).toBeUndefined();
+
+    state = reduceRunEvent(state, envelope(5, { type: 'assistant_content_delta', messageId: 'message-2', contentIndex: 0, kind: 'reasoning', delta: 'second' }, secondReasoningAt));
+    expect(state.activeRun?.reasoningStartedAt).toBe(secondReasoningAt);
+  });
+
+  it('clears a streamed draft before an output-limit retry', () => {
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'discarded reasoning' }));
+    state = reduceRunEvent(state, envelope(4, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 1, kind: 'text', delta: 'discarded' }));
+    state = reduceRunEvent(state, envelope(5, { type: 'assistant_message_reset', messageId: 'message-1' }));
+    expect(draftText(state.activeRun?.assistantDraft ?? null)).toBe('');
+    expect(state.activeRun?.reasoningStartedAt).toBeUndefined();
+    expect(state.activeRun?.reasoningCompletedAt).toBeUndefined();
   });
 
   it('uses a complete committed message to repair missing deltas without ending a tool Run', () => {
@@ -60,7 +94,7 @@ describe('RunPresentation', () => {
 
   it('updates one Tool Card and one approval in place', () => {
     let state = started();
-    const runningTool = { callRef: 'call-1', category: 'read' as const, name: '读取文件', status: 'queued' as const, summary: '准备执行' };
+    const runningTool = { callRef: 'call-1', toolName: 'read_file', category: 'read' as const, name: '读取文件', status: 'queued' as const, summary: '准备执行' };
     state = reduceRunEvent(state, envelope(3, { type: 'tool_started', callId: 'call-1', presentation: runningTool }));
     state = reduceRunEvent(state, envelope(4, { type: 'tool_progress', callId: 'call-1', presentation: { ...runningTool, status: 'running', summary: '正在执行' } }));
     state = reduceRunEvent(state, envelope(5, { type: 'tool_finished', callId: 'call-1', presentation: { ...runningTool, status: 'succeeded', summary: '完成' } }));
@@ -70,6 +104,35 @@ describe('RunPresentation', () => {
     expect(state.activeRun?.toolsByCallId['call-1']?.status).toBe('succeeded');
     expect(Object.keys(state.activeRun?.approvalsById ?? {})).toEqual(['approval-1']);
     expect(state.activeRun?.approvalsById['approval-1']?.resolved).toBe('继续');
+    expect(state.activeRun?.activityOrder).toEqual([
+      { kind: 'assistant', messageId: 'message-1' },
+      { kind: 'tool', callId: 'call-1' },
+      { kind: 'approval', approvalId: 'approval-1' },
+    ]);
+  });
+
+  it('never creates a new activity member from progress or finish', () => {
+    let state = started();
+    const stray = { callRef: 'stray', toolName: 'read_file', category: 'read' as const, name: '读取文件', status: 'running' as const, summary: '正在执行' };
+    state = reduceRunEvent(state, envelope(3, { type: 'tool_progress', callId: 'stray', presentation: stray }));
+    expect(state.activeRun?.activityOrder).toEqual([{ kind: 'assistant', messageId: 'message-1' }]);
+    expect(state.activeRun?.toolsByCallId.stray).toBeUndefined();
+    expect(state.needsResync).toBe(true);
+  });
+
+  it('anchors a started child run at the exact orchestration call', () => {
+    let state = started();
+    state = reduceRunEvent(state, envelope(3, {
+      type: 'agent_invocation_started',
+      callId: 'spawn-1',
+      agentId: 'agent-a',
+      agentRunId: 'agent-run-a',
+      turn: 1,
+    }));
+    expect(state.activeRun?.activityOrder).toEqual([
+      { kind: 'assistant', messageId: 'message-1' },
+      { kind: 'agent', callId: 'spawn-1', agentId: 'agent-a', agentRunId: 'agent-run-a', turn: 1 },
+    ]);
   });
 
   it('marks seq gaps for resync, ignores missing deltas, and accepts authoritative commit', () => {
@@ -126,6 +189,17 @@ describe('RunPresentation', () => {
     expect(JSON.stringify(interrupted.committedItems)).not.toContain('reasoning');
   });
 
+  it('hydrates an authoritative background Main Run without reporting a recovered interruption', () => {
+    const active = hydrateRunPresentation({
+      ...snapshot,
+      state: 'running',
+      activeRun: { runId: 'background-run-1', phase: 'running' },
+    });
+    expect(active.status).toBe('running');
+    expect(active.activeRun?.runId).toBe('background-run-1');
+    expect(active.committedItems.some((item) => item.kind === 'error' && item.id === 'interrupted-live-run')).toBe(false);
+  });
+
   it.each(['aborted', 'failed', 'limited'] as const)('uses the authoritative snapshot for a %s terminal without inventing success', (status) => {
     let state = started();
     state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'ephemeral' }));
@@ -160,7 +234,7 @@ describe('RunPresentation', () => {
   it('bounds reasoning and tool progress display buffers and marks truncation', () => {
     let state = started();
     state = reduceRunEvent(state, envelope(3, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 0, kind: 'reasoning', delta: 'r'.repeat(70_000) }));
-    const queued = { callRef: 'call-1', category: 'command' as const, name: '运行命令', status: 'queued' as const, summary: '准备中' };
+    const queued = { callRef: 'call-1', toolName: 'run_command', category: 'command' as const, name: '运行命令', status: 'queued' as const, summary: '准备中' };
     state = reduceRunEvent(state, envelope(4, { type: 'tool_started', callId: 'call-1', presentation: queued }));
     state = reduceRunEvent(state, envelope(5, { type: 'tool_progress', callId: 'call-1', presentation: { ...queued, status: 'running', rawOutput: 'o'.repeat(40_000) } }));
     expect(draftReasoning(state.activeRun?.assistantDraft ?? null)).toMatchObject({ truncated: true });

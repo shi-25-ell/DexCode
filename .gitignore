@@ -27,4 +27,8 @@ Thumbs.db
 todo/
 测试/
 .local
+<<<<<<< HEAD
 .aicoding
+=======
+.aicoding/
+>>>>>>> multi-agent

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -20,11 +20,7 @@ async function fixture() {
     updateFile: async (path, next) => { content = next; return { ok: true, path }; },
     listTree: () => [],
     listFiles: () => [],
-    searchInWorkspace: () => [],
-    patchFile: async (_path, patch) => { content = patch; return { ok: true }; },
-    listVersions: async () => [],
-    createSnapshot: async () => ({ ok: true }),
-    restoreSnapshot: async () => ({ ok: true }),
+    patchFile: async (input) => { content = JSON.stringify(input); return { ok: true }; },
     loadFromDisk: async () => [],
   }, { approvalModeStore: { getMode: () => mode } });
   return {
@@ -51,6 +47,39 @@ test('live approval mode is read for each tool authorization', async () => {
     await item.host.executeAgentTool('write_file', { path: 'a.ts', content: 'full-access' }, { origin: 'agent', onApproval: approve });
     assert.equal(requests, 1);
     assert.equal(item.read(), 'full-access');
+  } finally {
+    await item.cleanup();
+  }
+});
+
+test('MCP exposes the same exact ten-tool registry and rejects removed calls', async () => {
+  const item = await fixture();
+  try {
+    assert.deepEqual(item.host.mcp.listTools().map((tool) => tool.name), [
+      'find', 'ls', 'list_workspace', 'read_file', 'grep', 'run_command', 'patch_file', 'write_file', 'read_command_output', 'stop_command',
+    ]);
+    assert.match(String(item.host.mcp.validateToolCall('search_in_workspace', {})), /not found/i);
+  } finally {
+    await item.cleanup();
+  }
+});
+
+test('read_file model contract reaches the paginated disk implementation unchanged', async () => {
+  const item = await fixture();
+  try {
+    await writeFile(join(item.root, 'sample.txt'), 'one\ntwo\nthree\n', 'utf8');
+    const result = await item.host.executeAgentTool('read_file', { path: 'sample.txt', offset: 2, limit: 1 }, { origin: 'agent' }) as Record<string, unknown>;
+    assert.equal(result.content, 'two');
+    assert.equal(result.start_line, 2);
+    assert.equal(result.end_line, 2);
+    assert.equal(result.next_offset, 3);
+
+    const invalid = await item.host.executeAgentTool('read_file', { path: 'sample.txt', offset: 0 }, { origin: 'agent' }) as {
+      status: string;
+      error: { code: string };
+    };
+    assert.equal(invalid.status, 'invalid_arguments');
+    assert.equal(invalid.error.code, 'INVALID_ARGUMENTS');
   } finally {
     await item.cleanup();
   }
@@ -111,7 +140,7 @@ test('hard guards and missing approval channels fail closed', async () => {
   const item = await fixture();
   try {
     item.setMode('full_access');
-    const blocked = await item.host.executeAgentTool('run_command', { command: 'pwsh -Command Get-ChildItem' }, { origin: 'agent' }) as { status: string };
+    const blocked = await item.host.executeAgentTool('run_command', { command: 'Remove-Item -Recurse C:\\' }, { origin: 'agent' }) as { status: string };
     assert.equal(blocked.status, 'blocked');
     const outside = await item.host.executeAgentTool('write_file', { path: '../outside.ts', content: 'x' }, { origin: 'agent' }) as { status: string };
     assert.equal(outside.status, 'blocked');

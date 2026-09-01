@@ -260,7 +260,7 @@ function retrieveProjectMemory(memory: string, promptTokens: string[], maxChars:
 }
 
 export function createContextManager(codingToolHost: {
-  listWorkspace: () => any;
+  listWorkspaceFiles: () => any;
   readFile: (path: string) => any;
 }, options: { maxFiles?: number; maxChars?: number } = {}) {
   const maxFiles = options.maxFiles ?? 8;
@@ -268,7 +268,7 @@ export function createContextManager(codingToolHost: {
 
   return {
     async buildForPrompt(prompt: string, selectedFile: string | null = null, buildOptions: BuildForPromptOptions = {}): Promise<WorkspaceSummary> {
-      const files = await codingToolHost.listWorkspace() as WorkspaceFile[];
+      const files = await codingToolHost.listWorkspaceFiles() as WorkspaceFile[];
       const selectedFileContent = selectedFile ? await codingToolHost.readFile(selectedFile) : null;
 
       const promptTokens = tokenize(prompt);

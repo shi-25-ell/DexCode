@@ -94,6 +94,7 @@ export type RunEventPayload =
   | { type: 'run_started'; sessionId: string; isNew?: boolean; sourceItemId?: string }
   | { type: 'run_phase_changed'; phase: RunPhase; note?: SafeRunNote }
   | { type: 'assistant_message_started'; turn: number; messageId: string }
+  | { type: 'assistant_message_reset'; messageId: string }
   | {
       type: 'assistant_content_delta';
       messageId: string;
@@ -105,6 +106,7 @@ export type RunEventPayload =
   | { type: 'tool_started'; callId: string; presentation: ToolPresentation }
   | { type: 'tool_progress'; callId: string; presentation: ToolPresentation }
   | { type: 'tool_finished'; callId: string; presentation: ToolPresentation }
+  | { type: 'agent_invocation_started'; callId: string; agentId: string; agentRunId: string; turn: number }
   | { type: 'approval_requested'; request: RunApprovalRequest }
   | { type: 'approval_resolved'; approvalId: string; decision: string }
   | { type: 'context_usage_changed'; usage: ContextUsageSnapshot }

@@ -72,6 +72,7 @@ export function createMemoryRecall(options: {
 
   async function prepare(input: {
     sessionId: string;
+    contextOwnerId?: string;
     query: string;
     generation: number;
     inject: boolean;
@@ -86,7 +87,8 @@ export function createMemoryRecall(options: {
       options.store.readIndex(options.workspaceId),
       input.recallEnabled ? options.store.scan(options.workspaceId, input.signal) : Promise.resolve([]),
     ]);
-    const surfaced = surfacedBySession.get(input.sessionId) ?? new Set<string>();
+    const ownerId = input.contextOwnerId ?? input.sessionId;
+    const surfaced = surfacedBySession.get(ownerId) ?? new Set<string>();
     let selectedPaths: string[] = [];
     let selector: PreparedManagedMemory['recall']['selector'] = 'none';
     let warning: string | undefined;
@@ -125,7 +127,7 @@ export function createMemoryRecall(options: {
       refs.push({ path: topic.path, digest: topic.digest, mtimeMs: topic.mtimeMs, bytes: topic.bytes, truncated: topic.truncated, reason: 'relevant' });
       surfaced.add(`${topic.path}:${topic.digest}`);
     }
-    surfacedBySession.set(input.sessionId, surfaced);
+    surfacedBySession.set(ownerId, surfaced);
     const sections: ContextSection[] = input.inject ? [
       { source: 'systemPrompt', content: buildMemoryPolicyPrompt(candidates.length === 0) },
       { source: 'managedMemory', content: `## Managed Memory Index\n${index?.raw.trim() || '(empty)'}` },

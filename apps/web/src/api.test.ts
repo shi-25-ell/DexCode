@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RunEventEnvelope, RunEventPayload } from '../../../packages/run-protocol/contracts';
-import { streamConversation } from './api';
+import { streamConversation, streamExistingConversationRun } from './api';
 
 const at = '2026-08-31T00:00:00.000Z';
 
@@ -99,5 +99,30 @@ describe('streamConversation', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(JSON.parse(String((fetchMock.mock.calls[1]![1] as RequestInit).body))).toMatchObject({ afterSeq: 2 });
     expect(JSON.parse(String((fetchMock.mock.calls[2]![1] as RequestInit).body))).toMatchObject({ afterSeq: 2 });
+  });
+});
+
+describe('streamExistingConversationRun', () => {
+  it('attaches to a server-started Run by runId and forwards replayed events', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(stream([
+      event(1, { type: 'run_started', sessionId: 'session-1' }, 'background-run'),
+      event(2, { type: 'run_phase_changed', phase: 'requesting_model' }, 'background-run'),
+      event(3, {
+        type: 'run_finished', terminal: { status: 'completed', reason: 'natural_completion' }, conversationRevision: 2,
+        conversation: { ref: 'session-1', title: '会话', state: 'idle', updatedAt: at, revision: 2, queuedItems: [], queuePaused: false, items: [], contextUsage: { source: 'unknown', timing: 'next_request' } },
+      }, 'background-run'),
+    ]));
+    const delivered: number[] = [];
+    await streamExistingConversationRun({
+      scope: { kind: 'workspace', workspaceRef: 'workspace-1' },
+      runId: 'background-run',
+      signal: new AbortController().signal,
+      onEvent: (envelope) => delivered.push(envelope.seq),
+    });
+    expect(delivered).toEqual([1, 2, 3]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/conversation-runs/background-run/events?afterSeq=0&scope=workspace&workspaceRef=workspace-1',
+      expect.objectContaining({ headers: expect.objectContaining({ 'X-Workspace-Ref': 'workspace-1' }) }),
+    );
   });
 });

@@ -1,176 +1,8 @@
-/** Agent 可见的本地工具定义（含详细描述，减少 LLM 误用） */
+import { DEFAULT_AGENT_DEFINITION_NAME } from '../agent-manager/contracts.ts';
+import { agentCodingToolDefinitions } from '../tool-gateway/tool-registry.ts';
 
-export const LOCAL_TOOL_DEFINITIONS = [
-  {
-    type: 'function' as const,
-    function: {
-      name: 'read_file',
-      description:
-        '读取工作区文件全文。修改前务必先 read_file 获取最新内容。示例：{"path":"src/app.ts"}',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: '相对工作区根目录的路径' } },
-        required: ['path'],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'write_file',
-      description:
-        '整文件写入或新建。仅用于新文件或大范围重写；修改已有文件优先 patch_file。示例：{"path":"a.ts","content":"..."}',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          content: { type: 'string' },
-        },
-        required: ['path', 'content'],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'patch_file',
-      description:
-        '局部替换。格式：1) before\\n---\\nafter；2) before => after；3) unified diff；4) @@ line 42 行号锚点+替换块。失败时 read_file 核对原文。',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          patch: { type: 'string' },
-        },
-        required: ['path', 'patch'],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'search_in_workspace',
-      description:
-        '正则/文本搜索，返回路径、行号、片段。定位符号或配置时优先使用。示例：{"query":"createServer","path":"apps"}',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string' },
-          path: { type: 'string', description: '可选，限定子目录' },
-        },
-        required: ['query'],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'run_command',
-      description:
-        '在工作区执行 shell 命令。非白名单会等待用户确认。静态检查优先 read_lints。示例：{"command":"npm test"}',
-      parameters: {
-        type: 'object',
-        properties: { command: { type: 'string' } },
-        required: ['command'],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'read_lints',
-      description:
-        '只读 lint/tsc 检查，无需用户确认。示例：{"path":"src/app.ts"} 或 {} 检查全项目。',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string' } },
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'diff_file',
-      description:
-        '对比文件与版本快照差异（+/- 行）。需先 create_snapshot。示例：{"path":"src/app.ts","snapshotId":"v001"}',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          snapshotId: { type: 'string' },
-        },
-        required: ['path'],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'list_workspace',
-      description: '列出工作区文件树结构，不确定路径时先调用。',
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'ask_user',
-      description: '暂停并询问用户（破坏性操作或不确定决策）。不要用于普通命令确认（run_command 会自动确认）。',
-      parameters: {
-        type: 'object',
-        properties: {
-          question: { type: 'string' },
-          options: { type: 'array', items: { type: 'string' } },
-        },
-        required: ['question'],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'list_versions',
-      description: '列出工作区版本快照，供 diff_file / restore_snapshot 使用。',
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'create_snapshot',
-      description: '创建可回滚快照。大改前建议先快照。示例：{"name":"before-refactor","description":"..."}',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string' },
-          description: { type: 'string' },
-        },
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'restore_snapshot',
-      description: '从快照恢复整个工作区（破坏性）。恢复前应用 create_snapshot 备份。',
-      parameters: {
-        type: 'object',
-        properties: { snapshotId: { type: 'string' } },
-        required: ['snapshotId'],
-        additionalProperties: false,
-      },
-    },
-  },
-];
+/** Agent 可见的第一方编程工具全部由权威 registry 投影。 */
+export const LOCAL_TOOL_DEFINITIONS = agentCodingToolDefinitions();
 
 export const SKILL_TOOL_DEFINITIONS = [
   {
@@ -256,3 +88,77 @@ export const CONTEXT_TOOL_DEFINITIONS = [
     },
   },
 ];
+
+const SPAWN_AGENT_DESCRIPTION = `Start a persistent child agent asynchronously for a bounded task. After spawning, choose the coordination mode that fits the task: use wait_agent with block=true for a foreground synchronization barrier when the current user request depends on the child result, or continue independent work and finish the current Main Run for background delivery. Foreground waits yield when a user Steer arrives; background completions are delivered automatically in a later Main Run. Do not tight-poll. Use context_mode=fresh for self-contained work that does not need the current conversation; use context_mode=fork when the child needs a bounded snapshot of the main agent's current context. A fork is copied once and parent and child continue independently. Omit context_mode to use the selected agent definition's default. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`;
+const CONTEXT_MODE_DESCRIPTION = "Optional context strategy. fresh starts from the child agent's own system, workspace, memory, and task context without the main conversation. fork additionally copies a bounded snapshot of the main agent's current context; use it when prior discussion or findings are needed. The snapshot is copied once, so parent and child continue independently. Omit to use the selected agent definition's default.";
+
+export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
+  {
+    type: 'function' as const,
+    function: {
+      name: 'spawn_agent',
+      description: SPAWN_AGENT_DESCRIPTION,
+      parameters: {
+        type: 'object', additionalProperties: false, required: ['task'],
+        properties: {
+          task: { type: 'string', minLength: 1 },
+          agent: { type: 'string', minLength: 1, default: DEFAULT_AGENT_DEFINITION_NAME, description: `Optional specialized agent type. Omit to use ${DEFAULT_AGENT_DEFINITION_NAME}.` },
+          context_mode: { type: 'string', enum: ['fresh', 'fork'], description: CONTEXT_MODE_DESCRIPTION }, name: { type: 'string' },
+          isolation: { type: 'string', enum: ['shared', 'worktree'] },
+        },
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'wait_agent',
+      description: 'Inspect current child-agent Run status or explicitly wait in the foreground. block defaults to false and returns immediately. Use block=true for a synchronization barrier when this Main Run needs the result. A foreground wait yields early when a user Steer arrives: only the wait is cancelled, while the Main Run and Child Runs remain active; handle the Steer, then decide whether to wait again. A timeout is normal. Do not tight-poll. If the Main Run ends instead, Child completion is delivered automatically in a later Main Run.',
+      parameters: {
+        type: 'object', additionalProperties: false, required: ['agent_ids'],
+        properties: {
+          agent_ids: { type: 'array', minItems: 1, items: { type: 'string' } },
+          mode: { type: 'string', enum: ['any', 'all'] },
+          block: { type: 'boolean', default: false },
+          timeout_ms: { type: 'integer', minimum: 0, maximum: 60000 },
+        },
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'followup_agent',
+      description: 'Start a new asynchronous Run for an existing idle child agent using its retained conversation and policy snapshot. Then choose foreground wait_agent(block=true) or background delivery using the same task-dependent coordination rule as spawn_agent.',
+      parameters: { type: 'object', additionalProperties: false, required: ['agent_id', 'task'], properties: { agent_id: { type: 'string' }, task: { type: 'string', minLength: 1 } } },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'stop_agent',
+      description: 'Interrupt the current Run of a child agent without deleting its identity or conversation.',
+      parameters: { type: 'object', additionalProperties: false, required: ['agent_id'], properties: { agent_id: { type: 'string' }, reason: { type: 'string' } } },
+    },
+  },
+] as const;
+
+export function agentOrchestrationToolDefinitions(agents: Array<{ name: string; description: string }>) {
+  if (agents.length === 0) return [...AGENT_ORCHESTRATION_TOOL_DEFINITIONS];
+  const names = agents.map((agent) => agent.name);
+  const descriptions = agents.map((agent) => `${agent.name}: ${agent.description}`).join('; ');
+  return AGENT_ORCHESTRATION_TOOL_DEFINITIONS.map((tool) => tool.function.name !== 'spawn_agent' ? tool : ({
+    ...tool,
+    function: {
+      ...tool.function,
+      description: `${SPAWN_AGENT_DESCRIPTION} Available agent definitions: ${descriptions}`,
+      parameters: {
+        ...tool.function.parameters,
+        properties: {
+          ...tool.function.parameters.properties,
+          agent: { type: 'string', enum: names, default: DEFAULT_AGENT_DEFINITION_NAME, description: `Optional specialized agent type. Omit to use ${DEFAULT_AGENT_DEFINITION_NAME}. Available agent definitions: ${descriptions}` },
+        },
+      },
+    },
+  }));
+}

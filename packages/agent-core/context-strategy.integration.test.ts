@@ -6,6 +6,7 @@ import type { ChatOptions, ModelClient, ModelEvent } from '../llm-client/index.t
 import { createSessionRepository } from '../session-store/index.ts';
 import type { AgentEvent, ChatMessage } from '../shared/types.ts';
 import type { RunEventEnvelope } from '../run-protocol/index.ts';
+import type { AgentRecord, AgentRunRecord } from '../agent-manager/contracts.ts';
 import { createCodingAgent } from './index.ts';
 
 function toolHost() {
@@ -14,11 +15,10 @@ function toolHost() {
     writeFile: () => ({ ok: true }),
     runCommand: () => ({ ok: true }),
     listWorkspace: () => [],
-    searchInWorkspace: () => [],
+    find: () => ({ paths: [] }),
+    ls: () => ({ entries: [] }),
+    grep: () => ({ match_count: 0, output: '' }),
     patchFile: () => ({ ok: true }),
-    listVersions: () => [],
-    createSnapshot: () => ({ ok: true }),
-    restoreSnapshot: () => ({ ok: true }),
   };
 }
 
@@ -119,6 +119,103 @@ test('backend strategy selects the legacy or four-layer request path and records
     if (previousEnabled === undefined) delete process.env.CONTEXT_COMPACTION_ENABLED;
     else process.env.CONTEXT_COMPACTION_ENABLED = previousEnabled;
     await Promise.all(projectDirs.map((directory) => rm(directory, { recursive: true, force: true })));
+  }
+});
+
+test('child Agent uses the managed context path and persists owner-isolated manifests', async () => {
+  const previousStrategy = process.env.CONTEXT_COMPACTION_STRATEGY;
+  const previousReserve = process.env.CONTEXT_RESERVE_TOKENS;
+  const projectId = `workspace-child-context-${crypto.randomUUID()}`;
+  const repository = createSessionRepository({ projectId });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    process.env.CONTEXT_COMPACTION_STRATEGY = 'four_layer';
+    process.env.CONTEXT_RESERVE_TOKENS = '200';
+    const scope = { kind: 'workspace' as const, workspaceId: projectId };
+    const session = await repository.createSession(scope);
+    const observed: Array<{ messages: ChatMessage[]; options?: ChatOptions }> = [];
+    const childModel: ModelClient = {
+      model: 'child-compaction-test',
+      baseUrl: 'memory://child-compaction-test',
+      reasoning: { supported: 'unknown', requestMode: 'provider_default' },
+      contextWindow: 4_000,
+      maxOutputTokens: 300,
+      async *streamMessage(messages, options): AsyncIterable<ModelEvent> {
+        observed.push({ messages: structuredClone(messages) as ChatMessage[], options });
+        const first = messages[0] as ChatMessage | undefined;
+        const summarizing = first?.role === 'system' && first.content.includes('对话归纳器');
+        const content = summarizing
+          ? '## 当前目标\ninspect\n## 已完成\nanalysis\n## 正在进行\ninspect\n## 关键发现与决定\nnone\n## 用户约束\nnone\n## 修改过的文件\nnone\n## 失败尝试与原因\nnone\n## 可恢复的工具输出\nnone\n## 下一步\nfinish'
+          : 'done';
+        yield { version: 1, type: 'turn_started', attemptId: summarizing ? 'summary' : 'child' };
+        yield { version: 1, type: 'text_delta', delta: content };
+        yield { version: 1, type: 'turn_completed', response: { content, reasoning: '', toolCalls: [], finishReason: 'stop', usage: { inputTokens: summarizing ? 1_000 : 900, outputTokens: 50, totalTokens: summarizing ? 1_050 : 950 } } };
+      },
+    };
+    const agentRuntime = createCodingAgent(
+      { buildForPrompt: async (prompt) => ({ prompt, selectedFile: null, selectedFileContent: null, workspaceSummary: '', contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0 } }) },
+      toolHost(),
+      childModel,
+      repository,
+      undefined,
+      undefined,
+      { scope, rootPath: projectDir },
+    );
+    const now = new Date().toISOString();
+    const definition = {
+      name: 'general-purpose', description: 'test child', systemPrompt: 'Complete the delegated task.',
+      toolPolicy: { allowExternalMcp: false, allowSkills: false },
+      defaultContextMode: 'fresh' as const, allowedContextModes: ['fresh' as const, 'fork' as const],
+      budget: { maxModelTurns: 4 }, memoryPolicy: { read: false, write: false, automaticExtraction: false as const },
+      isolationPolicy: { default: 'shared' as const, allowed: ['shared' as const] },
+    };
+    const agent: AgentRecord = {
+      agentId: 'agent-context-a', sessionId: session.sessionId, rootAgentId: 'agent-root', parentAgentId: 'agent-root',
+      createdByRunId: 'main-run', name: 'context child', task: 'inspect', contextMode: 'fresh', isolation: 'shared',
+      definitionName: definition.name, definitionDigest: 'sha256-test', definitionSnapshot: definition, contextSeed: [],
+      status: 'running', currentRunId: 'agent-run-context-a', lastRunId: 'agent-run-context-a', createdAt: now, updatedAt: now,
+    };
+    const run: AgentRunRecord = {
+      agentRunId: 'agent-run-context-a', agentId: agent.agentId, invokedByRunId: 'main-run', trigger: 'spawn',
+      status: 'running', input: 'inspect', startedAt: now,
+    };
+    const result = await agentRuntime.runChild({
+      sessionId: session.sessionId,
+      agent,
+      run,
+      messages: [
+        ...Array.from({ length: 5 }, (_, index) => [
+          { role: 'user' as const, content: `request-${index} ${'u'.repeat(1_500)}` },
+          { role: 'assistant' as const, content: `answer-${index} ${'a'.repeat(1_500)}` },
+        ]).flat(),
+        { role: 'user', content: 'inspect' },
+      ],
+      persistenceHooks: {
+        assistantCommitted: async () => {},
+        toolStarted: async () => {},
+        toolOutcome: async () => {},
+      },
+      signal: new AbortController().signal,
+    });
+    const loaded = await repository.loadSession(session.sessionId);
+    const manifest = loaded?.contextManifests?.find((candidate) => candidate.version === 2 && candidate.runId === run.agentRunId);
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(manifest?.version === 2 ? manifest.contextOwner : undefined, {
+      kind: 'agent', sessionId: session.sessionId, agentId: agent.agentId,
+    });
+    const summary = loaded?.contextSummaries?.find((candidate) => candidate.runId === run.agentRunId);
+    assert.deepEqual(summary?.contextOwner, { kind: 'agent', sessionId: session.sessionId, agentId: agent.agentId });
+    assert.equal(result.contextSummaryUsage.totalTokens > 0, true);
+    const childRequest = observed.find(({ messages }) => !(messages[0]?.role === 'system' && messages[0].content.includes('对话归纳器')));
+    const tools = childRequest?.options?.tools as Array<{ function?: { name?: string } }> | undefined;
+    assert.equal(tools?.some((tool) => tool.function?.name === 'compact_context'), true);
+    assert.equal(tools?.some((tool) => tool.function?.name === 'read_artifact'), true);
+  } finally {
+    if (previousStrategy === undefined) delete process.env.CONTEXT_COMPACTION_STRATEGY;
+    else process.env.CONTEXT_COMPACTION_STRATEGY = previousStrategy;
+    if (previousReserve === undefined) delete process.env.CONTEXT_RESERVE_TOKENS;
+    else process.env.CONTEXT_RESERVE_TOKENS = previousReserve;
+    await rm(projectDir, { recursive: true, force: true });
   }
 });
 

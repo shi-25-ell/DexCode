@@ -1,4 +1,21 @@
-import type { ApprovalEffect, ApprovalOption, ContextBreakdown, ContextPresentation, ContextUsageSource, ContextUsageTiming, QueueItemView, ToolPresentation } from '../shared/types.ts';
+import type { ApprovalEffect, ApprovalOption, ContextBreakdown, ContextPresentation, ContextUsageSource, ContextUsageTiming, QueueItemView, ToolBatchPresentation, ToolPresentation } from '../shared/types.ts';
+
+export type AgentTreeSnapshotView = {
+  version: 1;
+  sessionId: string;
+  rootAgentId: string;
+  revision: number;
+  agents: Array<{ agentId: string }>;
+  runs: Array<{
+    agentRunId: string;
+    agentId: string;
+    invokedByRunId: string;
+    invokedByTurn?: number;
+    invokedByToolCallId?: string;
+    delegationGroupId?: string;
+    trigger: 'spawn' | 'followup';
+  }>;
+};
 
 export type ConversationState = 'idle' | 'running' | 'waiting' | 'failed';
 
@@ -26,10 +43,12 @@ export type ContextUsageView = {
 };
 
 export type ConversationItem =
-  | { id: string; kind: 'user'; content: string }
+  | { id: string; kind: 'user'; content: string; delivery?: 'steer' }
   | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
+  | { id: string; kind: 'tool_batch'; batch: ToolBatchPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
+  | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentRunIds: string[] }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'tool'; toolName: string; effect: ApprovalEffect; title: string; target?: string; reason: string; fingerprint: string; options: ApprovalOption[]; resolved?: ApprovalOption }
   | { id: string; kind: 'error'; title: string; message: string };
 
@@ -44,6 +63,7 @@ export type ConversationViewSnapshot = {
   revision: number;
   items: ConversationItem[];
   contextUsage: ContextUsageView;
+  agents?: AgentTreeSnapshotView | null;
 };
 
 export type ModelDisplayDescriptor = {

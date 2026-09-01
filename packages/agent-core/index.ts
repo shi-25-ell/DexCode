@@ -13,7 +13,7 @@ import type {
 import type { ModelClient } from '../llm-client/index.ts';
 import type { CodingToolHost, ConfirmHook, ExecutorHooks } from './executor.ts';
 import { createAgentRuntime } from './agent-runtime.ts';
-import type { AgentLifecycleHooks, AgentRunResult } from './agent-runtime.ts';
+import type { AgentLifecycleHooks, AgentOrigin, AgentRunBudget, AgentRunResult } from './agent-runtime.ts';
 import type { SessionRepository } from './session-contracts.ts';
 import { projectConversation } from '../conversation-view/index.ts';
 import {
@@ -29,12 +29,15 @@ import { createExternalMcpRegistry } from '../mcp-client/index.ts';
 import {
   buildAvailableSkillsBlock,
   createSkillRegistry,
+  createAgentScopedSkillRegistry,
   parseExplicitInvocations,
 } from '../skill-system/index.ts';
 import type { RunCommandSource } from './run-commands.ts';
 import type { ManagedMemoryCoordinator } from '../managed-memory/coordinator.ts';
 import { MEMORY_TOOL_NAMES, isMemoryTool } from '../managed-memory/tools.ts';
 import type { ManagedMemoryActor } from '../managed-memory/contracts.ts';
+import type { AgentOrchestrationPort, AgentRecord, AgentRunRecord } from '../agent-manager/contracts.ts';
+import type { AgentPersistenceHooks } from './agent-runtime.ts';
 
 function composeLifecycleHooks(...hooks: Array<AgentLifecycleHooks | undefined>): AgentLifecycleHooks {
   const active = hooks.filter((hook): hook is AgentLifecycleHooks => Boolean(hook));
@@ -98,7 +101,7 @@ function buildSystemSections(
     scope.kind === 'workspace'
       ? 'You are DexCode, a coding agent responsible for tasks in this Session workspace.'
       : 'You are DexCode in general conversation mode. No workspace is attached, so workspace file and command tools are unavailable.',
-    'Use ask_user only for destructive actions or decisions that cannot be safely inferred.',
+    'When a destructive action or consequential choice requires user input, ask in ordinary conversation instead of inventing a tool result.',
     'When the task is done, summarize results in concise Chinese.',
   ];
   if (scope.kind === 'workspace') {
@@ -158,6 +161,7 @@ export function createCodingAgent(
   skillRegistry?: SkillRegistry,
   environment?: { scope: SessionScope; rootPath?: string },
   managedMemory?: ManagedMemoryCoordinator,
+  extensions?: { orchestration?: AgentOrchestrationPort },
 ) {
   if (!environment) throw new Error('CodingAgent environment is required');
   const agentEnvironment = environment;
@@ -170,7 +174,9 @@ export function createCodingAgent(
     modelClient,
     externalMcpRegistry,
     skillRegistry: effectiveSkillRegistry,
+    orchestration: extensions?.orchestration,
   });
+  const childSkillRegistries = new Map<string, ReturnType<typeof createAgentScopedSkillRegistry>>();
   function withManagedMemoryTools(base: CodingToolHost, generation: number, actor: ManagedMemoryActor): CodingToolHost {
     if (!managedMemory) return base;
     return {
@@ -239,6 +245,8 @@ export function createCodingAgent(
       legacyEvents?: boolean;
       presentationHooks?: (emit: (event: RunEventPayload) => void) => ExecutorHooks;
       lifecycle?: AgentLifecycleHooks;
+      origin?: AgentOrigin;
+      budget?: AgentRunBudget;
     } = {},
   ): Promise<TaskSummary> {
     if (!sessionRepository) throw new Error('sessionRepository is required for runTask');
@@ -398,7 +406,7 @@ export function createCodingAgent(
         };
       };
       result = await runtime.runAgent({
-        identity: { runId, profile: 'main', origin: 'user' },
+        identity: { runId, profile: 'main', origin: options.origin ?? 'user' },
         messages: executionMessages,
         systemSections,
         persistence: 'session',
@@ -418,7 +426,7 @@ export function createCodingAgent(
             ...(prepared.activity ? { activity: prepared.activity } : {}),
           }).then(() => undefined),
         },
-        budget: { maxModelTurns: 20 },
+        budget: options.budget ?? {},
         signal: options.signal,
         productSessionId: sessionId,
         executorHooks: resolvedHooks,
@@ -445,7 +453,7 @@ export function createCodingAgent(
       result = {
         runId,
         profile: 'main',
-        origin: 'user',
+        origin: options.origin ?? 'user',
         messages: [],
         finalContent: '',
         toolsUsed: [],
@@ -552,7 +560,7 @@ export function createCodingAgent(
       systemSections: [{ source: 'systemPrompt', content: system.content }],
       persistence: 'none',
       toolPolicy: { deny: [...MEMORY_TOOL_NAMES] },
-      budget: { maxModelTurns: 20 },
+      budget: {},
       signal: options.signal,
       onExecutorEvent: onEvent,
     });
@@ -567,8 +575,78 @@ export function createCodingAgent(
     });
   }
 
+  async function runChild(input: {
+    sessionId: string;
+    agent: AgentRecord;
+    run: AgentRunRecord;
+    messages: ChatMessage[];
+    persistenceHooks: AgentPersistenceHooks;
+    signal: AbortSignal;
+  }): Promise<AgentRunResult> {
+    if (agentEnvironment.scope.kind !== 'workspace') throw new Error('Child Agents require a workspace');
+    if (!sessionRepository) throw new Error('Child Agent persistence requires a Session repository');
+    const projectMemory = input.agent.definitionSnapshot.memoryPolicy.read
+      ? await sessionRepository.readProjectMemory(agentEnvironment.scope.workspaceId)
+      : '';
+    const context = await contextManager.buildForPrompt(input.run.input, null, { projectMemory });
+    const session = await sessionRepository.loadSession(input.sessionId);
+    if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+    const sections: ContextSection[] = [
+      { source: 'systemPrompt', content: `You are a DexCode child Agent named ${input.agent.name}.\n${input.agent.definitionSnapshot.systemPrompt}\nDo not ask for interactive approval. If an operation is blocked, report it and continue safely.` },
+      ...buildSystemSections(context, projectMemory, [], '', agentEnvironment.scope).slice(1),
+    ];
+    const preparedMemory = managedMemory && input.agent.definitionSnapshot.memoryPolicy.read
+      ? await managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId: input.sessionId, contextOwnerId: `agent:${input.agent.agentId}`, runId: input.run.agentRunId, query: input.run.input, signal: input.signal })
+      : { enabled: false, generation: 0, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none' as const, durationMs: 0 } };
+    sections.push(...preparedMemory.sections);
+    const childToolHost = withManagedMemoryTools(effectiveToolHost, preparedMemory.generation, 'child-agent');
+    const childSkillRegistry = effectiveSkillRegistry && input.agent.definitionSnapshot.toolPolicy.allowSkills
+      ? (childSkillRegistries.get(input.agent.agentId) ?? (() => {
+          const registry = createAgentScopedSkillRegistry(effectiveSkillRegistry);
+          childSkillRegistries.set(input.agent.agentId, registry);
+          return registry;
+        })())
+      : undefined;
+    const contextOwner = { kind: 'agent' as const, sessionId: input.sessionId, agentId: input.agent.agentId };
+    const persistenceHooks: AgentPersistenceHooks = contextEngine && contextPolicy ? {
+      ...input.persistenceHooks,
+      contextPrepared: (prepared) => sessionRepository.commitContext({
+        sessionId: input.sessionId,
+        runId: input.run.agentRunId,
+        manifest: prepared.manifest,
+        ...(prepared.summaryRecord ? { summaryRecord: prepared.summaryRecord } : {}),
+        ...(prepared.activity ? { activity: prepared.activity } : {}),
+      }).then(() => undefined),
+    } : input.persistenceHooks;
+    return runtime.runAgent({
+      identity: { runId: input.run.agentRunId, parentRunId: input.run.invokedByRunId, profile: 'child', origin: 'orchestrated' },
+      messages: pairedMessages(input.messages),
+      systemSections: sections,
+      persistence: 'child',
+      persistenceHooks,
+      budget: input.agent.definitionSnapshot.budget,
+      signal: input.signal,
+      productSessionId: input.sessionId,
+      toolPolicy: { ...input.agent.definitionSnapshot.toolPolicy, allowOrchestration: false },
+      toolHost: childToolHost,
+      skillRegistry: childSkillRegistry,
+      contextPolicy: contextEngine && contextPolicy ? {
+        mode: 'managed',
+        engine: contextEngine,
+        sessionId: input.sessionId,
+        contextOwner,
+        activeRequest: input.run.input,
+        policy: contextPolicy,
+        readArtifact: (artifactInput) => sessionRepository.readContextArtifact({ sessionId: input.sessionId, ...artifactInput }),
+        managedMemoryRefs: preparedMemory.refs,
+      } : { mode: 'isolated' },
+      metadata: { sessionId: input.sessionId, agentId: input.agent.agentId },
+    });
+  }
+
   return {
     runTask,
+    runChild,
     preview,
   };
 }

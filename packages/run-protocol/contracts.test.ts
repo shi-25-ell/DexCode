@@ -40,9 +40,9 @@ test('RunEvent V2 validates stable message, tool and terminal lifecycles', () =>
         finishReason: 'tool_calls',
       },
     }),
-    event(5, { type: 'tool_started', callId: 'call-1', presentation: { callRef: 'call-1', category: 'read', name: '读取文件', status: 'queued', summary: '准备执行' } }),
-    event(6, { type: 'tool_progress', callId: 'call-1', presentation: { callRef: 'call-1', category: 'read', name: '读取文件', status: 'running', summary: '正在执行' } }),
-    event(7, { type: 'tool_finished', callId: 'call-1', presentation: { callRef: 'call-1', category: 'read', name: '读取文件', status: 'succeeded', summary: '完成' } }),
+    event(5, { type: 'tool_started', callId: 'call-1', presentation: { callRef: 'call-1', toolName: 'read_file', category: 'read', name: '读取文件', status: 'queued', summary: '准备执行' } }),
+    event(6, { type: 'tool_progress', callId: 'call-1', presentation: { callRef: 'call-1', toolName: 'read_file', category: 'read', name: '读取文件', status: 'running', summary: '正在执行' } }),
+    event(7, { type: 'tool_finished', callId: 'call-1', presentation: { callRef: 'call-1', toolName: 'read_file', category: 'read', name: '读取文件', status: 'succeeded', summary: '完成' } }),
     event(8, { type: 'run_finished', terminal: { status: 'completed', reason: 'natural_completion' }, conversationRevision: 7, conversation: emptyConversation }),
   ];
   for (const item of sequence) assert.equal(validator.accept(item), 'accepted');
@@ -61,11 +61,11 @@ test('RunEvent V2 detects gaps, unknown drafts and invalid tool progress', () =>
 
   const tool = new RunEventSequenceValidator(runId);
   tool.accept(event(1, { type: 'run_started', sessionId: 'session-contract' }));
-  assert.throws(() => tool.accept(event(2, { type: 'tool_progress', callId: 'missing', presentation: { callRef: 'missing', category: 'other', name: '工具', status: 'running', summary: 'x' } })), /inactive call/);
+  assert.throws(() => tool.accept(event(2, { type: 'tool_progress', callId: 'missing', presentation: { callRef: 'missing', toolName: 'other', category: 'other', name: '工具', status: 'running', summary: 'x' } })), /inactive call/);
 
   const crossedTool = new RunEventSequenceValidator(runId);
   crossedTool.accept(event(1, { type: 'run_started', sessionId: 'session-contract' }));
-  assert.throws(() => crossedTool.accept(event(2, { type: 'tool_started', callId: 'call-1', presentation: { callRef: 'call-2', category: 'other', name: '工具', status: 'queued', summary: 'x' } })), /crossed callId/);
+  assert.throws(() => crossedTool.accept(event(2, { type: 'tool_started', callId: 'call-1', presentation: { callRef: 'call-2', toolName: 'other', category: 'other', name: '工具', status: 'queued', summary: 'x' } })), /crossed callId/);
 });
 
 test('only recoverable deltas and progress are droppable and compatible deltas coalesce', () => {
@@ -86,7 +86,7 @@ test('safe notes remove secrets and host paths before presentation', () => {
 
 test('legacy adapter preserves text, tool terminal and final conversation meaning', () => {
   assert.deepEqual(runEventToLegacy(event(2, { type: 'assistant_content_delta', messageId: 'message-1', contentIndex: 1, kind: 'text', delta: 'answer' })), [{ type: 'chunk', chunk: 'answer' }]);
-  const tool = { callRef: 'call-1', category: 'read' as const, name: '读取文件', status: 'succeeded' as const, summary: '完成' };
+  const tool = { callRef: 'call-1', toolName: 'read_file', category: 'read' as const, name: '读取文件', status: 'succeeded' as const, summary: '完成' };
   assert.deepEqual(runEventToLegacy(event(3, { type: 'tool_finished', callId: 'call-1', presentation: tool })).at(-1), { type: 'tool_view', presentation: tool });
   const terminal = runEventToLegacy(event(4, { type: 'run_finished', terminal: { status: 'completed', reason: 'natural_completion' }, conversationRevision: 7, finalMessageId: 'message-1', conversation: emptyConversation }));
   assert.equal(terminal.at(-1)?.type, 'result');

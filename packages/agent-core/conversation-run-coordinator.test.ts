@@ -104,6 +104,47 @@ test('Coordinator promotes and consumes Steer in the active Run without starting
   }
 });
 
+test('Coordinator wakes a foreground Agent wait when Steer arrives', async () => {
+  const repository = createSessionRepository({ projectId: `test-coordinator-wait-steer-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const waitEntered = deferred();
+    const agent = {
+      async runTask(sessionId: string, prompt: string, _selectedFile: string | null, _onEvent: (event: AgentEvent) => void, _hooks: unknown, options: any) {
+        await repository.beginRun({ sessionId, runId: options.runId, userMessage: { role: 'user', content: prompt }, context });
+        const interrupted = options.commandSource.waitForSteer({ sessionId, runId: options.runId, signal: options.signal });
+        waitEntered.release();
+        assert.equal(await interrupted, 'steer');
+        const decision = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 2, wouldNaturallyComplete: false });
+        assert.equal(decision.action, 'continue');
+        assert.equal(decision.directive, 'answer me while waiting');
+        const finish = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 1, wouldNaturallyComplete: true });
+        assert.equal(finish.action, 'finish');
+        const value = terminal(options.runId, prompt);
+        await repository.finishRun({ sessionId, report: value.report, summary: value.summary });
+        return value.summary;
+      },
+    };
+    const coordinator = createConversationRunCoordinator({ repository, resolveEnvironment: async () => ({ agent, context }), createHooks: () => ({}) });
+    const running = coordinator.start({ sessionId: session.sessionId, runId: 'run-wait-steer', prompt: 'delegate and wait', prestarted: false }, () => {});
+    await waitEntered.promise;
+    const outcome = await coordinator.submitDuringRun({
+      sessionId: session.sessionId,
+      content: 'answer me while waiting',
+      delivery: 'steer',
+      expectedRunId: 'run-wait-steer',
+      operationId: 'steer-wakes-wait',
+    });
+    assert.equal(outcome.outcome, 'steered');
+    await running;
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.deepEqual(loaded?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['delegate and wait', 'answer me while waiting']);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('Coordinator accepts Steer while approval is pending and consumes it after approval settles', async () => {
   const repository = createSessionRepository({ projectId: `test-coordinator-approval-steer-${crypto.randomUUID()}` });
   const projectDir = dirname(repository.sessionsDir);
@@ -303,6 +344,109 @@ test('failed Queue resume releases the session chain for a later retry', async (
 
     assert.equal(retried.summaries.length, 1);
     assert.equal((await repository.getQueue(session.sessionId)).pending.length, 0);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('Coordinator gives Steer priority and delivers Agent Inbox notifications in a fresh follow-on Run', async () => {
+  const repository = createSessionRepository({ projectId: `test-coordinator-agent-inbox-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const entered = deferred();
+    const proceed = deferred();
+    const notifications = ['agent-run-1', 'agent-run-2'].map((agentRunId, index) => ({
+      notificationId: `notification-${agentRunId}`,
+      agentId: `agent-${index + 1}`,
+      agentRunId,
+      delegationGroupId: `delegation-main-${index + 1}`,
+      createdAt: new Date(Date.now() + index).toISOString(),
+      summary: `result-${index + 1}`,
+      result: { status: 'completed', terminationReason: 'natural_completion', finalContent: `result-${index + 1}` },
+    }));
+    const consumed: string[] = [];
+    const agentInbox = {
+      pending: async () => notifications.filter((item) => !consumed.includes(item.notificationId)),
+      consume: async (_sessionId: string, ids: string[]) => { consumed.push(...ids); },
+    };
+    const prompts: string[] = [];
+    const agent = {
+      async runTask(sessionId: string, prompt: string, _selectedFile: string | null, _onEvent: (event: AgentEvent) => void, _hooks: unknown, options: any) {
+        prompts.push(prompt);
+        if (!options.prestarted) await repository.beginRun({ sessionId, runId: options.runId, userMessage: { role: 'user', content: prompt }, context });
+        if (prompt === 'initial') {
+          entered.release();
+          await proceed.promise;
+          const steer = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 3, wouldNaturallyComplete: true });
+          assert.equal(steer.action, 'continue');
+          assert.equal(steer.directive, 'urgent user steer');
+        } else {
+          assert.match(prompt, /result-1/);
+          assert.match(prompt, /result-2/);
+          assert.match(prompt, /terminal and their results are newly delivered/);
+        }
+        const finish = await options.commandSource.atSafeBoundary({ sessionId, runId: options.runId, remainingModelTurns: 1, wouldNaturallyComplete: true });
+        assert.equal(finish.action, 'finish');
+        const value = terminal(options.runId, prompt);
+        await repository.finishRun({ sessionId, report: value.report, summary: value.summary });
+        return value.summary;
+      },
+    };
+    const coordinator = createConversationRunCoordinator({ repository, agentInbox, resolveEnvironment: async () => ({ agent, context }), createHooks: () => ({}) });
+    const running = coordinator.start({ sessionId: session.sessionId, runId: 'run-agent-inbox', prompt: 'initial', prestarted: false }, () => {});
+    await entered.promise;
+    await coordinator.submitDuringRun({ sessionId: session.sessionId, content: 'urgent user steer', delivery: 'steer', expectedRunId: 'run-agent-inbox', operationId: 'steer-before-agent' });
+    proceed.release();
+    await running;
+    assert.equal(prompts.length, 2);
+    assert.deepEqual(consumed.sort(), notifications.map((item) => item.notificationId).sort());
+    const loaded = await repository.loadSession(session.sessionId);
+    assert.equal(loaded?.runReports?.length, 2);
+    assert.equal(loaded?.ledger?.filter((record) => record.type === 'run_started' && record.origin?.startsWith('agent_notification:')).length, 1);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('Coordinator does not auto-start an unbounded chain of Agent notification Runs', async () => {
+  const repository = createSessionRepository({ projectId: `test-coordinator-agent-inbox-limit-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    for (let index = 0; index < 4; index += 1) {
+      const runId = `notification-run-${index}`;
+      await repository.beginRun({
+        sessionId: session.sessionId,
+        runId,
+        userMessage: { role: 'user', content: `notification ${index}` },
+        context,
+        profile: 'main',
+        origin: `agent_notification:notification-old-${index}`,
+      });
+      const value = terminal(runId, `notification ${index}`);
+      await repository.finishRun({ sessionId: session.sessionId, report: value.report, summary: value.summary });
+    }
+    const notification = {
+      notificationId: 'notification-new', agentId: 'agent-1', agentRunId: 'agent-run-new', createdAt: new Date().toISOString(), summary: 'new result',
+      result: { status: 'completed', terminationReason: 'natural_completion', finalContent: 'new result' },
+    };
+    const consumed: string[] = [];
+    const observations: Array<{ outcome?: string; reason?: string }> = [];
+    const coordinator = createConversationRunCoordinator({
+      repository,
+      agentInbox: {
+        pending: async () => consumed.includes(notification.notificationId) ? [] : [notification],
+        consume: async (_sessionId, ids) => { consumed.push(...ids); },
+      },
+      resolveEnvironment: async () => ({ agent: { runTask: async () => { throw new Error('notification Run must not start'); } }, context }),
+      createHooks: () => ({}),
+      observe: (observation) => observations.push(observation),
+    });
+    const result = await coordinator.resume(session.sessionId, () => {});
+    assert.deepEqual(result.summaries, []);
+    assert.deepEqual(consumed, []);
+    assert.equal(observations.some((item) => item.reason === 'agent_notification_limit'), true);
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }

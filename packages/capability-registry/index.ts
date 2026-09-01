@@ -10,7 +10,6 @@ export type CapabilityDefinition = {
 
 const DEFAULT_CAPABILITIES: readonly CapabilityDefinition[] = [
   { id: 'mcp', label: 'MCP', route: '/settings/mcp', icon: 'network', workspaceRequired: false },
-  { id: 'tools', label: '工具', route: '/settings/tools', icon: 'wrench', workspaceRequired: true },
   { id: 'skills', label: 'Skill', route: '/settings/skills', icon: 'sparkles', workspaceRequired: true },
   { id: 'approval', label: '批准模式', route: '/settings/approval', icon: 'shield', workspaceRequired: false },
   { id: 'project-knowledge', label: '项目知识', route: '/settings/project-knowledge', icon: 'book', workspaceRequired: true },

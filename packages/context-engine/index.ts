@@ -8,6 +8,7 @@ import type {
   ContextLayer,
   ManagedMemoryContextRef,
   ContextManifestV2,
+  ContextOwner,
   ContextPolicy,
   ContextPresentation,
   ContextSummaryRecord,
@@ -21,6 +22,13 @@ export type ContextSection = {
   content: string;
 };
 
+export type AgentForkProjection = {
+  messages: ChatMessage[];
+  sourceMessageCount: number;
+  retainedSegments: number;
+  estimatedTokens: number;
+};
+
 export type ModelToolDefinition = {
   type: 'function';
   function: { name: string; description?: string; parameters?: unknown };
@@ -29,6 +37,7 @@ export type ModelToolDefinition = {
 export type PutContextArtifact = {
   sessionId: string;
   runId: string;
+  contextOwner?: ContextOwner;
   kind: ContextArtifactRef['kind'];
   sourceRef: string;
   content: string;
@@ -47,11 +56,12 @@ export interface ContextArtifactRepository {
 
 type ContextLifecycle = {
   loadSession(sessionId: string): Promise<Session | null>;
-  beginContextCompaction(input: { sessionId: string; runId: string; operationRef: string }): Promise<void>;
+  beginContextCompaction(input: { sessionId: string; runId: string; operationRef: string; contextOwner?: ContextOwner }): Promise<void>;
   failContextCompaction(input: {
     sessionId: string;
     runId: string;
     operationRef: string;
+    contextOwner?: ContextOwner;
     reason: NonNullable<ContextPresentation['reason']>;
   }): Promise<void>;
   recordContextProviderUsage(input: {
@@ -60,12 +70,14 @@ type ContextLifecycle = {
     manifestId: string;
     actualInputTokens: number;
     usage: ContextUsageSnapshot;
+    contextOwner?: ContextOwner;
   }): Promise<void>;
 };
 
 export type PrepareContextInput = {
   sessionId: string;
   runId: string;
+  contextOwner?: ContextOwner;
   turn: number;
   attempt: number;
   activeRequest: string;
@@ -227,6 +239,43 @@ function conversationSegments(messages: ChatMessage[]): Segment[] {
   return starts.map((start, index) => ({ start, end: starts[index + 1] ?? messages.length }));
 }
 
+function completeToolPairs(messages: ChatMessage[]): ChatMessage[] {
+  const calls = new Set<string>();
+  const results = new Set<string>();
+  for (const message of messages) {
+    if (message.role === 'assistant') for (const call of message.tool_calls ?? []) calls.add(call.id);
+    if (message.role === 'tool') results.add(message.tool_call_id);
+  }
+  const incomplete = new Set([...calls].filter((id) => !results.has(id)));
+  return messages.filter((message) => {
+    if (message.role === 'tool') return calls.has(message.tool_call_id) && !incomplete.has(message.tool_call_id);
+    if (message.role === 'assistant' && message.tool_calls?.some((call) => incomplete.has(call.id))) return false;
+    return true;
+  });
+}
+
+export function projectAgentFork(
+  source: readonly ChatMessage[],
+  options: { maxSegments?: number; maxTokens?: number; charsPerToken?: number } = {},
+): AgentForkProjection {
+  const maxSegments = options.maxSegments ?? 4;
+  const maxTokens = options.maxTokens ?? 8_000;
+  const charsPerToken = options.charsPerToken ?? 3.5;
+  const canonical = completeToolPairs(cloneMessages(source.filter((message) => message.role !== 'system')));
+  let segments = conversationSegments(canonical).slice(-maxSegments);
+  let messages = segments.flatMap((segment) => canonical.slice(segment.start, segment.end));
+  const estimate = () => Math.ceil(JSON.stringify(messages).length / charsPerToken);
+  while (segments.length > 1 && estimate() > maxTokens) {
+    segments = segments.slice(1);
+    messages = segments.flatMap((segment) => canonical.slice(segment.start, segment.end));
+  }
+  if (estimate() > maxTokens) {
+    const latest = messages.at(-1);
+    messages = latest?.role === 'user' ? [latest] : [];
+  }
+  return { messages: cloneMessages(messages), sourceMessageCount: source.length, retainedSegments: segments.length, estimatedTokens: estimate() };
+}
+
 function closedToolBatch(messages: ChatMessage[]): Array<{ index: number; message: ToolResultMessage }> {
   for (let assistantIndex = messages.length - 1; assistantIndex >= 0; assistantIndex -= 1) {
     const assistant = messages[assistantIndex];
@@ -325,6 +374,13 @@ function cachedSummaryView(messages: ChatMessage[], record: ContextSummaryRecord
   ];
 }
 
+function sameContextOwner(left: ContextOwner | undefined, right: ContextOwner | undefined): boolean {
+  if (!left || !right) return left === right;
+  return left.kind === right.kind
+    && left.sessionId === right.sessionId
+    && (left.kind !== 'agent' || (right.kind === 'agent' && left.agentId === right.agentId));
+}
+
 function summaryUsage(usage: ModelUsage | undefined) {
   if (!usage) return undefined;
   return {
@@ -385,6 +441,7 @@ export function createContextEngine(options: {
       const ref = await options.artifactRepository.putContextArtifact({
         sessionId: input.sessionId,
         runId: input.runId,
+        ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}),
         kind: 'tool-result',
         sourceRef: message.tool_call_id,
         content: message.content,
@@ -442,6 +499,7 @@ export function createContextEngine(options: {
       const ref = await options.artifactRepository.putContextArtifact({
         sessionId: input.sessionId,
         runId: input.runId,
+        ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}),
         kind: 'transcript',
         sourceRef: `messages-${first.end}-${tailStart}`,
         content: JSON.stringify(archived),
@@ -544,6 +602,7 @@ export function createContextEngine(options: {
       version: 2,
       id: `summary-${sha256(`${input.sessionId}:${input.runId}:${cut}:${result.summary}`).slice(0, 24)}`,
       runId: input.runId,
+      ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}),
       turn: input.turn,
       strategyVersion: 'structured-summary-v2',
       sourceDigest: `sha256-${sha256(JSON.stringify(canonical.slice(0, cut)))}`,
@@ -570,7 +629,9 @@ export function createContextEngine(options: {
     validatePolicy(input.policy);
     if (input.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const session = await options.lifecycle.loadSession(input.sessionId);
-    const previousManifests = session?.contextManifests?.filter((manifest): manifest is ContextManifestV2 => manifest.version === 2) ?? [];
+    const previousManifests = session?.contextManifests?.filter((manifest): manifest is ContextManifestV2 => (
+      manifest.version === 2 && sameContextOwner(manifest.contextOwner, input.contextOwner)
+    )) ?? [];
     const seen = new Set(previousManifests.flatMap((manifest) => manifest.includedToolResultIds));
     const latestActual = [...previousManifests].reverse().find((manifest) => manifest.actualInputTokens !== undefined && manifest.requestSerializedChars > 0);
     const calibrationKey = `${input.sessionId}:${options.modelClient.baseUrl}:${options.modelClient.model}`;
@@ -584,7 +645,7 @@ export function createContextEngine(options: {
     if (latestUser?.role !== 'user' || latestUser.content !== input.activeRequest) {
       canonical.push({ role: 'user', content: input.activeRequest });
     }
-    const latestSummary = session?.contextSummaries?.at(-1);
+    const latestSummary = [...(session?.contextSummaries ?? [])].reverse().find((record) => sameContextOwner(record.contextOwner, input.contextOwner));
     let messages = !input.forceSummary ? (cachedSummaryView(canonical, latestSummary) ?? canonical) : canonical;
     const initial = measure(input, messages, charsPerToken);
     const operationRef = `context-${input.runId}-${input.turn}-${input.attempt}`;
@@ -622,7 +683,7 @@ export function createContextEngine(options: {
     const limit = hardLimit(input.policy);
     const needsSummary = input.policy.enabled && Boolean(input.forceSummary || (limit !== undefined && afterCheap.usedTokens > limit));
     if (needsSummary) {
-      await options.lifecycle.beginContextCompaction({ sessionId: input.sessionId, runId: input.runId, operationRef });
+      await options.lifecycle.beginContextCompaction({ sessionId: input.sessionId, runId: input.runId, operationRef, ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}) });
       input.onActivity?.({ operationRef, status: 'running', beforeTokens: initial.usedTokens });
       try {
         const summarized = await summarize(input, canonical, afterCheap.usedTokens, refs, charsPerToken);
@@ -641,7 +702,7 @@ export function createContextEngine(options: {
           : error instanceof ContextPreparationError && /empty|invalid/i.test(error.message)
             ? 'invalid_summary'
             : 'summary_failed';
-        await options.lifecycle.failContextCompaction({ sessionId: input.sessionId, runId: input.runId, operationRef, reason });
+        await options.lifecycle.failContextCompaction({ sessionId: input.sessionId, runId: input.runId, operationRef, reason, ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}) });
         input.onActivity?.({ operationRef, status: 'failed', reason });
         if (input.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         const fallback = measure(input, messages, charsPerToken);
@@ -658,6 +719,7 @@ export function createContextEngine(options: {
         runId: input.runId,
         operationRef,
         reason: 'summary_failed',
+        ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}),
       });
       input.onActivity?.({ operationRef, status: 'failed', reason: 'summary_failed' });
       throw new ContextPreparationError('Context remains over the safe limit after summary');
@@ -675,6 +737,7 @@ export function createContextEngine(options: {
       version: 2,
       id: `manifest-${crypto.randomUUID()}`,
       runId: input.runId,
+      ...(input.contextOwner ? { contextOwner: input.contextOwner } : {}),
       turn: input.turn,
       attempt: input.attempt,
       createdAt: new Date().toISOString(),
@@ -732,6 +795,7 @@ export function createContextEngine(options: {
         manifestId: observation.manifestId,
         actualInputTokens: observation.inputTokens,
         usage,
+        ...(entry.input.contextOwner ? { contextOwner: entry.input.contextOwner } : {}),
       });
       prepared.delete(observation.manifestId);
     },

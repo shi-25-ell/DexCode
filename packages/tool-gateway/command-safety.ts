@@ -24,7 +24,7 @@ export type CommandValidation = {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-/** 只读诊断命令（仅 read_lints 等内部调用，不经过用户确认） */
+/** Only simple, single-statement commands can be proven read-only. */
 export const TRUSTED_READONLY_COMMANDS = [
   /^git\s+status(?:\s+(?:--short|--porcelain(?:=v[12])?|--branch|-s|-b))*$/i,
   /^git\s+branch\s+--show-current$/i,
@@ -69,21 +69,29 @@ const SHELL_WRAPPER_TOKENS = new Set([
   'bash', 'sh', 'zsh', 'fish', 'powershell', 'pwsh', 'cmd',
 ]);
 
-/** 禁止的 shell 元字符（execFile 虽不走 shell，但可防止误传与后续扩展） */
-const FORBIDDEN_METACHAR = /[;&|`$<>]|(?:\$\()|(?:\|\|)|(?:&&)/;
+const COMPOUND_SHELL_SYNTAX = /[;&|`$<>]|(?:\$\()|(?:\|\|)|(?:&&)|\r|\n/;
+
+const HARD_DENY_PATTERNS = [
+  /\brm\s+-[^\r\n]*r[^\r\n]*f[^\r\n]*\s+(?:\/|~|\$HOME)(?:\s|$)/i,
+  /\bRemove-Item\b[^\r\n]*(?:-Recurse|-r)\b[^\r\n]*(?:[A-Z]:\\|\$HOME|~)(?:\s|$)/i,
+  /\b(?:format|mkfs|shutdown|reboot)\b/i,
+  /\bgit\s+push\b[^\r\n]*(?:--force|-f)\b/i,
+  /:\(\)\s*\{\s*:\|:&\s*\};:/,
+];
 
 export function normalizeCommand(command: string): string {
-  return command.trim().replace(/\s+/g, ' ');
+  return command.trim();
 }
 
 export function getCommandBase(command: string): string {
-  const normalized = normalizeCommand(command);
+  const normalized = normalizeCommand(command).replace(/\s+/g, ' ');
   const first = normalized.split(/\s+/)[0] ?? '';
   return first.replace(/^["']|["']$/g, '').toLowerCase();
 }
 
 export function isTrustedReadonlyCommand(command: string): boolean {
   const normalized = normalizeCommand(command);
+  if (COMPOUND_SHELL_SYNTAX.test(normalized)) return false;
   if (TRUSTED_READONLY_COMMANDS.some((re) => re.test(normalized))) return true;
   return /^rg(?:\s|$)/i.test(normalized)
     && !/(?:^|\s)--(?:pre|pre-glob|config)(?:=|\s|$)/i.test(normalized);
@@ -111,7 +119,7 @@ export function isWhitelisted(command: string, entries: WhitelistEntry[]): boole
 }
 
 export function assessRisk(command: string): CommandRisk {
-  const normalized = normalizeCommand(command);
+  const normalized = normalizeCommand(command).replace(/\s+/g, ' ');
   const lower = normalized.toLowerCase();
   const base = getCommandBase(normalized);
 
@@ -146,26 +154,14 @@ export function validateCommand(
     };
   }
 
-  if (FORBIDDEN_METACHAR.test(normalizedCommand)) {
+  const hardDenied = HARD_DENY_PATTERNS.find((pattern) => pattern.test(normalizedCommand));
+  if (hardDenied) {
     return {
       allowed: false,
       needsConfirmation: false,
       whitelisted: false,
       risk: 'high',
-      reason: '命令包含不允许的 shell 元字符（; && | ` $ 等），请使用单一可执行命令',
-      normalizedCommand,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-    };
-  }
-
-  const base = getCommandBase(normalizedCommand);
-  if (SHELL_WRAPPER_TOKENS.has(base)) {
-    return {
-      allowed: false,
-      needsConfirmation: false,
-      whitelisted: false,
-      risk: 'high',
-      reason: `不允许通过 ${base} 包装执行命令，请直接调用目标程序`,
+      reason: '命令命中不可批准的破坏性 Hard Guard',
       normalizedCommand,
       timeoutMs: DEFAULT_TIMEOUT_MS,
     };

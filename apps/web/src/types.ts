@@ -1,3 +1,5 @@
+import type { ToolViewStatus } from '../../../packages/shared/types';
+
 export type ConversationScope = { kind: 'general' } | { kind: 'workspace'; workspaceRef: string };
 
 export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge' | 'memory';
@@ -24,21 +26,31 @@ export type ConversationListItem = {
 
 export type ToolPresentation = {
   callRef: string;
+  toolName: string;
   category: 'read' | 'file' | 'command' | 'search' | 'skill' | 'mcp' | 'snapshot' | 'memory' | 'other';
   name: string;
   target?: string;
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'denied' | 'cancelled';
+  status: ToolViewStatus;
   summary: string;
   rawOutput?: string;
   truncated?: boolean;
-  fileChange?: { path: string; additions?: number; deletions?: number; binary?: boolean };
+  approval?: { status: 'not_required' | 'pending' | 'approved' | 'denied'; addedToWhitelist: boolean };
+  fileChange?: { path: string; kind: 'created' | 'modified'; additions: number; deletions: number; binary?: boolean; diff: string; truncated: boolean };
+};
+
+export type ToolBatchPresentation = {
+  id: string;
+  type: 'inspection' | 'modification' | 'command';
+  members: ToolPresentation[];
 };
 
 export type ConversationItem =
-  | { id: string; kind: 'user'; content: string }
+  | { id: string; kind: 'user'; content: string; delivery?: 'steer' }
   | { id: string; kind: 'assistant'; content: string; messageId?: string; runId?: string; turn?: number; final?: boolean }
   | { id: string; kind: 'tool'; tool: ToolPresentation }
+  | { id: string; kind: 'tool_batch'; batch: ToolBatchPresentation }
   | { id: string; kind: 'context'; context: ContextPresentation }
+  | { id: string; kind: 'agent_activity'; sourceRunId: string; delegationGroupId?: string; agentRunIds: string[] }
   | { id: string; kind: 'approval'; approvalRef: string; approvalKind: 'question' | 'command' | 'tool'; title: string; target?: string; reason?: string; toolName?: string; effect?: ApprovalEffect; fingerprint?: string; options: string[]; resolved?: string }
   | { id: string; kind: 'error'; title: string; message: string };
 
@@ -94,7 +106,39 @@ export type ConversationSnapshot = {
   revision: number;
   items: ConversationItem[];
   contextUsage: ContextUsage;
+  agents?: AgentTreeSnapshot | null;
 };
+
+export type AgentDefinitionView = { name: string; description: string };
+export type AgentRecordView = {
+  agentId: string; sessionId: string; rootAgentId: string; parentAgentId: string | null; createdByRunId: string;
+  name: string; task: string; contextMode: 'fresh' | 'fork'; isolation: 'shared' | 'worktree'; definitionName: string;
+  status: 'creating' | 'running' | 'stopping' | 'idle'; currentRunId?: string; lastRunId?: string;
+  createdAt: string; updatedAt: string;
+};
+export type AgentRunView = {
+  agentRunId: string; agentId: string; invokedByRunId: string; trigger: 'spawn' | 'followup';
+  invokedByTurn?: number; invokedByToolCallId?: string; delegationGroupId?: string;
+  status: 'running' | 'completed' | 'failed' | 'interrupted' | 'limited'; input: string; startedAt: string; completedAt?: string;
+  usage?: { totalTokens: number };
+  result?: { finalContent: string; terminationReason: string; toolsUsed: string[]; filesModified: string[]; usage?: { totalTokens: number }; error?: { code: string; message: string } };
+};
+export type AgentTreeSnapshot = {
+  version: 1;
+  sessionId: string;
+  rootAgentId: string;
+  revision: number;
+  agents: AgentRecordView[];
+  runs: AgentRunView[];
+  control?: { halted: boolean; haltedAt?: string; haltedReason?: string; resumedAt?: string };
+};
+export type AgentTranscriptMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> }
+  | { role: 'tool'; tool_call_id: string; name: string; content: string };
+export type AgentToolView = { callId: string; name: string; status: 'running' | 'finished'; presentation?: ToolPresentation };
+export type AgentDetail = { agent: AgentRecordView; runs: AgentRunView[]; messages: AgentTranscriptMessage[]; tools: AgentToolView[] };
+export type AgentActivityEnvelope = { version: 1; sessionId: string; seq: number; at: string; event: { type: string; agent?: AgentRecordView; agentId?: string; run?: AgentRunView; status?: AgentRecordView['status']; revision?: number } };
 
 export type QueueDelivery = 'next_run' | 'steer';
 export type FollowUpBehavior = 'queue' | 'steer';

@@ -33,6 +33,14 @@ export type AssistantDraftView = {
   hasToolCalls: boolean;
 };
 
+export type RunActivityEntry =
+  | { kind: 'assistant'; messageId: string }
+  | { kind: 'user'; itemId: string; content: string; delivery?: 'steer' }
+  | { kind: 'tool'; callId: string }
+  | { kind: 'agent'; callId: string; agentId: string; agentRunId: string; turn: number }
+  | { kind: 'approval'; approvalId: string }
+  | { kind: 'context'; operationRef: string };
+
 export type ActiveRunView = {
   runId: string;
   startedAt: string;
@@ -46,6 +54,7 @@ export type ActiveRunView = {
   toolsByCallId: Record<string, ToolPresentation>;
   approvalsById: Record<string, Extract<ConversationItem, { kind: 'approval' }>>;
   contextsById: Record<string, ContextPresentation>;
+  activityOrder: RunActivityEntry[];
 };
 
 export type RunPresentation = {
@@ -63,7 +72,7 @@ export type RunPresentation = {
 };
 
 function interruptedSnapshot(snapshot: ConversationSnapshot): ConversationItem[] {
-  if (snapshot.state !== 'running' && snapshot.state !== 'waiting') return snapshot.items;
+  if ((snapshot.state !== 'running' && snapshot.state !== 'waiting') || snapshot.activeRun) return snapshot.items;
   if (snapshot.items.some((item) => item.kind === 'error' && item.id === 'interrupted-live-run')) return snapshot.items;
   return [...snapshot.items, {
     id: 'interrupted-live-run',
@@ -74,10 +83,26 @@ function interruptedSnapshot(snapshot: ConversationSnapshot): ConversationItem[]
 }
 
 export function hydrateRunPresentation(snapshot: ConversationSnapshot): RunPresentation {
-  const cannotRecoverLiveRun = snapshot.state === 'running' || snapshot.state === 'waiting';
+  const cannotRecoverLiveRun = (snapshot.state === 'running' || snapshot.state === 'waiting') && !snapshot.activeRun;
+  const activeRun: ActiveRunView | null = snapshot.activeRun ? {
+    runId: snapshot.activeRun.runId,
+    startedAt: snapshot.updatedAt,
+    phase: snapshot.activeRun.phase === 'waiting_confirm'
+      ? 'waiting_approval'
+      : snapshot.activeRun.phase === 'closing' || snapshot.activeRun.phase === 'stopping'
+        ? 'finalizing'
+        : 'requesting_model',
+    phaseChangedAt: snapshot.updatedAt,
+    assistantDraft: null,
+    committedMessages: [],
+    toolsByCallId: {},
+    approvalsById: {},
+    contextsById: {},
+    activityOrder: [],
+  } : null;
   return {
     committedItems: interruptedSnapshot(snapshot),
-    activeRun: null,
+    activeRun,
     contextUsage: snapshot.contextUsage,
     title: snapshot.title,
     revision: snapshot.revision,
@@ -106,6 +131,7 @@ export function beginRunPresentation(state: RunPresentation, input: { content: s
       toolsByCallId: {},
       approvalsById: {},
       contextsById: {},
+      activityOrder: [],
     },
     title: state.committedItems.length === 0 ? shortTitle(input.content) : state.title,
     status: 'running',
@@ -132,7 +158,24 @@ function createActiveRun(envelope: RunEventEnvelope): ActiveRunView {
     toolsByCallId: {},
     approvalsById: {},
     contextsById: {},
+    activityOrder: [],
   };
+}
+
+function activityKey(entry: RunActivityEntry): string {
+  if (entry.kind === 'assistant') return `assistant:${entry.messageId}`;
+  if (entry.kind === 'user') return `user:${entry.itemId}`;
+  if (entry.kind === 'tool') return `tool:${entry.callId}`;
+  if (entry.kind === 'agent') return `agent:${entry.callId}`;
+  if (entry.kind === 'approval') return `approval:${entry.approvalId}`;
+  return `context:${entry.operationRef}`;
+}
+
+function appendActivity(active: ActiveRunView, entry: RunActivityEntry): RunActivityEntry[] {
+  const key = activityKey(entry);
+  return active.activityOrder.some((item) => activityKey(item) === key)
+    ? active.activityOrder
+    : [...active.activityOrder, entry];
 }
 
 function appendBounded(current: string, delta: string, limit: number): { content: string; truncated: boolean } {
@@ -231,11 +274,13 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
     };
   }
   if (event.type === 'assistant_message_started') {
+    const { reasoningStartedAt: _previousReasoningStartedAt, reasoningCompletedAt: _previousReasoningCompletedAt, ...activeWithoutReasoningTime } = active;
     return {
       ...state,
       activeRun: {
-        ...active,
+        ...activeWithoutReasoningTime,
         assistantDraft: { messageId: event.messageId, turn: event.turn, blocks: {}, committed: false, hasToolCalls: false },
+        activityOrder: appendActivity(active, { kind: 'assistant', messageId: event.messageId }),
       },
     };
   }
@@ -254,9 +299,20 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
       ...state,
       activeRun: {
         ...active,
-        ...(event.kind === 'reasoning' && !active.reasoningStartedAt ? { reasoningStartedAt: envelope.at } : {}),
+        ...(event.kind === 'reasoning' ? { reasoningStartedAt: active.reasoningStartedAt ?? envelope.at, reasoningCompletedAt: undefined } : {}),
         ...(event.kind !== 'reasoning' && active.reasoningStartedAt && !active.reasoningCompletedAt ? { reasoningCompletedAt: envelope.at } : {}),
         assistantDraft: { ...active.assistantDraft, blocks: { ...active.assistantDraft.blocks, [event.contentIndex]: block } },
+      },
+    };
+  }
+  if (event.type === 'assistant_message_reset') {
+    if (!active.assistantDraft || active.assistantDraft.messageId !== event.messageId) return { ...state, needsResync: true };
+    const { reasoningStartedAt: _previousReasoningStartedAt, reasoningCompletedAt: _previousReasoningCompletedAt, ...activeWithoutReasoningTime } = active;
+    return {
+      ...state,
+      activeRun: {
+        ...activeWithoutReasoningTime,
+        assistantDraft: { ...active.assistantDraft, blocks: {}, hasToolCalls: false },
       },
     };
   }
@@ -278,21 +334,30 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
         ...active,
         committedMessages,
         assistantDraft: event.message.toolCalls.length > 0 ? null : draft,
+        activityOrder: appendActivity(active, { kind: 'assistant', messageId: event.message.messageId }),
       },
       ...(!event.message.toolCalls.length ? { finalMessageId: event.message.messageId } : {}),
     };
   }
-  if (event.type === 'tool_started' || event.type === 'tool_progress' || event.type === 'tool_finished') {
+  if (event.type === 'tool_started') {
     return {
       ...state,
-      activeRun: { ...active, toolsByCallId: { ...active.toolsByCallId, [event.callId]: boundedTool(event.presentation as ToolPresentation) } },
+      activeRun: {
+        ...active,
+        toolsByCallId: { ...active.toolsByCallId, [event.callId]: boundedTool(event.presentation as ToolPresentation) },
+        activityOrder: appendActivity(active, { kind: 'tool', callId: event.callId }),
+      },
     };
   }
   if (event.type === 'approval_requested') {
     const item = approvalItem(event.request);
     return {
       ...state,
-      activeRun: { ...active, approvalsById: { ...active.approvalsById, [event.request.approvalId]: item } },
+      activeRun: {
+        ...active,
+        approvalsById: { ...active.approvalsById, [event.request.approvalId]: item },
+        activityOrder: appendActivity(active, { kind: 'approval', approvalId: event.request.approvalId }),
+      },
       status: 'waiting',
     };
   }
@@ -307,7 +372,39 @@ function applyEvent(state: RunPresentation, envelope: RunEventEnvelope, active: 
   }
   if (event.type === 'context_usage_changed') return { ...state, contextUsage: event.usage };
   if (event.type === 'context_activity_changed') {
-    return { ...state, activeRun: { ...active, contextsById: { ...active.contextsById, [event.presentation.operationRef]: event.presentation } } };
+    return {
+      ...state,
+      activeRun: {
+        ...active,
+        contextsById: { ...active.contextsById, [event.presentation.operationRef]: event.presentation },
+        activityOrder: appendActivity(active, { kind: 'context', operationRef: event.presentation.operationRef }),
+      },
+    };
+  }
+  if (event.type === 'tool_progress' || event.type === 'tool_finished') {
+    if (!active.toolsByCallId[event.callId]) return { ...state, needsResync: true };
+    return {
+      ...state,
+      activeRun: {
+        ...active,
+        toolsByCallId: { ...active.toolsByCallId, [event.callId]: boundedTool(event.presentation as ToolPresentation) },
+      },
+    };
+  }
+  if (event.type === 'agent_invocation_started') {
+    return {
+      ...state,
+      activeRun: {
+        ...active,
+        activityOrder: appendActivity(active, {
+          kind: 'agent',
+          callId: event.callId,
+          agentId: event.agentId,
+          agentRunId: event.agentRunId,
+          turn: event.turn,
+        }),
+      },
+    };
   }
   if (event.type === 'run_finished') {
     const finalMessageId = event.finalMessageId;

@@ -120,7 +120,7 @@
 
 - 中断或重启正在进行的 provider stream 来实现“即时” Steer。
 - 强杀正在执行的单个工具调用来应用 Steer。
-- 使用 Steer 自动批准、拒绝或回答 `ask_user`/command approval。
+- 使用 Steer 自动批准、拒绝或替代普通对话中的用户回答/command approval。
 - 多进程或多机器 writer fencing。
 - Runtime 重启后在没有客户端重新连接时自动执行残留 Queue。
 - 把 Queue Item 在消费前写入 canonical `session.messages`。
@@ -839,7 +839,7 @@ type FollowUpBehavior = 'queue' | 'steer';
 - approval resolved 后 Run 返回 `accepting_commands`，继续完成当前工具批；
 - 当前工具批全部 settlement 后，executor 才在安全边界消费一条 pending Steer；
 - 用户拒绝 approval 后，当前工具产生 denied ToolOutcome，再到安全边界；
-- Queue 消息不会被解释为批准、拒绝或 ask_user answer。
+- Queue 消息不会被解释为批准、拒绝或普通对话中的用户回答。
 
 ### 15.2 Stop
 

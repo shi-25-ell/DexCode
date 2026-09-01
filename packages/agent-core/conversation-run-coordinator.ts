@@ -1,6 +1,6 @@
 import type { AgentEvent, QueueDelivery, QueueItemView, QueuePauseReason, RunContext, Session, TaskSummary } from '../shared/types.ts';
 import type { ExecutorHooks } from './executor.ts';
-import type { AgentLifecycleHooks } from './agent-runtime.ts';
+import type { AgentLifecycleHooks, AgentOrigin, AgentRunBudget } from './agent-runtime.ts';
 import type { QueueMutationOutcome, SessionRepository } from './session-contracts.ts';
 import type { RunCommandSource } from './run-commands.ts';
 import type { RunEventEnvelope, RunEventPayload } from '../run-protocol/contracts.ts';
@@ -27,12 +27,24 @@ type AgentRunner = {
       legacyEvents?: boolean;
       presentationHooks?: (emit: (event: RunEventPayload) => void) => ExecutorHooks;
       lifecycle?: AgentLifecycleHooks;
+      origin?: AgentOrigin;
+      budget?: AgentRunBudget;
     },
   ): Promise<TaskSummary>;
 };
 
 type RunEnvironment = { agent: AgentRunner; context: RunContext };
 type EventSink = (event: AgentEvent) => void;
+type AgentInboxNotification = {
+  notificationId: string;
+  agentId: string;
+  agentRunId: string;
+  delegationGroupId?: string;
+  createdAt: string;
+  summary: string;
+  result: { status: string; terminationReason: string; finalContent: string; usage?: unknown; error?: { code: string; message: string } };
+};
+type AgentInboxBatch = { notifications: AgentInboxNotification[]; message: { role: 'user'; content: string }; origin: string };
 export type CoordinatorStreamOptions = {
   onRunEvent?: (event: RunEventEnvelope) => void;
   legacyEvents?: boolean;
@@ -44,6 +56,7 @@ type ActiveConversationRun = {
   phase: ActiveRunPhase;
   abortController: AbortController;
   sink: EventSink;
+  steerWaiters: Set<(reason: 'steer' | 'closed') => void>;
   stoppedFor?: QueuePauseReason;
 };
 
@@ -62,6 +75,7 @@ export type StartConversationRunInput = {
   isNew?: boolean;
   clientRequestId?: string;
   sourceItemId?: string;
+  notificationDelivery?: boolean;
 };
 
 export type SubmitDuringRunInput = {
@@ -105,6 +119,10 @@ export function createConversationRunCoordinator(dependencies: {
   createHooks(sessionId: string, runId: string, sink: EventSink, emit?: (event: RunEventPayload) => void): ExecutorHooks;
   createLifecycleHooks?(sessionId: string, runId: string): AgentLifecycleHooks;
   cancelPending?(sessionId: string, runId: string, reason: QueuePauseReason): void;
+  agentInbox?: {
+    pending(sessionId: string): Promise<AgentInboxNotification[]>;
+    consume(sessionId: string, notificationIds: string[], consumedByRunId: string): Promise<unknown>;
+  };
   observe?(observation: QueueObservation): void;
 }) {
   const { repository } = dependencies;
@@ -113,6 +131,80 @@ export function createConversationRunCoordinator(dependencies: {
   const chainsBySessionId = new Map<string, ConversationRunChain>();
   const locks = new Map<string, Promise<void>>();
   const observe = (observation: QueueObservation) => dependencies.observe?.(observation);
+  const MAX_CONSECUTIVE_AGENT_NOTIFICATION_RUNS = 4;
+  const MAX_AGENT_NOTIFICATION_BATCH = 4;
+  const AGENT_NOTIFICATION_BUDGET: AgentRunBudget = {
+    maxModelTurns: 20,
+    maxModelAttempts: 24,
+    maxRetriesPerTurn: 1,
+    maxOutputTokens: 16_384,
+    modelRequestTimeoutMs: 300_000,
+    maxTotalTokens: 1_000_000,
+  };
+
+  function notificationIdsFromOrigin(origin: string | undefined): string[] {
+    return origin?.startsWith('agent_notification:') ? origin.slice('agent_notification:'.length).split(',').filter(Boolean) : [];
+  }
+
+  async function pendingAgentBatch(sessionId: string): Promise<AgentInboxBatch | null> {
+    if (!dependencies.agentInbox) return null;
+    let pending = await dependencies.agentInbox.pending(sessionId);
+    if (pending.length === 0) return null;
+    const session = await repository.loadSession(sessionId);
+    if (!session) return null;
+    const delivered = new Map<string, string>();
+    for (const record of session.ledger ?? []) {
+      const ids = notificationIdsFromOrigin(record.type === 'run_started' || record.type === 'message' ? record.origin : undefined);
+      for (const id of ids) delivered.set(id, 'runId' in record ? record.runId : 'recovered');
+    }
+    const alreadyDelivered = pending.filter((item) => delivered.has(item.notificationId));
+    if (alreadyDelivered.length > 0) {
+      const byRun = new Map<string, string[]>();
+      for (const item of alreadyDelivered) {
+        const runId = delivered.get(item.notificationId)!;
+        byRun.set(runId, [...(byRun.get(runId) ?? []), item.notificationId]);
+      }
+      for (const [runId, ids] of byRun) await dependencies.agentInbox.consume(sessionId, ids, runId);
+      pending = await dependencies.agentInbox.pending(sessionId);
+      if (pending.length === 0) return null;
+    }
+    pending.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const notifications = pending.slice(0, MAX_AGENT_NOTIFICATION_BATCH);
+    const ids = notifications.map((item) => item.notificationId);
+    const content = [
+      'The following background child-agent runs are terminal and their results are newly delivered to this Main Run. Incorporate every listed result before deciding the next action. Do not wait for, poll, or claim that any listed run is still running. If these results complete the parent task, produce the final synthesis now.',
+      JSON.stringify(notifications.map((item) => ({
+        agentId: item.agentId,
+        agentRunId: item.agentRunId,
+        ...(item.delegationGroupId ? { delegationGroupId: item.delegationGroupId } : {}),
+        status: item.result.status,
+        terminationReason: item.result.terminationReason,
+        summary: item.summary,
+        result: item.result.finalContent,
+        ...(item.result.usage ? { usage: item.result.usage } : {}),
+        ...(item.result.error ? { error: item.result.error } : {}),
+      }))),
+    ].join('\n');
+    return { notifications, message: { role: 'user', content }, origin: `agent_notification:${ids.join(',')}` };
+  }
+
+  async function beginAgentNotificationRun(sessionId: string, context: RunContext): Promise<{ runId: string; prompt: string; notificationDelivery: true } | null> {
+    const batch = await pendingAgentBatch(sessionId);
+    if (!batch || !dependencies.agentInbox) return null;
+    const session = await repository.loadSession(sessionId);
+    const consecutiveNotificationRuns = [...(session?.ledger ?? [])].reverse().reduce((count, record) => {
+      if (count < 0 || record.type !== 'run_started') return count;
+      return record.origin?.startsWith('agent_notification:') ? count + 1 : -1;
+    }, 0);
+    if (consecutiveNotificationRuns >= MAX_CONSECUTIVE_AGENT_NOTIFICATION_RUNS) {
+      observe({ metric: 'run_chain.paused.count', value: 1, sessionId, outcome: 'agent_notification_limit', reason: 'agent_notification_limit' });
+      return null;
+    }
+    const runId = crypto.randomUUID();
+    await repository.beginRun({ sessionId, runId, userMessage: batch.message, context, profile: 'main', origin: batch.origin });
+    await dependencies.agentInbox.consume(sessionId, batch.notifications.map((item) => item.notificationId), runId);
+    return { runId, prompt: batch.message.content, notificationDelivery: true };
+  }
 
   async function withSessionLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
     const previous = locks.get(sessionId) ?? Promise.resolve();
@@ -135,9 +227,14 @@ export function createConversationRunCoordinator(dependencies: {
     activeByRunId.set(handle.runId, handle);
   }
 
+  function settleSteerWaiters(handle: ActiveConversationRun, reason: 'steer' | 'closed') {
+    for (const settle of [...handle.steerWaiters]) settle(reason);
+  }
+
   function unregister(handle: ActiveConversationRun) {
     if (activeBySessionId.get(handle.sessionId) === handle) activeBySessionId.delete(handle.sessionId);
     if (activeByRunId.get(handle.runId) === handle) activeByRunId.delete(handle.runId);
+    settleSteerWaiters(handle, 'closed');
     handle.phase = 'terminal';
   }
 
@@ -182,6 +279,39 @@ export function createConversationRunCoordinator(dependencies: {
 
   function commandSource(handle: ActiveConversationRun): RunCommandSource {
     return {
+      async waitForSteer(input) {
+        let waiting: Promise<'steer' | 'closed'> = Promise.resolve('closed');
+        await withSessionLock(handle.sessionId, async () => {
+          if (
+            input.signal.aborted
+            || activeBySessionId.get(handle.sessionId) !== handle
+            || input.runId !== handle.runId
+            || handle.phase === 'closing'
+            || handle.phase === 'stopping'
+            || handle.phase === 'terminal'
+          ) return;
+          const queue = await repository.getQueue(handle.sessionId);
+          if (queue.pending.some((item) => item.delivery === 'steer' && item.targetRunId === handle.runId)) {
+            waiting = Promise.resolve('steer');
+            return;
+          }
+          waiting = new Promise<'steer' | 'closed'>((resolve) => {
+            let settled = false;
+            const finish = (reason: 'steer' | 'closed') => {
+              if (settled) return;
+              settled = true;
+              handle.steerWaiters.delete(finish);
+              input.signal.removeEventListener('abort', onAbort);
+              resolve(reason);
+            };
+            const onAbort = () => finish('closed');
+            handle.steerWaiters.add(finish);
+            input.signal.addEventListener('abort', onAbort, { once: true });
+            if (input.signal.aborted) finish('closed');
+          });
+        });
+        return waiting;
+      },
       atSafeBoundary(input) {
         return withSessionLock(handle.sessionId, async () => {
           if (activeBySessionId.get(handle.sessionId) !== handle || input.runId !== handle.runId || handle.phase === 'stopping' || handle.phase === 'terminal') {
@@ -267,6 +397,7 @@ export function createConversationRunCoordinator(dependencies: {
         phase: 'accepting_commands',
         abortController: new AbortController(),
         sink,
+        steerWaiters: new Set(),
       };
       if (chain.stoppedFor) {
         handle.phase = 'stopping';
@@ -297,6 +428,7 @@ export function createConversationRunCoordinator(dependencies: {
             ...(current.isNew !== undefined ? { isNew: current.isNew } : {}),
             ...(current.clientRequestId ? { clientRequestId: current.clientRequestId } : {}),
             ...(current.sourceItemId ? { sourceItemId: current.sourceItemId } : {}),
+            ...(current.notificationDelivery ? { origin: 'orchestrated' as const, budget: AGENT_NOTIFICATION_BUDGET } : {}),
             commandSource: commandSource(handle),
             ...(dependencies.createLifecycleHooks ? {
               lifecycle: dependencies.createLifecycleHooks(current.sessionId, current.runId),
@@ -332,6 +464,11 @@ export function createConversationRunCoordinator(dependencies: {
         operationId: `drain:${current.runId}:${nextRunId}`,
       });
       if (!claimed) {
+        const notificationRun = await beginAgentNotificationRun(current.sessionId, environment.context);
+        if (notificationRun) {
+          current = { sessionId: current.sessionId, runId: notificationRun.runId, prompt: notificationRun.prompt, prestarted: true, notificationDelivery: true };
+          continue;
+        }
         observe({ metric: 'run_chain.length', value: summaries.length, sessionId: current.sessionId, runId: current.runId, outcome: 'completed' });
         return { summaries, paused: false };
       }
@@ -356,7 +493,7 @@ export function createConversationRunCoordinator(dependencies: {
 
   async function resume(sessionId: string, sink: EventSink, stream: CoordinatorStreamOptions = {}): Promise<RunChainResult> {
     const chain: ConversationRunChain = { chainId: crypto.randomUUID(), sessionId, sink };
-    let next: { runId: string; prompt: string; sourceItemId: string } | null;
+    let next: { runId: string; prompt: string; sourceItemId?: string; notificationDelivery?: true } | null;
     try {
       next = await withSessionLock(sessionId, async () => {
         if (chainsBySessionId.has(sessionId) || activeBySessionId.has(sessionId)) throw new Error('Session already has an active Run');
@@ -366,7 +503,7 @@ export function createConversationRunCoordinator(dependencies: {
         const environment = await dependencies.resolveEnvironment(session);
         const runId = crypto.randomUUID();
         const claimed = await repository.beginRunFromQueue({ sessionId, runId, context: environment.context, operationId: `resume:${runId}` });
-        if (!claimed) return null;
+        if (!claimed) return beginAgentNotificationRun(sessionId, environment.context);
         queueUpdated(sink, sessionId, claimed.item, claimed.session.revision ?? 0);
         return { runId, prompt: claimed.message.content, sourceItemId: claimed.item.itemId };
       });
@@ -379,7 +516,7 @@ export function createConversationRunCoordinator(dependencies: {
       return { summaries: [], paused: false };
     }
     try {
-      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, sourceItemId: next.sourceItemId }, sink, chain, stream);
+      return await executeChain({ sessionId, runId: next.runId, prompt: next.prompt, prestarted: true, ...(next.sourceItemId ? { sourceItemId: next.sourceItemId } : {}), ...(next.notificationDelivery ? { notificationDelivery: true } : {}) }, sink, chain, stream);
     } finally {
       await unregisterChain(chain);
     }
@@ -401,6 +538,7 @@ export function createConversationRunCoordinator(dependencies: {
       if (queued.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: input.sessionId, runId: handle?.runId, itemId: queued.item.itemId, operationId: input.operationId });
       observe({ metric: 'queue.pending.count', value: (await repository.getQueue(input.sessionId)).pending.length, sessionId: input.sessionId, runId: handle?.runId });
       handle?.sink({ type: 'queue_item_added', sessionId: input.sessionId, item: queued.item, sessionRevision: queued.sessionRevision });
+      if (steerTarget) settleSteerWaiters(steerTarget, 'steer');
       if (input.delivery !== 'steer' || steerTarget) {
         return steerTarget
           ? { outcome: 'steered', item: queued.item, targetRunId: steerTarget.runId, sessionRevision: queued.sessionRevision }
@@ -428,7 +566,10 @@ export function createConversationRunCoordinator(dependencies: {
         const result = await repository.promoteQueueItem(command);
         observe({ metric: 'queue.promote.count', value: 1, sessionId: command.sessionId, runId: steerTarget.runId, itemId: command.itemId, operationId: command.operationId, outcome: result.outcome });
         if ('replayed' in result && result.replayed) observe({ metric: 'queue.idempotent_replay.count', value: 1, sessionId: command.sessionId, runId: steerTarget.runId, itemId: command.itemId, operationId: command.operationId });
-        if (result.outcome === 'steered') queueUpdated(steerTarget.sink, command.sessionId, result.item, result.sessionRevision);
+        if (result.outcome === 'steered') {
+          queueUpdated(steerTarget.sink, command.sessionId, result.item, result.sessionRevision);
+          settleSteerWaiters(steerTarget, 'steer');
+        }
         return result;
       }
       if (command.type === 'cancel') {
