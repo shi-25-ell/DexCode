@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { BUILTIN_AGENT_DEFINITIONS, createAgentDefinitionRegistry, parseAgentDefinitionMarkdown } from './agent-definitions.ts';
+import { AgentDefinitionMutationError, BUILTIN_AGENT_DEFINITIONS, createAgentDefinitionRegistry, parseAgentDefinitionMarkdown } from './agent-definitions.ts';
 import { createAgentStore } from './agent-store.ts';
 import type { AgentRecord, AgentRunRecord } from './contracts.ts';
 import { createAgentManager, multiAgentEnabled } from './agent-manager.ts';
@@ -78,6 +78,77 @@ test('Definition parser rejects unknown fields and workspace definitions overrid
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('Global custom Agent definitions enforce safe capabilities, lifecycle and the total limit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dexcode-managed-agent-def-'));
+  try {
+    const registry = createAgentDefinitionRegistry({ userRoot: root });
+    await registry.reload();
+    assert.deepEqual(registry.managedList().map((item) => item.name), ['general-purpose', 'researcher', 'reviewer']);
+    assert.equal(registry.managedList().some((item) => item.name === 'assistant'), false);
+    assert.equal(registry.managedList().find((item) => item.name === 'general-purpose')?.toggleable, false);
+    assert.equal(registry.managedList().find((item) => item.name === 'researcher')?.toggleable, true);
+
+    await writeFile(join(root, 'manual.md'), '---\nname: manual\ndescription: Manual definition\nallowed-tools: [run_command, write_file]\nmodel: unrestricted-model\n---\nComplete the task.', 'utf8');
+    await registry.reload();
+    const clamped = registry.resolve('manual')!.definition;
+    assert.equal(clamped.toolPolicy.allow?.includes('run_command'), false);
+    assert.equal(clamped.toolPolicy.allow?.includes('write_file'), true);
+    assert.equal(clamped.model, undefined);
+    await registry.remove('manual');
+
+    await registry.create({
+      name: 'scout',
+      description: 'Inspect a focused area',
+      instructions: 'Read the source and report findings.',
+      filePermission: 'read_only',
+      contextMode: 'fresh',
+    });
+    const readOnly = registry.resolve('scout')!.definition;
+    assert.equal(readOnly.defaultContextMode, 'fresh');
+    assert.equal(readOnly.toolPolicy.allow?.includes('read_file'), true);
+    assert.equal(readOnly.toolPolicy.allow?.includes('write_file'), false);
+    assert.equal(readOnly.toolPolicy.allow?.includes('run_command'), false);
+    assert.equal(readOnly.toolPolicy.allowExternalMcp, false);
+    assert.equal(readOnly.toolPolicy.allowSkills, false);
+    assert.equal(readOnly.toolPolicy.allowOrchestration, false);
+
+    await registry.setEnabled('scout', false);
+    assert.equal(registry.resolve('scout'), null);
+    assert.equal(registry.managedList().find((item) => item.name === 'scout')?.enabled, false);
+    await registry.setEnabled('scout', true);
+    await registry.update('scout', {
+      name: 'scout',
+      description: 'Inspect and make focused edits',
+      instructions: 'Inspect the source and make the requested focused edit.',
+      filePermission: 'write_files',
+      contextMode: 'fork',
+    });
+    const writable = registry.resolve('scout')!.definition;
+    assert.equal(writable.toolPolicy.allow?.includes('write_file'), true);
+    assert.equal(writable.toolPolicy.allow?.includes('patch_file'), true);
+    assert.equal(writable.toolPolicy.allow?.includes('run_command'), false);
+
+    await registry.setEnabled('researcher', false);
+    assert.equal(registry.resolve('researcher'), null);
+    await assert.rejects(registry.setEnabled('general-purpose', false), (error) => error instanceof AgentDefinitionMutationError && error.code === 'forbidden');
+    await assert.rejects(registry.remove('reviewer'), (error) => error instanceof AgentDefinitionMutationError && error.code === 'forbidden');
+    await assert.rejects(registry.create({ name: 'assistant', description: 'Reserved', instructions: 'No.', filePermission: 'read_only', contextMode: 'fresh' }), (error) => error instanceof AgentDefinitionMutationError && error.code === 'conflict');
+
+    const reopened = createAgentDefinitionRegistry({ userRoot: root });
+    await reopened.reload();
+    assert.equal(reopened.managedList().find((item) => item.name === 'researcher')?.enabled, false);
+    assert.equal(reopened.resolve('scout')?.definition.description, 'Inspect and make focused edits');
+    for (let index = 1; index <= 6; index += 1) {
+      await reopened.create({ name: `custom-${index}`, description: `Custom ${index}`, instructions: 'Complete the assigned work.', filePermission: 'read_only', contextMode: 'fork' });
+    }
+    assert.equal(reopened.managedList().length, 10);
+    await assert.rejects(reopened.create({ name: 'custom-7', description: 'One too many', instructions: 'No.', filePermission: 'read_only', contextMode: 'fork' }), (error) => error instanceof AgentDefinitionMutationError && error.code === 'capacity');
+    await reopened.remove('scout');
+    assert.equal(reopened.resolve('scout'), null);
+    assert.equal(reopened.managedList().length, 9);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('child Agent definitions have bounded capabilities and long-task budgets', () => {
   const generalPurpose = BUILTIN_AGENT_DEFINITIONS.find((definition) => definition.name === 'general-purpose');
   assert.deepEqual(generalPurpose?.toolPolicy.allow, ['read_file', 'find', 'ls', 'list_workspace', 'grep', 'write_file', 'patch_file']);
@@ -132,7 +203,7 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
   const caller = (toolCallId: string) => ({ sessionId, callerRunId: 'main-run', callerTurn: 1, toolCallId, delegationGroupId: 'group-1', forkSnapshot: [] });
   try {
     assert.equal(definitions.resolve('assistant')?.definition.name, 'assistant');
-    assert.deepEqual(manager.definitions().map(({ name }) => name), ['general-purpose', 'researcher', 'reviewer']);
+    assert.deepEqual(manager.definitions!().map(({ name }) => name), ['general-purpose', 'researcher', 'reviewer']);
     const missing = await manager.spawn({ task: 'hello', agent: 'greeter' }, caller('spawn-missing')) as { code: string; message: string };
     assert.equal(missing.code, 'definition_not_found');
     assert.match(missing.message, /Available agents: general-purpose, researcher, reviewer/);

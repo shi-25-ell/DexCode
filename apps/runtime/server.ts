@@ -27,11 +27,15 @@ import {
   createAgentActivityStream,
 } from '../../packages/run-protocol/agent-activity.ts';
 import {
+  AgentDefinitionMutationError,
   createAgentDefinitionRegistry,
   createAgentManager,
   createAgentStore,
+  MAX_CUSTOM_AGENT_DEFINITIONS,
+  MAX_VISIBLE_AGENT_DEFINITIONS,
   multiAgentEnabled,
   type AgentManager,
+  type ManagedAgentDefinitionInput,
 } from '../../packages/agent-manager/index.ts';
 import {
   createRunReplayBuffer,
@@ -411,8 +415,15 @@ const environmentMcpConfigs: ExternalMcpServerConfig[] = (() => {
 let externalMcpConfigs = await externalMcpConfigStore.read(environmentMcpConfigs);
 const externalMcpRegistry = createExternalMcpRegistry(externalMcpConfigs.filter((config) => config.enabled !== false));
 const templateGenerator = createTemplateGenerator();
+const globalAgentDefinitions = createAgentDefinitionRegistry({
+  userRoot: join(process.env.USERPROFILE ?? process.cwd(), '.dexcode', 'agents'),
+});
+await globalAgentDefinitions.reload();
 const capabilityRegistry = createCapabilityRegistry({
-  disabled: (process.env.DEX_DISABLED_CAPABILITIES ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+  disabled: [
+    ...(process.env.DEX_DISABLED_CAPABILITIES ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+    ...(multiAgentFeatureEnabled ? [] : ['subagents']),
+  ],
 });
 
 type WorkspaceRuntime = {
@@ -482,16 +493,11 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     modelClient,
     observe: (event) => console.info(JSON.stringify({ type: 'metric', ...event })),
   });
-  const definitionRegistry = createAgentDefinitionRegistry({
-    userRoot: join(process.env.USERPROFILE ?? process.cwd(), '.dexcode', 'agents'),
-    workspaceRoot: join(workspace.canonicalRootPath, '.dexcode', 'agents'),
-  });
-  await definitionRegistry.reload();
   let nextCodingAgent!: CodingAgent;
   const nextAgentManager = createAgentManager({
     enabled: multiAgentFeatureEnabled,
     store: agentStore,
-    definitions: definitionRegistry,
+    definitions: globalAgentDefinitions,
     runChild: (input) => nextCodingAgent.runChild(input),
   });
   nextCodingAgent = createCodingAgent(
@@ -513,7 +519,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     codingAgent: nextCodingAgent,
     managedMemory: nextManagedMemory,
     agentManager: nextAgentManager,
-    agentDefinitions: definitionRegistry,
+    agentDefinitions: globalAgentDefinitions,
   };
   workspaceRuntimes.set(workspace.workspaceId, runtime);
   return runtime;
@@ -625,7 +631,7 @@ async function tryReadStaticFile(pathname: string) {
   const candidates = [join(webDistRoot, pathname), join(webRoot, pathname)];
   for (const candidate of candidates) {
     try {
-      return await readFile(candidate, 'utf8');
+      return await readFile(candidate);
     } catch {
       continue;
     }
@@ -1728,14 +1734,50 @@ export function startRuntimeServer() {
       return;
     }
 
-    // ── Skill 管理 API ──
+    // ── 子智能体定义管理 API ──
     if (url.pathname === '/api/agent-definitions' && req.method === 'GET') {
       if (!multiAgentFeatureEnabled) throw new HttpError(404, 'Multi-Agent is disabled');
-      const result = await requestRuntime.agentDefinitions.reload();
-      sendJson(res, 200, result);
+      await globalAgentDefinitions.reload();
+      sendJson(res, 200, {
+        agents: globalAgentDefinitions.managedList(),
+        limit: MAX_VISIBLE_AGENT_DEFINITIONS,
+        customLimit: MAX_CUSTOM_AGENT_DEFINITIONS,
+        diagnostics: globalAgentDefinitions.diagnostics(),
+      });
       return;
     }
 
+    if (url.pathname === '/api/agent-definitions' && req.method === 'POST') {
+      if (!multiAgentFeatureEnabled) throw new HttpError(404, 'Multi-Agent is disabled');
+      const agent = await globalAgentDefinitions.create(await parseBody<ManagedAgentDefinitionInput>(req));
+      sendJson(res, 201, { agent });
+      return;
+    }
+
+    const agentDefinitionRoute = /^\/api\/agent-definitions\/([^/]+)$/.exec(url.pathname);
+    if (agentDefinitionRoute) {
+      if (!multiAgentFeatureEnabled) throw new HttpError(404, 'Multi-Agent is disabled');
+      const name = decodeURIComponent(agentDefinitionRoute[1]!);
+      if (req.method === 'PUT') {
+        const agent = await globalAgentDefinitions.update(name, await parseBody<ManagedAgentDefinitionInput>(req));
+        sendJson(res, 200, { agent });
+        return;
+      }
+      if (req.method === 'PATCH') {
+        const { enabled } = await parseBody<{ enabled?: boolean }>(req);
+        if (typeof enabled !== 'boolean') throw new HttpError(400, 'enabled 字段必须是布尔值');
+        const agent = await globalAgentDefinitions.setEnabled(name, enabled);
+        sendJson(res, 200, { agent });
+        return;
+      }
+      if (req.method === 'DELETE') {
+        await globalAgentDefinitions.remove(name);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+    }
+
+    // ── Skill 管理 API ──
     if (url.pathname === '/api/skills' && req.method === 'GET') {
       sendJson(res, 200, { skills: skillRegistry.listSkills() });
       return;
@@ -2374,6 +2416,8 @@ export function startRuntimeServer() {
     } catch (err) {
       const status = err instanceof HttpError
         ? err.status
+        : err instanceof AgentDefinitionMutationError
+          ? err.code === 'invalid' ? 400 : err.code === 'not_found' ? 404 : err.code === 'forbidden' ? 403 : 409
         : err instanceof QueueMutationError
           ? err.code === 'NOT_FOUND' ? 404 : err.code === 'INVALID_ORDER' ? 400 : 409
           : 500;

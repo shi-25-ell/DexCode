@@ -419,6 +419,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 .settings-row details { margin-top: 8px; color: var(--muted); font-size: 11px; }
 .settings-row details code { display: inline-block; margin-top: 6px; }
 .settings-row details summary { cursor: pointer; }
+.subagent-row { align-items: flex-start; }
+.subagent-instructions pre { max-width: 760px; max-height: 180px; overflow: auto; margin: 8px 0 0; padding: 10px; border-radius: 7px; background: var(--subtle); color: #374151; white-space: pre-wrap; font: 11px/1.6 "SFMono-Regular", Consolas, monospace; }
+.settings-count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.settings-locked { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.settings-form-note, .settings-field small { margin: -4px 0 12px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .toggle { position: relative; flex: 0 0 auto; width: 38px; height: 22px; padding: 2px; border: 0; border-radius: 99px; background: #d1d5db; cursor: pointer; }
 .toggle span { display: block; width: 18px; height: 18px; border-radius: 99px; background: #fff; transition: transform 120ms ease; }
 .toggle.on { background: var(--blue); }

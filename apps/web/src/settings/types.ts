@@ -92,3 +92,26 @@ export type ManagedMemorySnapshot = {
   degraded: boolean;
   diagnostics: string[];
 };
+
+export type SubagentFilePermission = 'read_only' | 'write_files';
+export type SubagentContextMode = 'fork' | 'fresh';
+export type SubagentDefinitionInput = {
+  name: string;
+  description: string;
+  instructions: string;
+  filePermission: SubagentFilePermission;
+  contextMode: SubagentContextMode;
+};
+export type SubagentDefinition = SubagentDefinitionInput & {
+  source: 'builtin' | 'user' | 'workspace';
+  enabled: boolean;
+  editable: boolean;
+  toggleable: boolean;
+  deletable: boolean;
+};
+export type SubagentDefinitionsResponse = {
+  agents: SubagentDefinition[];
+  limit: number;
+  customLimit: number;
+  diagnostics: Array<{ path: string; severity: 'error'; message: string }>;
+};

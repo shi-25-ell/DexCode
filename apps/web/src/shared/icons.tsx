@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react';
 import {
   BookOpen,
+  Bot,
   Brain,
   Camera,
   CircleAlert,
@@ -24,6 +25,7 @@ export const capabilityIcons: Record<Capability['icon'], ComponentType<{ size?: 
   shield: ShieldCheck,
   book: BookOpen,
   brain: Brain,
+  bot: Bot,
 };
 
 export const toolIcons: Record<ToolPresentation['category'], ComponentType<{ size?: number; strokeWidth?: number }>> = {

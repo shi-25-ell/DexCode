@@ -2,7 +2,7 @@ import type { ToolViewStatus } from '../../../packages/shared/types';
 
 export type ConversationScope = { kind: 'general' } | { kind: 'workspace'; workspaceRef: string };
 
-export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge' | 'memory';
+export type CapabilityId = 'mcp' | 'tools' | 'skills' | 'approval' | 'project-knowledge' | 'memory' | 'subagents';
 export type ApprovalMode = 'read_only' | 'allowlist' | 'full_access';
 export type ApprovalEffect = 'read' | 'write' | 'execute' | 'external' | 'interactive';
 export type ApprovalOption = 'allow_once' | 'allow_whitelist' | 'deny';
@@ -11,7 +11,7 @@ export type Capability = {
   id: CapabilityId;
   label: string;
   route: string;
-  icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'book' | 'brain';
+  icon: 'network' | 'wrench' | 'sparkles' | 'shield' | 'book' | 'brain' | 'bot';
   workspaceRequired: boolean;
 };
 

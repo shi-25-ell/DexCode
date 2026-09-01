@@ -1,4 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -72,7 +73,12 @@ try {
       if (response.status === 200) {
         const body = await response.json();
         if (body?.appName !== 'DexCode') throw new Error('development proxy returned an unexpected application');
-        console.log(JSON.stringify({ ok: true, webPort, runtimePort, status: response.status }));
+        const expectedIcon = await readFile(resolve(repoRoot, 'public', 'dexcode-icon.png'));
+        const iconResponse = await fetch(`http://127.0.0.1:${runtimePort}/dexcode-icon.png`);
+        if (iconResponse.status !== 200) throw new Error(`runtime static asset returned HTTP ${iconResponse.status}`);
+        const servedIcon = Buffer.from(await iconResponse.arrayBuffer());
+        if (!servedIcon.equals(expectedIcon)) throw new Error('runtime static asset bytes differ from the source PNG');
+        console.log(JSON.stringify({ ok: true, webPort, runtimePort, status: response.status, iconBytes: servedIcon.length }));
         process.exitCode = 0;
         break;
       }
