@@ -32,7 +32,6 @@ import {
   createAgentManager,
   createAgentStore,
   MAX_CUSTOM_AGENT_DEFINITIONS,
-  MAX_VISIBLE_AGENT_DEFINITIONS,
   multiAgentEnabled,
   type AgentManager,
   type ManagedAgentDefinitionInput,
@@ -1747,7 +1746,7 @@ export function startRuntimeServer() {
       await globalAgentDefinitions.reload();
       sendJson(res, 200, {
         agents: globalAgentDefinitions.managedList(),
-        limit: MAX_VISIBLE_AGENT_DEFINITIONS,
+        limit: MAX_CUSTOM_AGENT_DEFINITIONS,
         customLimit: MAX_CUSTOM_AGENT_DEFINITIONS,
         diagnostics: globalAgentDefinitions.diagnostics(),
       });

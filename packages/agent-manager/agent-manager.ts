@@ -6,6 +6,7 @@ import {
   type AgentCallerContext,
   type AgentCompletionNotification,
   type AgentContextMode,
+  type AgentDefinition,
   type AgentIsolation,
   type AgentOrchestrationPort,
   type AgentRecord,
@@ -30,12 +31,16 @@ type ChildRunInput = {
 type Handle = { sessionId: string; agentId: string; agentRunId: string; abortController: AbortController; promise: Promise<StoredAgentRunResult> };
 
 const WRITE_TOOLS = new Set(['write_file', 'patch_file', 'run_command']);
-const BUILTIN_AGENT_NAMES = new Set(['general-purpose', 'assistant', 'researcher', 'reviewer']);
-const MODEL_HIDDEN_AGENT_NAMES = new Set(['assistant']);
+const BUILTIN_AGENT_NAMES = new Set(['general-writer', 'general-reader', 'general-purpose', 'assistant', 'researcher', 'reviewer']);
+const MODEL_HIDDEN_AGENT_NAMES = new Set(['general-purpose', 'assistant']);
+
+function definitionIsWriter(definition: AgentDefinition): boolean {
+  const allow = definition.toolPolicy.allow ?? [];
+  return allow.some((tool) => WRITE_TOOLS.has(tool));
+}
 
 function isWriter(agent: AgentRecord): boolean {
-  const allow = agent.definitionSnapshot.toolPolicy.allow ?? [];
-  return allow.some((tool) => WRITE_TOOLS.has(tool));
+  return definitionIsWriter(agent.definitionSnapshot);
 }
 
 function storedResult(result: AgentRunResult): StoredAgentRunResult {
@@ -408,7 +413,11 @@ export function createAgentManager(options: {
   }
 
   return {
-    definitions: () => modelVisibleDefinitions().map(({ name, description }) => ({ name, description })),
+    definitions: () => modelVisibleDefinitions().map((definition) => ({
+      name: definition.name,
+      description: definition.description,
+      filePermission: definitionIsWriter(definition) ? 'write_files' : 'read_only',
+    })),
     spawn: async (input, caller) => {
       try { return await withAgentLock(`operation:${caller.sessionId}:${caller.callerRunId}:${caller.toolCallId}`, () => spawnRaw(input, caller)); }
       catch (error) { return agentErrorResult(error); }

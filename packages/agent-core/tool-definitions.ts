@@ -89,7 +89,7 @@ export const CONTEXT_TOOL_DEFINITIONS = [
   },
 ];
 
-const SPAWN_AGENT_DESCRIPTION = `Start a persistent child agent asynchronously for a bounded task. After spawning, choose the coordination mode that fits the task: use wait_agent with block=true for a foreground synchronization barrier when the current user request depends on the child result, or continue independent work and finish the current Main Run for background delivery. Foreground waits yield when a user Steer arrives; background completions are delivered automatically in a later Main Run. Do not tight-poll. Use context_mode=fresh for self-contained work that does not need the current conversation; use context_mode=fork when the child needs a bounded snapshot of the main agent's current context. A fork is copied once and parent and child continue independently. Omit context_mode to use the selected agent definition's default. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}.`;
+const SPAWN_AGENT_DESCRIPTION = `Start a persistent child agent asynchronously for a bounded task. Select the agent by its file-permission semantics: prefer read_only agents for analysis, review, research, and parallel work; select a write_files agent only when the task must modify workspace files. At most one shared-workspace write_files agent may run at a time, while read_only agents may run in parallel. After spawning, choose the coordination mode that fits the task: use wait_agent with block=true for a foreground synchronization barrier when the current user request depends on the child result, or continue independent work and finish the current Main Run for background delivery. Foreground waits yield when a user Steer arrives; background completions are delivered automatically in a later Main Run. Do not tight-poll. Use context_mode=fresh for self-contained work that does not need the current conversation; use context_mode=fork when the child needs a bounded snapshot of the main agent's current context. A fork is copied once and parent and child continue independently. Omit context_mode to use the selected agent definition's default. Omit agent to use ${DEFAULT_AGENT_DEFINITION_NAME}, which is read_only.`;
 const CONTEXT_MODE_DESCRIPTION = "Optional context strategy. fresh starts from the child agent's own system, workspace, memory, and task context without the main conversation. fork additionally copies a bounded snapshot of the main agent's current context; use it when prior discussion or findings are needed. The snapshot is copied once, so parent and child continue independently. Omit to use the selected agent definition's default.";
 
 export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
@@ -143,10 +143,10 @@ export const AGENT_ORCHESTRATION_TOOL_DEFINITIONS = [
   },
 ] as const;
 
-export function agentOrchestrationToolDefinitions(agents: Array<{ name: string; description: string }>) {
+export function agentOrchestrationToolDefinitions(agents: Array<{ name: string; description: string; filePermission: 'read_only' | 'write_files' }>) {
   if (agents.length === 0) return [...AGENT_ORCHESTRATION_TOOL_DEFINITIONS];
   const names = agents.map((agent) => agent.name);
-  const descriptions = agents.map((agent) => `${agent.name}: ${agent.description}`).join('; ');
+  const descriptions = agents.map((agent) => `${agent.name} [${agent.filePermission}]: ${agent.description}`).join('; ');
   return AGENT_ORCHESTRATION_TOOL_DEFINITIONS.map((tool) => tool.function.name !== 'spawn_agent' ? tool : ({
     ...tool,
     function: {

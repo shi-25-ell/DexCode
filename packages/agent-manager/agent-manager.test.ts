@@ -83,9 +83,9 @@ test('Global custom Agent definitions enforce safe capabilities, lifecycle and t
   try {
     const registry = createAgentDefinitionRegistry({ userRoot: root });
     await registry.reload();
-    assert.deepEqual(registry.managedList().map((item) => item.name), ['general-purpose', 'researcher', 'reviewer']);
-    assert.equal(registry.managedList().some((item) => item.name === 'assistant'), false);
-    assert.equal(registry.managedList().find((item) => item.name === 'general-purpose')?.toggleable, false);
+    assert.deepEqual(registry.managedList().map((item) => item.name), ['researcher', 'reviewer']);
+    assert.equal(registry.managedList().some((item) => item.name === 'general-writer'), false);
+    assert.equal(registry.managedList().some((item) => item.name === 'general-reader'), false);
     assert.equal(registry.managedList().find((item) => item.name === 'researcher')?.toggleable, true);
 
     await writeFile(join(root, 'manual.md'), '---\nname: manual\ndescription: Manual definition\nallowed-tools: [run_command, write_file]\nmodel: unrestricted-model\n---\nComplete the task.', 'utf8');
@@ -130,7 +130,7 @@ test('Global custom Agent definitions enforce safe capabilities, lifecycle and t
 
     await registry.setEnabled('researcher', false);
     assert.equal(registry.resolve('researcher'), null);
-    await assert.rejects(registry.setEnabled('general-purpose', false), (error) => error instanceof AgentDefinitionMutationError && error.code === 'forbidden');
+    await assert.rejects(registry.setEnabled('general-writer', false), (error) => error instanceof AgentDefinitionMutationError && error.code === 'forbidden');
     await assert.rejects(registry.remove('reviewer'), (error) => error instanceof AgentDefinitionMutationError && error.code === 'forbidden');
     await assert.rejects(registry.create({ name: 'assistant', description: 'Reserved', instructions: 'No.', filePermission: 'read_only', contextMode: 'fresh' }), (error) => error instanceof AgentDefinitionMutationError && error.code === 'conflict');
 
@@ -138,23 +138,25 @@ test('Global custom Agent definitions enforce safe capabilities, lifecycle and t
     await reopened.reload();
     assert.equal(reopened.managedList().find((item) => item.name === 'researcher')?.enabled, false);
     assert.equal(reopened.resolve('scout')?.definition.description, 'Inspect and make focused edits');
-    for (let index = 1; index <= 6; index += 1) {
+    for (let index = 1; index <= 9; index += 1) {
       await reopened.create({ name: `custom-${index}`, description: `Custom ${index}`, instructions: 'Complete the assigned work.', filePermission: 'read_only', contextMode: 'fork' });
     }
-    assert.equal(reopened.managedList().length, 10);
-    await assert.rejects(reopened.create({ name: 'custom-7', description: 'One too many', instructions: 'No.', filePermission: 'read_only', contextMode: 'fork' }), (error) => error instanceof AgentDefinitionMutationError && error.code === 'capacity');
+    assert.equal(reopened.managedList().filter((item) => item.source !== 'builtin').length, 10);
+    await assert.rejects(reopened.create({ name: 'custom-10', description: 'One too many', instructions: 'No.', filePermission: 'read_only', contextMode: 'fork' }), (error) => error instanceof AgentDefinitionMutationError && error.code === 'capacity');
     await reopened.remove('scout');
     assert.equal(reopened.resolve('scout'), null);
-    assert.equal(reopened.managedList().length, 9);
+    assert.equal(reopened.managedList().filter((item) => item.source !== 'builtin').length, 9);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('child Agent definitions have bounded capabilities and long-task budgets', () => {
-  const generalPurpose = BUILTIN_AGENT_DEFINITIONS.find((definition) => definition.name === 'general-purpose');
-  assert.deepEqual(generalPurpose?.toolPolicy.allow, ['read_file', 'find', 'ls', 'list_workspace', 'grep', 'write_file', 'patch_file']);
-  assert.equal(generalPurpose?.toolPolicy.allow?.includes('run_command'), false);
+  const generalWriter = BUILTIN_AGENT_DEFINITIONS.find((definition) => definition.name === 'general-writer');
+  const generalReader = BUILTIN_AGENT_DEFINITIONS.find((definition) => definition.name === 'general-reader');
+  assert.deepEqual(generalWriter?.toolPolicy.allow, ['read_file', 'find', 'ls', 'list_workspace', 'grep', 'write_file', 'patch_file']);
+  assert.equal(generalWriter?.toolPolicy.allow?.includes('run_command'), false);
+  assert.equal(generalReader?.toolPolicy.allow?.includes('write_file'), false);
   assert.equal(BUILTIN_AGENT_DEFINITIONS.some((definition) => definition.name === 'assistant'), true);
-  for (const definition of BUILTIN_AGENT_DEFINITIONS.filter((item) => item.name !== 'general-purpose')) {
+  for (const definition of BUILTIN_AGENT_DEFINITIONS.filter((item) => !['general-writer', 'general-purpose'].includes(item.name))) {
     assert.equal(definition.toolPolicy.allow?.includes('write_file'), false);
     assert.equal(definition.toolPolicy.allow?.includes('patch_file'), false);
   }
@@ -203,31 +205,36 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
   const caller = (toolCallId: string) => ({ sessionId, callerRunId: 'main-run', callerTurn: 1, toolCallId, delegationGroupId: 'group-1', forkSnapshot: [] });
   try {
     assert.equal(definitions.resolve('assistant')?.definition.name, 'assistant');
-    assert.deepEqual(manager.definitions!().map(({ name }) => name), ['general-purpose', 'researcher', 'reviewer']);
+    assert.deepEqual(manager.definitions!().map(({ name }) => name), ['general-writer', 'general-reader', 'researcher', 'reviewer']);
+    assert.deepEqual(manager.definitions!().map(({ filePermission }) => filePermission), ['write_files', 'read_only', 'read_only', 'read_only']);
     const missing = await manager.spawn({ task: 'hello', agent: 'greeter' }, caller('spawn-missing')) as { code: string; message: string };
     assert.equal(missing.code, 'definition_not_found');
-    assert.match(missing.message, /Available agents: general-purpose, researcher, reviewer/);
-    assert.doesNotMatch(missing.message, /assistant/);
+    assert.match(missing.message, /Available agents: general-reader, general-writer, researcher, reviewer/);
+    assert.doesNotMatch(missing.message, /general-purpose|assistant/);
     const first = await manager.spawn({ task: 'one' }, caller('spawn-1')) as { agent_id: string; message: string; asynchronous: boolean; background?: boolean };
     assert.equal(first.asynchronous, true);
     assert.equal(first.background, undefined);
     assert.match(first.message, /foreground wait_agent\(block=true\).*background completion/i);
     const firstDetail = await manager.detail(sessionId, first.agent_id);
-    assert.equal(firstDetail?.agent.definitionName, 'general-purpose');
+    assert.equal(firstDetail?.agent.definitionName, 'general-reader');
     assert.deepEqual(firstDetail?.tools, []);
     const firstRun = (await manager.detail(sessionId, first.agent_id))?.runs[0];
     assert.equal(firstRun?.invokedByTurn, 1);
     assert.equal(firstRun?.invokedByToolCallId, 'spawn-1');
     assert.equal(firstRun?.delegationGroupId, 'group-1');
     const second = await manager.spawn({ task: 'two', agent: 'reviewer' }, caller('spawn-2')) as { agent_id: string };
-    const immediate = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all' }, caller('wait-now')) as { completed: unknown[]; block: boolean };
+    const writer = await manager.spawn({ task: 'write', agent: 'general-writer' }, caller('spawn-writer')) as { agent_id: string };
+    const blockedWriter = await manager.spawn({ task: 'blocked-write', agent: 'general-writer' }, caller('spawn-blocked-writer')) as { code: string };
+    assert.equal(blockedWriter.code, 'write_capacity_exceeded');
+    const runningIds = [first.agent_id, second.agent_id, writer.agent_id];
+    const immediate = await manager.wait({ agentIds: runningIds, mode: 'all' }, caller('wait-now')) as { completed: unknown[]; block: boolean };
     assert.equal(immediate.block, false);
-    const waited = await manager.wait({ agentIds: [first.agent_id, second.agent_id], mode: 'all', block: true, timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[]; timed_out: boolean };
+    const waited = await manager.wait({ agentIds: runningIds, mode: 'all', block: true, timeoutMs: 1_000 }, caller('wait-1')) as { completed: unknown[]; timed_out: boolean };
     assert.equal(waited.timed_out, false);
-    assert.equal(immediate.completed.length + waited.completed.length, 2);
+    assert.equal(immediate.completed.length + waited.completed.length, 3);
     assert.deepEqual(await store.pendingNotifications(sessionId), []);
     const deliveredInbox = (await store.load(sessionId, false))!.inbox;
-    assert.equal(deliveredInbox.length, 2);
+    assert.equal(deliveredInbox.length, 3);
     assert.ok(deliveredInbox.every((item) => item.delegationGroupId === 'group-1' && item.status === 'consumed' && item.consumedByRunId === 'main-run'));
     const followup = await manager.followup({ agentId: first.agent_id, task: 'three' }, caller('followup-1')) as { agent_run_id: string; asynchronous: boolean; background?: boolean };
     assert.match(followup.agent_run_id, /^agent-run-/);
@@ -257,7 +264,7 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     await manager.wait({ agentIds: [slow.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-3'));
     assert.match((await manager.followup({ agentId: slow.agent_id, task: 'after-stop' }, caller('followup-2')) as { agent_run_id: string }).agent_run_id, /^agent-run-/);
     await manager.wait({ agentIds: [slow.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-4'));
-    assert.deepEqual(completedInputs.sort(), ['after-stop', 'one', 'three', 'two'].sort());
+    assert.deepEqual(completedInputs.sort(), ['after-stop', 'one', 'three', 'two', 'write'].sort());
     assert.equal((await manager.detail(sessionId, first.agent_id))?.runs.length, 2);
     const background = await manager.spawn(
       { task: 'background' },

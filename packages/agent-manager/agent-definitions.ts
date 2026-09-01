@@ -5,11 +5,10 @@ import { assertValidAgentDefinition, type AgentContextMode, type AgentDefinition
 
 const READONLY_TOOLS = ['read_file', 'find', 'ls', 'list_workspace', 'grep'];
 const FILE_WRITE_TOOLS = ['write_file', 'patch_file'];
-const VISIBLE_BUILTIN_NAMES = new Set(['general-purpose', 'researcher', 'reviewer']);
-const RESERVED_AGENT_NAMES = new Set(['general-purpose', 'assistant', 'researcher', 'reviewer']);
+const GENERIC_TEMPLATE_NAMES = new Set(['general-writer', 'general-reader', 'general-purpose', 'assistant']);
+const RESERVED_AGENT_NAMES = new Set(['general-writer', 'general-reader', 'general-purpose', 'assistant', 'researcher', 'reviewer']);
 const AGENT_STATE_FILE = '.agent-state.json';
-export const MAX_VISIBLE_AGENT_DEFINITIONS = 10;
-export const MAX_CUSTOM_AGENT_DEFINITIONS = MAX_VISIBLE_AGENT_DEFINITIONS - VISIBLE_BUILTIN_NAMES.size;
+export const MAX_CUSTOM_AGENT_DEFINITIONS = 10;
 
 export type AgentFilePermission = 'read_only' | 'write_files';
 export type ManagedAgentContextMode = 'fork' | 'fresh';
@@ -39,9 +38,29 @@ export class AgentDefinitionMutationError extends Error {
 
 export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
   {
+    name: 'general-writer',
+    description: 'General writable agent for tasks that require workspace file changes. It can read and modify files; select it only when edits are necessary.',
+    systemPrompt: 'Complete the assigned task as a general writable agent. You may read and modify workspace files. Make only task-scoped changes and return a concise result to the parent agent.',
+    toolPolicy: { allow: [...READONLY_TOOLS, ...FILE_WRITE_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
+    defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
+    budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
+    memoryPolicy: { read: true, write: false, automaticExtraction: false },
+    isolationPolicy: { default: 'shared', allowed: ['shared'] },
+  },
+  {
+    name: 'general-reader',
+    description: 'General read-only agent for analysis, investigation, and design. It can inspect workspace files but cannot modify them; prefer it for parallel read-only work.',
+    systemPrompt: 'Complete the assigned task as a general read-only agent. Inspect workspace files when needed, never modify files, and return a concise result to the parent agent.',
+    toolPolicy: { allow: [...READONLY_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
+    defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
+    budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
+    memoryPolicy: { read: true, write: false, automaticExtraction: false },
+    isolationPolicy: { default: 'shared', allowed: ['shared'] },
+  },
+  {
     name: 'general-purpose',
-    description: 'Default general-purpose child agent for bounded delegated tasks, including workspace file edits.',
-    systemPrompt: 'Complete the assigned task as a general-purpose child agent. Use available workspace tools when needed, edit files when the task requires it, and return a concise result to the parent agent.',
+    description: 'Compatibility alias for the general writable agent.',
+    systemPrompt: 'Complete the assigned task as a general writable agent. You may read and modify workspace files. Make only task-scoped changes and return a concise result to the parent agent.',
     toolPolicy: { allow: [...READONLY_TOOLS, ...FILE_WRITE_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
     defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
     budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
@@ -50,8 +69,8 @@ export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
   },
   {
     name: 'assistant',
-    description: 'Compatibility alias for the general-purpose child agent.',
-    systemPrompt: 'Complete the assigned task as a child agent. Use available read-only tools when needed and return a concise result to the parent agent.',
+    description: 'Compatibility alias for the general read-only agent.',
+    systemPrompt: 'Complete the assigned task as a general read-only agent. Inspect workspace files when needed, never modify files, and return a concise result to the parent agent.',
     toolPolicy: { allow: [...READONLY_TOOLS], allowExternalMcp: false, allowSkills: false, allowOrchestration: false },
     defaultContextMode: 'fork', allowedContextModes: ['fresh', 'fork'],
     budget: { maxModelTurns: 64, maxModelAttempts: 80, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024, modelRequestTimeoutMs: 300_000, maxRunDurationMs: 900_000, maxTotalTokens: 1_500_000 },
@@ -268,7 +287,7 @@ export function createAgentDefinitionRegistry(options: { userRoot?: string; work
     try {
       const parsed = JSON.parse(await readFile(path, 'utf8')) as Partial<AgentDefinitionState>;
       if (parsed.version !== 1 || !Array.isArray(parsed.disabled) || parsed.disabled.some((name) => typeof name !== 'string')) throw new Error('Invalid Agent state file');
-      return new Set(parsed.disabled.filter((name) => name !== 'general-purpose' && name !== 'assistant'));
+      return new Set(parsed.disabled.filter((name) => !GENERIC_TEMPLATE_NAMES.has(name)));
     } catch (error) {
       if ((error as { code?: string }).code !== 'ENOENT') nextDiagnostics.push({ path, severity: 'error', message: error instanceof Error ? error.message : String(error) });
       return new Set();
@@ -325,7 +344,7 @@ export function createAgentDefinitionRegistry(options: { userRoot?: string; work
 
   function managedList(): ManagedAgentDefinition[] {
     return [...definitions.values()]
-      .filter((definition) => definition.name !== 'assistant')
+      .filter((definition) => !GENERIC_TEMPLATE_NAMES.has(definition.name))
       .map((definition) => {
         const source = sources.get(definition.name) ?? 'user';
         const builtin = source === 'builtin';
@@ -338,7 +357,7 @@ export function createAgentDefinitionRegistry(options: { userRoot?: string; work
           source,
           enabled: !disabled.has(definition.name),
           editable: !builtin,
-          toggleable: definition.name !== 'general-purpose' && definition.name !== 'assistant',
+          toggleable: true,
           deletable: !builtin,
         };
       });
@@ -393,8 +412,8 @@ export function createAgentDefinitionRegistry(options: { userRoot?: string; work
     },
     setEnabled(name: string, enabled: boolean) {
       return mutate(async () => {
-        if (!definitions.has(name) || name === 'assistant') throw new AgentDefinitionMutationError('not_found', '子智能体不存在');
-        if (name === 'general-purpose') throw new AgentDefinitionMutationError('forbidden', 'general-purpose 始终启用');
+        if (!definitions.has(name)) throw new AgentDefinitionMutationError('not_found', '子智能体不存在');
+        if (GENERIC_TEMPLATE_NAMES.has(name)) throw new AgentDefinitionMutationError('forbidden', '通用 Agent 模板始终启用');
         if (enabled) disabled.delete(name); else disabled.add(name);
         await persistState();
         return managedList().find((item) => item.name === name)!;

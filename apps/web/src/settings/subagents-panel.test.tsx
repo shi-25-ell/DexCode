@@ -5,7 +5,6 @@ import { SubagentsPanel } from './subagents-panel';
 import type { SubagentDefinition, SubagentDefinitionsResponse } from './types';
 
 const builtins: SubagentDefinition[] = [
-  { name: 'general-purpose', description: 'General work', instructions: 'Do the work.', filePermission: 'write_files', contextMode: 'fork', source: 'builtin', enabled: true, editable: false, toggleable: false, deletable: false },
   { name: 'researcher', description: 'Research', instructions: 'Research.', filePermission: 'read_only', contextMode: 'fresh', source: 'builtin', enabled: true, editable: false, toggleable: true, deletable: false },
   { name: 'reviewer', description: 'Review', instructions: 'Review.', filePermission: 'read_only', contextMode: 'fork', source: 'builtin', enabled: true, editable: false, toggleable: true, deletable: false },
 ];
@@ -26,14 +25,15 @@ function renderPanel(response: SubagentDefinitionsResponse) {
 describe('Subagent settings', () => {
   it('protects built-ins and supports create and toggle operations', async () => {
     const custom: SubagentDefinition = { name: 'test-writer', description: 'Write tests', instructions: 'Add focused tests.', filePermission: 'write_files', contextMode: 'fork', source: 'user', enabled: true, editable: true, toggleable: true, deletable: true };
-    const fetchMock = renderPanel({ agents: [...builtins, custom], limit: 10, customLimit: 7, diagnostics: [] });
+    const fetchMock = renderPanel({ agents: [...builtins, custom], limit: 10, customLimit: 10, diagnostics: [] });
 
-    expect(await screen.findByText('general-purpose')).toBeInTheDocument();
+    expect(await screen.findByText('1/10')).toBeInTheDocument();
+    expect(screen.getByText('你可以在这里预定义一些子智能体，也可以在对话时让模型按需生成。')).toBeInTheDocument();
+    expect(screen.queryByText('general-purpose')).not.toBeInTheDocument();
     expect(document.querySelector('.subagent-grid')).toBeInTheDocument();
-    expect(document.querySelectorAll('.subagent-card')).toHaveLength(4);
-    expect(document.querySelectorAll('.subagent-avatar')).toHaveLength(4);
+    expect(document.querySelectorAll('.subagent-card')).toHaveLength(3);
+    expect(document.querySelectorAll('.subagent-avatar')).toHaveLength(3);
     expect(screen.queryByText('assistant')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'general-purpose：已启用' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'researcher：已启用' })).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /编辑/ })).toHaveLength(1);
     expect(screen.getAllByRole('button', { name: /删除/ })).toHaveLength(1);
@@ -55,8 +55,8 @@ describe('Subagent settings', () => {
   });
 
   it('disables creation when the total limit is reached', async () => {
-    const customs = Array.from({ length: 7 }, (_, index): SubagentDefinition => ({ name: `custom-${index}`, description: 'Custom', instructions: 'Work.', filePermission: 'read_only', contextMode: 'fork', source: 'user', enabled: true, editable: true, toggleable: true, deletable: true }));
-    renderPanel({ agents: [...builtins, ...customs], limit: 10, customLimit: 7, diagnostics: [] });
+    const customs = Array.from({ length: 10 }, (_, index): SubagentDefinition => ({ name: `custom-${index}`, description: 'Custom', instructions: 'Work.', filePermission: 'read_only', contextMode: 'fork', source: 'user', enabled: true, editable: true, toggleable: true, deletable: true }));
+    renderPanel({ agents: [...builtins, ...customs], limit: 10, customLimit: 10, diagnostics: [] });
     expect(await screen.findByText('10/10')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '新建子智能体' })).toBeDisabled();
   });

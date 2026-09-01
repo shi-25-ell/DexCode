@@ -80,13 +80,13 @@ export function SubagentsPanel() {
     save.mutate({ originalName: editingName, input: { ...form, name: form.name.trim(), description: form.description.trim(), instructions: form.instructions.trim() } });
   };
 
-  const count = query.data?.agents.length ?? 0;
-  const limit = query.data?.limit ?? 10;
+  const count = query.data?.agents.filter((agent) => agent.source !== 'builtin').length ?? 0;
+  const limit = query.data?.customLimit ?? query.data?.limit ?? 10;
   const atCapacity = count >= limit;
   return <>
     <PanelHeader
       title="子智能体"
-      description="管理所有项目共用的子智能体定义。内置定义不可编辑或删除；自定义定义不会获得命令、MCP、Skills、Memory 或隔离配置。"
+      description="你可以在这里预定义一些子智能体，也可以在对话时让模型按需生成。"
       onRefresh={() => { void query.refetch(); }}
       action={<><span className="settings-count">{count}/{limit}</span><button className="primary-button" onClick={openNew} disabled={atCapacity} title={atCapacity ? '已达到子智能体数量上限' : undefined}><Plus size={15} />新建子智能体</button></>}
     />
@@ -118,7 +118,7 @@ export function SubagentsPanel() {
           <label className="settings-field"><span>文件权限</span><select value={form.filePermission} onChange={(event) => setForm({ ...form, filePermission: event.target.value as SubagentFilePermission })}><option value="read_only">只读</option><option value="write_files">可修改文件</option></select></label>
           <label className="settings-field"><span>上下文</span><select value={form.contextMode} onChange={(event) => setForm({ ...form, contextMode: event.target.value as SubagentContextMode })}><option value="fork">继承主对话</option><option value="fresh">独立上下文</option></select></label>
         </div>
-        <p className="settings-form-note">自定义子智能体最多 7 个；保存后默认启用。</p>
+        <p className="settings-form-note">自定义子智能体最多 10 个；保存后默认启用。</p>
         {formError ? <p className="dialog-error">{formError}</p> : null}
         <footer className="dialog-actions"><button type="button" className="secondary-button" onClick={() => setForm(null)}>取消</button><button type="submit" className="primary-button" disabled={save.isPending}>{save.isPending ? '保存中…' : '保存子智能体'}</button></footer>
       </form>

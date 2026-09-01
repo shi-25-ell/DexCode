@@ -239,8 +239,8 @@ test('orchestration tools receive immutable caller context and stay out of ordin
   const requestedTools: unknown[][] = [];
   const orchestration = {
     definitions: () => [
-      { name: 'general-purpose', description: 'Default general-purpose child agent.' },
-      { name: 'researcher', description: 'Read-only investigation agent.' },
+      { name: 'general-writer', description: 'General writable agent.', filePermission: 'write_files' as const },
+      { name: 'general-reader', description: 'General read-only agent.', filePermission: 'read_only' as const },
     ],
     spawn: async (input: unknown, caller: unknown) => { calls.push({ input, caller }); return { agent_id: 'agent-a', status: 'running' }; },
     wait: async (input: unknown, caller: unknown) => { calls.push({ input, caller }); return { completed: [] }; },
@@ -267,9 +267,11 @@ test('orchestration tools receive immutable caller context and stay out of ordin
   assert.equal(events.some((event) => event.type === 'tool' || event.type === 'tool_view' || event.type === 'tool_status'), false);
   const spawn = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'spawn_agent') as { function: { description?: string; parameters: { required: string[]; properties: { agent: { enum?: string[]; default?: string; description?: string }; context_mode: { description?: string } } } } };
   assert.deepEqual(spawn.function.parameters.required, ['task']);
-  assert.deepEqual(spawn.function.parameters.properties.agent.enum, ['general-purpose', 'researcher']);
-  assert.equal(spawn.function.parameters.properties.agent.default, 'general-purpose');
-  assert.match(spawn.function.parameters.properties.agent.description ?? '', /Omit to use general-purpose/);
+  assert.deepEqual(spawn.function.parameters.properties.agent.enum, ['general-writer', 'general-reader']);
+  assert.equal(spawn.function.parameters.properties.agent.default, 'general-reader');
+  assert.match(spawn.function.parameters.properties.agent.description ?? '', /general-writer \[write_files\].*general-reader \[read_only\]/);
+  assert.match(spawn.function.parameters.properties.agent.description ?? '', /Omit to use general-reader/);
+  assert.match(spawn.function.description ?? '', /At most one shared-workspace write_files agent.*read_only agents may run in parallel/i);
   assert.match(spawn.function.description ?? '', /fresh.*self-contained.*fork.*bounded snapshot.*continue independently/i);
   assert.match(spawn.function.description ?? '', /block=true.*foreground.*background delivery/i);
   assert.match(spawn.function.parameters.properties.context_mode.description ?? '', /fresh.*without the main conversation.*fork.*current context.*definition's default/i);

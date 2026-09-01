@@ -176,10 +176,10 @@ export type AgentCallerContext = {
   signal?: AbortSignal;
 };
 
-export const DEFAULT_AGENT_DEFINITION_NAME = 'general-purpose';
+export const DEFAULT_AGENT_DEFINITION_NAME = 'general-reader';
 
 export interface AgentOrchestrationPort {
-  definitions?(): Array<{ name: string; description: string }>;
+  definitions?(): Array<{ name: string; description: string; filePermission: 'read_only' | 'write_files' }>;
   spawn(input: { task: string; agent?: string; contextMode?: AgentContextMode; name?: string; isolation?: AgentIsolation }, caller: AgentCallerContext): Promise<unknown>;
   wait(input: { agentIds: string[]; mode?: 'any' | 'all'; block?: boolean; timeoutMs?: number }, caller: AgentCallerContext): Promise<unknown>;
   followup(input: { agentId: string; task: string }, caller: AgentCallerContext): Promise<unknown>;
