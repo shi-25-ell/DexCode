@@ -28,6 +28,12 @@ test('registry is the exact authoritative set for first-party coding tools', () 
   assert.deepEqual(agentCodingToolDefinitions().map((tool) => tool.function.parameters), codingToolSpecs().map((tool) => tool.inputSchema));
 });
 
+test('every agent tool exposes an object schema at the top level', () => {
+  for (const tool of agentCodingToolDefinitions()) {
+    assert.equal((tool.function.parameters as { type?: unknown }).type, 'object', tool.function.name);
+  }
+});
+
 test('registry rejects removed names and validates both strict patch shapes', () => {
   for (const removed of ['search_in_workspace', 'read_lints', 'ask_user', 'diff_file', 'list_versions', 'create_snapshot', 'restore_snapshot']) {
     assert.match(String(validateCodingToolInput(removed, {})), /unknown or disabled tool/);

@@ -38,6 +38,7 @@ const objectSchema = (
 const pathProperty = { type: 'string', minLength: 1, description: '相对工作区根目录的路径' };
 
 const PATCH_INPUT_SCHEMA = {
+  type: 'object',
   oneOf: [
     objectSchema({
       path: pathProperty,
