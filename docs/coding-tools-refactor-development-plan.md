@@ -949,3 +949,7 @@ npm run build:web
 > 这次工具改造包含新增、替换、语义重构和取消注册，不是只改后端实现。开始编码前，先从当前源码重新生成完整工具与消费者清单，建立目标 10 个工具以及七个旧名字的端到端适配矩阵。对每个工具逐层核对模型 schema、ToolPolicy、Executor、Tool Gateway、approval effect、日志、RunEvent、Session ledger、SSE、terminal snapshot、conversation-view projection、前端类型、工具展示、批次归类、批准卡、设置页测试 preset、实时状态和历史回放。任何按工具名硬编码的集合、switch、union、label、icon、summary、target 提取、输出截断或 fallback 都必须根据新语义重新判断，不能机械改名。新增工具必须在前后端完整可见且展示正确；下线工具必须不能发起新调用，但历史记录仍要安全可读；改变参数或返回结构的工具必须同步修改批准 fingerprint、展示摘要、批次统计和 replay fixture。只有后端执行、实时展示、刷新后回放、批次边界、批准流程、设置页和文档全部一致，并通过对应的协议、conversation-view、Web 与全仓测试，才算完成。
 
 实施者不得假定本文列出的前端文件名和分类集合在编码时仍完全相同。由于仓库可能存在并行修改，每次编辑前都要重新检查分支、HEAD、工作区 diff 和实际消费者；保留无关用户改动，不覆盖正在进行的前端工作。
+
+## 21. 上下文内部工具展示约束
+
+`read_artifact` 属于上下文管理内部工具。它可以继续参与模型上下文协议、结果回填和持久化，但不得创建前端 Tool Card，也不得进入实时或历史执行流程批次。实时事件投影与刷新后的 Session ledger 投影都必须过滤该工具，并以契约测试覆盖这两个入口。

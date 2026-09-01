@@ -3,6 +3,7 @@ import { createTwoFilesPatch, structuredPatch } from 'diff';
 import type { ManagedMemoryType } from '../managed-memory/contracts.ts';
 import { serializeTopic } from '../managed-memory/format.ts';
 import { safeDisplayOutput } from './output-policy.ts';
+import { codingToolSpec } from '../tool-gateway/tool-registry.ts';
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -50,15 +51,19 @@ function outcomeStatus(result: unknown): ToolViewStatus {
 
 function descriptor(tool: string, args: Record<string, unknown>) {
   const targetPath = typeof args.path === 'string' ? args.path.replaceAll('\\', '/') : undefined;
-  if (tool === 'read_file') return { category: 'read' as const, name: '读取文件', target: targetPath };
-  if (tool === 'diff_file') return { category: 'read' as const, name: '比较文件', target: targetPath };
-  if (tool === 'write_file' || tool === 'patch_file') return { category: 'file' as const, name: '修改文件', target: targetPath };
-  if (tool === 'run_command') return { category: 'command' as const, name: '执行命令', target: String(args.command ?? '') };
-  if (tool === 'read_command_output') return { category: 'command' as const, name: '读取命令输出', target: String(args.task_id ?? '') };
-  if (tool === 'stop_command') return { category: 'command' as const, name: '停止命令', target: String(args.task_id ?? '') };
-  if (tool === 'search_in_workspace') return { category: 'search' as const, name: '搜索代码', target: [args.query, args.path].filter(Boolean).join(' · ') };
-  if (tool === 'list_workspace') return { category: 'read' as const, name: '浏览目录', target: targetPath ?? '当前项目' };
-  if (tool === 'read_lints') return { category: 'read' as const, name: '检查问题', target: targetPath ?? '当前项目' };
+  const coding = codingToolSpec(tool);
+  if (coding) {
+    const target = tool === 'run_command'
+      ? String(args.command ?? '')
+      : tool === 'read_command_output' || tool === 'stop_command'
+        ? String(args.task_id ?? '')
+        : tool === 'find' || tool === 'grep'
+          ? [args.pattern, args.path, tool === 'grep' ? args.glob : undefined].filter(Boolean).join(' · ')
+          : tool === 'list_workspace'
+            ? '当前项目'
+            : targetPath;
+    return { category: coding.presentation.category, name: coding.presentation.label, target };
+  }
   if (tool === 'list_skills') return { category: 'skill' as const, name: '浏览 Skill', target: '可用能力' };
   if (tool.startsWith('memory_')) {
     const names: Record<string, string> = { memory_list: '浏览记忆', memory_read: '读取记忆', memory_search: '搜索记忆', memory_upsert: '更新记忆', memory_remove: '删除记忆' };
@@ -80,9 +85,6 @@ function descriptor(tool: string, args: Record<string, unknown>) {
     const parts = tool.split('__').filter(Boolean);
     return { category: 'mcp' as const, name: '调用 MCP', target: parts.length > 1 ? parts.slice(1).join(' · ') : '外部工具' };
   }
-  if (tool === 'create_snapshot' || tool === 'restore_snapshot' || tool === 'list_versions') {
-    return { category: 'snapshot' as const, name: tool === 'restore_snapshot' ? '恢复快照' : tool === 'create_snapshot' ? '创建快照' : '查看快照', target: String(args.name ?? args.snapshotId ?? '当前项目') };
-  }
   return { category: 'other' as const, name: '调用工具', target: tool };
 }
 
@@ -95,6 +97,9 @@ function successSummary(tool: string, result: unknown, status: ToolViewStatus): 
     const content = typeof object.content === 'string' ? object.content : typeof result === 'string' ? result : '';
     return content ? `已读取 ${content.replace(/\r\n/g, '\n').split('\n').length.toLocaleString('zh-CN')} 行` : '读取完成';
   }
+  if (tool === 'find' || tool === 'ls') return `找到 ${Number(objectValue(result).total ?? 0).toLocaleString('zh-CN')} 项`;
+  if (tool === 'list_workspace') return `已列出 ${Number(objectValue(result).node_count ?? 0).toLocaleString('zh-CN')} 个节点`;
+  if (tool === 'grep') return `找到 ${Number(objectValue(result).match_count ?? 0).toLocaleString('zh-CN')} 个匹配`;
   if (tool === 'write_file' || tool === 'patch_file') return '文件已更新';
   if (tool === 'run_command') return String(objectValue(result).status ?? '') === 'background' ? '命令已转入后台' : '命令执行完成';
   if (tool === 'read_command_output') return String(objectValue(result).status ?? '') === 'background' ? '命令仍在后台运行' : '后台命令已结束';

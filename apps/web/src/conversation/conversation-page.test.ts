@@ -105,7 +105,7 @@ describe('conversation presentation', () => {
       { id: 't1', kind: 'tool', tool: { callRef: 'call-1', toolName: 'read_file', category: 'read', name: '读取文件', status: 'succeeded', summary: '完成' } },
       { id: 'u2', kind: 'user', content: '第一次调整方向', delivery: 'steer' },
       { id: 'a2', kind: 'assistant', content: '第一次 Steer 后执行', runId: 'run-1' },
-      { id: 't2', kind: 'tool', tool: { callRef: 'call-2', toolName: 'search_in_workspace', category: 'search', name: '搜索代码', status: 'succeeded', summary: '完成' } },
+      { id: 't2', kind: 'tool', tool: { callRef: 'call-2', toolName: 'grep', category: 'search', name: '搜索代码', status: 'succeeded', summary: '完成' } },
       { id: 'u3', kind: 'user', content: '第二次调整方向', delivery: 'steer' },
       { id: 'a3', kind: 'assistant', content: '第二次 Steer 后执行', runId: 'run-1' },
       { id: 't3', kind: 'tool', tool: { callRef: 'call-3', toolName: 'run_command', category: 'command', name: '执行命令', status: 'succeeded', summary: '完成' } },

@@ -169,7 +169,7 @@ export interface AgentRunResult {
 }
 
 export const INTERNAL_READONLY_TOOL_POLICY: Readonly<ToolPolicy> = {
-  allow: ['read_file', 'search_in_workspace', 'list_workspace'],
+  allow: ['read_file', 'find', 'ls', 'list_workspace', 'grep'],
   allowExternalMcp: false,
   allowSkills: false,
 };

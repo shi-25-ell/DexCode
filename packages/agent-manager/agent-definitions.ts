@@ -3,7 +3,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { assertValidAgentDefinition, type AgentContextMode, type AgentDefinition, type AgentIsolation } from './contracts.ts';
 
-const READONLY_TOOLS = ['read_file', 'search_in_workspace', 'list_workspace', 'read_lints', 'diff_file', 'list_versions'];
+const READONLY_TOOLS = ['read_file', 'find', 'ls', 'list_workspace', 'grep'];
 
 export const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
   {

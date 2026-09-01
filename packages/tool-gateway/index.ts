@@ -1,6 +1,6 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { TreeNode, WorkspaceFile } from '../workspace-manager/index.ts';
+import type { WorkspaceFile } from '../workspace-manager/index.ts';
 import type { ToolInfo } from '../shared/types.ts';
 import { createMcpServer, type McpJsonRpcRequest, type McpJsonRpcResponse, type McpServer } from '../mcp-server/index.ts';
 import { isTrustedReadonlyCommand, matchWhitelistEntry, normalizeCommand, validateCommand } from './command-safety.ts';
@@ -18,9 +18,13 @@ import {
   type CommandConfirmHook,
   type RunCommandResult,
 } from './run-command.ts';
-import { diffFileAgainstSnapshot } from './diff-file.ts';
-import { readLints } from './read-lints.ts';
 import { createToolCallLogStore } from './tool-call-log.ts';
+import { buildWorkspaceTree, findPaths, listDirectory } from './directory-walker.ts';
+import { grepWorkspace } from './grep.ts';
+import { agentCodingToolDefinitions, codingToolSpec, codingToolSpecs, type CodingToolName } from './tool-registry.ts';
+import type { PatchFileInput } from './structured-edit.ts';
+import { resolveShellCapabilities, type ShellResolverOptions } from './shell/shell-resolver.ts';
+import type { EnsureRgOptions } from './managed-tools/ensure-rg.ts';
 
 export type { CommandConfirmHook, CommandConfirmDecision, CommandConfirmRequest } from './run-command.ts';
 export type { WhitelistEntry, CommandRisk } from './command-safety.ts';
@@ -36,13 +40,9 @@ type WorkspaceService = {
   getRootDir: () => string;
   findFile: (path: string) => WorkspaceFile | null;
   updateFile: (path: string, content: string) => Promise<unknown>;
-  listTree: () => TreeNode[];
+  listTree: () => unknown[];
   listFiles: () => WorkspaceFile[];
-  searchInWorkspace: (query: string, path?: string) => unknown[];
-  patchFile: (path: string, patch: string) => Promise<unknown> | unknown;
-  listVersions: () => Promise<unknown[]>;
-  createSnapshot: (name?: string, description?: string) => Promise<unknown>;
-  restoreSnapshot: (snapshotId: string) => Promise<unknown>;
+  patchFile: (input: PatchFileInput) => Promise<unknown> | unknown;
   loadFromDisk: () => Promise<unknown>;
 };
 
@@ -88,187 +88,15 @@ async function safeExistingPath(root: string, requested: string): Promise<string
   }
 }
 
-function buildToolDefinitions(
-  workspaceService: WorkspaceService,
-  runCommandSafe: (command: string, ctx?: RunCommandContext) => Promise<RunCommandResult>,
-  readCommandOutput: (taskId: string, waitMs?: number) => Promise<RunCommandResult>,
-  stopCommand: (taskId: string) => Promise<RunCommandResult>,
-  readLintsFn: (path?: string) => Promise<unknown>,
-  diffFileFn: (path: string, snapshotId?: string) => Promise<unknown>,
-) {
-  return [
-    {
-      name: 'read_file',
-      description: '读取工作区中的文件内容',
-      inputSchema: buildInputSchema({ path: { type: 'string', minLength: 1 } }, ['path']),
-      handler: async ({ path }: Record<string, unknown>) => {
-        const rootDir = workspaceService.getRootDir();
-        const absPath = await safeExistingPath(rootDir, String(path ?? ''));
-        if (!absPath) return null;
-        try {
-          const content = await readFile(absPath, 'utf8');
-          return { path, content };
-        } catch {
-          return null;
-        }
-      },
-    },
-    {
-      name: 'write_file',
-      description: '写入工作区中的文件内容',
-      inputSchema: buildInputSchema(
-        {
-          path: { type: 'string', minLength: 1 },
-          content: { type: 'string' },
-        },
-        ['path', 'content'],
-      ),
-      handler: ({ path, content }: Record<string, unknown>) => workspaceService.updateFile(String(path ?? ''), String(content ?? '')),
-    },
-    {
-      name: 'patch_file',
-      description:
-        '局部替换文件。支持 unified diff、before\\n---\\nafter、before => after、@@ line N 行号锚点。失败时先 read_file。',
-      inputSchema: buildInputSchema(
-        {
-          path: { type: 'string', minLength: 1 },
-          patch: { type: 'string', minLength: 1 },
-        },
-        ['path', 'patch'],
-      ),
-      handler: ({ path, patch }: Record<string, unknown>) => workspaceService.patchFile(String(path ?? ''), String(patch ?? '')),
-    },
-    {
-      name: 'search_in_workspace',
-      description: '在工作区中搜索文本或代码片段',
-      inputSchema: buildInputSchema(
-        {
-          query: { type: 'string', minLength: 1 },
-          path: { type: 'string' },
-          limit: { type: 'number', minimum: 1, maximum: 100 },
-        },
-        ['query'],
-      ),
-      handler: ({ query, path, limit }: Record<string, unknown>) => {
-        const hits = workspaceService.searchInWorkspace(String(query ?? ''), path ? String(path) : undefined);
-        const max = typeof limit === 'number' ? Math.max(1, Math.min(100, Math.floor(limit))) : hits.length;
-        return hits.slice(0, max);
-      },
-    },
-    {
-      name: 'run_command',
-      description:
-        '在工作区目录执行 shell 命令。非白名单命令会暂停并等待用户确认（类似 Cursor）。安装依赖、删除文件等高风险操作需用户批准。',
-      inputSchema: buildInputSchema(
-        {
-          command: { type: 'string', minLength: 1 },
-          timeout_ms: { type: 'number', minimum: 1000, maximum: 600000 },
-          run_in_background: { type: 'boolean' },
-        },
-        ['command'],
-      ),
-      handler: ({ command, timeout_ms, run_in_background }: Record<string, unknown>) =>
-        runCommandSafe(String(command ?? ''), {
-          ...(typeof timeout_ms === 'number' ? { timeoutMs: timeout_ms } : {}),
-          ...(typeof run_in_background === 'boolean' ? { runInBackground: run_in_background } : {}),
-        }),
-    },
-    {
-      name: 'read_command_output',
-      description: '读取后台命令的输出和当前状态，可等待最多 60 秒',
-      inputSchema: buildInputSchema(
-        { task_id: { type: 'string', minLength: 1 }, wait_ms: { type: 'number', minimum: 0, maximum: 60000 } },
-        ['task_id'],
-      ),
-      handler: ({ task_id, wait_ms }: Record<string, unknown>) =>
-        readCommandOutput(String(task_id ?? ''), typeof wait_ms === 'number' ? wait_ms : undefined),
-    },
-    {
-      name: 'stop_command',
-      description: '停止仍在运行的后台命令',
-      inputSchema: buildInputSchema({ task_id: { type: 'string', minLength: 1 } }, ['task_id']),
-      handler: ({ task_id }: Record<string, unknown>) => stopCommand(String(task_id ?? '')),
-    },
-    {
-      name: 'read_lints',
-      description:
-        '读取工作区或指定文件的静态检查问题（TypeScript tsc、启发式规则）。只读，无需命令确认。复杂 lint 脚本请用 run_command。',
-      inputSchema: buildInputSchema(
-        {
-          path: { type: 'string', description: '相对工作区的文件路径，省略则检查整个项目' },
-        },
-        [],
-      ),
-      handler: ({ path }: Record<string, unknown>) =>
-        readLintsFn(path ? String(path) : undefined),
-    },
-    {
-      name: 'diff_file',
-      description:
-        '对比指定文件与版本快照中的内容，返回增删行。默认与最新快照对比；可传 snapshotId。',
-      inputSchema: buildInputSchema(
-        {
-          path: { type: 'string', minLength: 1 },
-          snapshotId: { type: 'string' },
-        },
-        ['path'],
-      ),
-      handler: ({ path, snapshotId }: Record<string, unknown>) =>
-        diffFileFn(String(path ?? ''), snapshotId ? String(snapshotId) : undefined),
-    },
-    {
-      name: 'list_workspace',
-      description: '列出当前工作区文件树',
-      inputSchema: buildInputSchema(
-        {
-          depth: { type: 'number', minimum: 1, maximum: 20 },
-        },
-        [],
-      ),
-      handler: ({ depth }: Record<string, unknown>) => {
-        const tree = workspaceService.listTree();
-        if (typeof depth !== 'number') return tree;
-        const maxDepth = Math.max(1, Math.min(20, Math.floor(depth)));
-        const trim = (nodes: TreeNode[], currentDepth = 1): TreeNode[] =>
-          nodes.map((node) =>
-            node.type === 'folder'
-              ? { ...node, children: currentDepth >= maxDepth ? [] : trim(node.children ?? [], currentDepth + 1) }
-              : node,
-          );
-        return trim(tree);
-      },
-    },
-    {
-      name: 'list_versions',
-      description: '列出当前工作区的版本快照',
-      inputSchema: buildInputSchema({}, []),
-      handler: () => workspaceService.listVersions(),
-    },
-    {
-      name: 'create_snapshot',
-      description: '为当前工作区创建一个可回滚的版本快照',
-      inputSchema: buildInputSchema(
-        {
-          name: { type: 'string' },
-          description: { type: 'string' },
-        },
-        [],
-      ),
-      handler: ({ name, description }: Record<string, unknown>) =>
-        workspaceService.createSnapshot(String(name ?? ''), String(description ?? '')),
-    },
-    {
-      name: 'restore_snapshot',
-      description: '从指定版本快照恢复当前工作区',
-      inputSchema: buildInputSchema(
-        {
-          snapshotId: { type: 'string', minLength: 1 },
-        },
-        ['snapshotId'],
-      ),
-      handler: ({ snapshotId }: Record<string, unknown>) => workspaceService.restoreSnapshot(String(snapshotId ?? '')),
-    },
-  ];
+type LocalToolHandlers = Record<CodingToolName, (args: Record<string, unknown>) => unknown | Promise<unknown>>;
+
+function buildToolDefinitions(handlers: LocalToolHandlers, shellDescription: string) {
+  return codingToolSpecs({ shellDescription }).map((spec) => ({
+    name: spec.name,
+    description: spec.description,
+    inputSchema: spec.inputSchema,
+    handler: handlers[spec.name],
+  }));
 }
 
 function buildResourceDefinitions(workspaceService: WorkspaceService) {
@@ -301,7 +129,7 @@ function buildPromptDefinitions() {
   return [
     {
       name: 'patch_file_prompt',
-      description: '生成局部补丁的提示词模板',
+      description: '生成 targeted 结构化编辑输入',
       inputSchema: buildInputSchema(
         {
           filePath: { type: 'string', minLength: 1 },
@@ -314,7 +142,7 @@ function buildPromptDefinitions() {
         messages: [
           {
             role: 'system',
-            content: '你是代码补丁助手，只输出可直接用于 patch_file 的内容。',
+            content: '只输出 patch_file targeted 模式的 JSON：path、mode="targeted"、edits[{old_text,new_text}]。old_text 必须精确命中一次。',
           },
           {
             role: 'user',
@@ -328,10 +156,21 @@ function buildPromptDefinitions() {
 
 export function createCodingToolHost(
   workspaceService: WorkspaceService,
-  options: { approvalModeStore?: Pick<ApprovalModeStore, 'getMode'> } = {},
+  options: {
+    approvalModeStore?: Pick<ApprovalModeStore, 'getMode'>;
+    shell?: ShellResolverOptions;
+    rg?: Omit<EnsureRgOptions, 'managedDir'> & { managedDir?: string };
+  } = {},
 ) {
   const whitelistStore = createCommandWhitelistStore(workspaceService.projectDir);
-  const commandRunner = createCommandRunner();
+  const shellCapabilities = resolveShellCapabilities(options.shell);
+  const runtimeToolSpecs = new Map(codingToolSpecs({ shellDescription: shellCapabilities.selected.description }).map((spec) => [spec.name, spec] as const));
+  const commandRunner = createCommandRunner({ shell: shellCapabilities.selected });
+  const rgOptions: EnsureRgOptions = {
+    ...options.rg,
+    managedDir: options.rg?.managedDir ?? join(workspaceService.projectDir, 'managed-tools', 'ripgrep'),
+    offline: options.rg?.offline ?? process.env.DEXCODE_OFFLINE === '1',
+  };
   const cwd = () => workspaceService.getRootDir();
   const approvalMode = options.approvalModeStore ?? { getMode: () => 'allowlist' as const };
   const approvalPolicy = createApprovalPolicy();
@@ -402,30 +241,7 @@ export function createCodingToolHost(
     };
   }
 
-  const readLintsFn = (path?: string) =>
-    readLints({ workspaceRoot: cwd(), path });
-
-  const diffFileFn = (path: string, snapshotId?: string) =>
-    diffFileAgainstSnapshot({
-      path,
-      workspaceRoot: cwd(),
-      projectDir: workspaceService.projectDir,
-      snapshotId,
-      listVersions: async () => {
-        const versions = await workspaceService.listVersions();
-        return versions.map((v) => ({
-          id: String((v as { id: string }).id),
-          name: String((v as { name?: string }).name ?? (v as { id: string }).id),
-          snapshotPath: String((v as { snapshotPath: string }).snapshotPath),
-        }));
-      },
-    });
-
-  const mcpServer: McpServer = createMcpServer({
-    tools: buildToolDefinitions(workspaceService, runCommandSafe, commandRunner.read, commandRunner.stop, readLintsFn, diffFileFn),
-    resources: buildResourceDefinitions(workspaceService),
-    prompts: buildPromptDefinitions(),
-  });
+  let mcpServer!: McpServer;
 
   type ToolRecord = {
     name: string;
@@ -518,8 +334,7 @@ export function createCodingToolHost(
     return mcpServer.callTool(name, args);
   }
 
-  const host = {
-    readFile: wrapWithStats('read_file', '读取工作区中的文件内容', async (path: string) => {
+  const readFileTool = wrapWithStats('read_file', runtimeToolSpecs.get('read_file')!.description, async (path: string) => {
       const rootDir = workspaceService.getRootDir();
       const absPath = await safeExistingPath(rootDir, String(path));
       if (!absPath) return null;
@@ -529,39 +344,70 @@ export function createCodingToolHost(
       } catch {
         return null;
       }
+    });
+  const writeFileTool = wrapWithStats('write_file', runtimeToolSpecs.get('write_file')!.description,
+    (path: string, content: string) => workspaceService.updateFile(path, content));
+  const findTool = wrapWithStats('find', runtimeToolSpecs.get('find')!.description,
+    (input: { pattern: string; path?: string; limit?: number }, signal?: AbortSignal) => findPaths(cwd(), input, signal));
+  const lsTool = wrapWithStats('ls', runtimeToolSpecs.get('ls')!.description,
+    (input: { path?: string; limit?: number }) => listDirectory(cwd(), input));
+  const listWorkspaceTool = wrapWithStats('list_workspace', runtimeToolSpecs.get('list_workspace')!.description,
+    (input: { depth?: number } = {}, signal?: AbortSignal) => buildWorkspaceTree(cwd(), input, signal));
+  const grepTool = wrapWithStats('grep', runtimeToolSpecs.get('grep')!.description,
+    (input: Parameters<typeof grepWorkspace>[1], signal?: AbortSignal) => grepWorkspace(cwd(), input, rgOptions, signal));
+  const patchFileTool = wrapWithStats('patch_file', runtimeToolSpecs.get('patch_file')!.description,
+    (input: PatchFileInput) => workspaceService.patchFile(input));
+  const runCommandTool = wrapWithStats('run_command', runtimeToolSpecs.get('run_command')!.description,
+    (command: string, ctx?: RunCommandContext) => runCommandSafe(command, ctx));
+  const readCommandOutputTool = wrapWithStats('read_command_output', runtimeToolSpecs.get('read_command_output')!.description,
+    (taskId: string, waitMs?: number) => commandRunner.read(taskId, waitMs));
+  const stopCommandTool = wrapWithStats('stop_command', runtimeToolSpecs.get('stop_command')!.description,
+    (taskId: string) => commandRunner.stop(taskId));
+
+  const localHandlers: LocalToolHandlers = {
+    find: (args) => findTool({
+      pattern: String(args.pattern ?? ''),
+      ...(typeof args.path === 'string' ? { path: args.path } : {}),
+      ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
     }),
-    writeFile: wrapWithStats('write_file', '写入工作区中的文件内容', (path: string, content: string) => {
-      return workspaceService.updateFile(path, content);
+    ls: (args) => lsTool({
+      ...(typeof args.path === 'string' ? { path: args.path } : {}),
+      ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
     }),
-    listWorkspace: wrapWithStats('list_workspace', '列出当前工作区文件树', () => {
-      return workspaceService.listFiles();
+    list_workspace: (args) => listWorkspaceTool(typeof args.depth === 'number' ? { depth: args.depth } : {}),
+    read_file: (args) => readFileTool(String(args.path ?? '')),
+    grep: (args) => grepTool(args as Parameters<typeof grepWorkspace>[1]),
+    run_command: (args) => runCommandTool(String(args.command ?? ''), {
+      approvalGranted: true,
+      ...(typeof args.timeout_ms === 'number' ? { timeoutMs: args.timeout_ms } : {}),
+      ...(typeof args.run_in_background === 'boolean' ? { runInBackground: args.run_in_background } : {}),
     }),
-    searchInWorkspace: wrapWithStats('search_in_workspace', '在工作区中搜索文本或代码片段', (query: string, path?: string) => {
-      return workspaceService.searchInWorkspace(query, path);
-    }),
-    patchFile: wrapWithStats('patch_file', '根据局部补丁修改工作区中的文件', (path: string, patch: string) => {
-      return workspaceService.patchFile(path, patch);
-    }),
-    listVersions: wrapWithStats('list_versions', '列出当前工作区的版本快照', () => {
-      return workspaceService.listVersions();
-    }),
-    createSnapshot: wrapWithStats('create_snapshot', '为当前工作区创建一个可回滚的版本快照', (name?: string, description?: string) => {
-      return workspaceService.createSnapshot(name, description);
-    }),
-    restoreSnapshot: wrapWithStats('restore_snapshot', '从指定版本快照恢复当前工作区', (snapshotId: string) => {
-      return workspaceService.restoreSnapshot(snapshotId);
-    }),
-    runCommand: wrapWithStats(
-      'run_command',
-      '在工作区目录中执行命令（非白名单命令需用户确认）',
-      (command: string, ctx?: RunCommandContext) => runCommandSafe(command, ctx),
-    ),
-    readCommandOutput: wrapWithStats('read_command_output', '读取后台命令输出', (taskId: string, waitMs?: number) => commandRunner.read(taskId, waitMs)),
-    stopCommand: wrapWithStats('stop_command', '停止后台命令', (taskId: string) => commandRunner.stop(taskId)),
-    readLints: wrapWithStats('read_lints', '读取静态检查与 lint 问题', (path?: string) => readLintsFn(path)),
-    diffFile: wrapWithStats('diff_file', '对比文件与版本快照差异', (path: string, snapshotId?: string) =>
-      diffFileFn(path, snapshotId),
-    ),
+    patch_file: (args) => patchFileTool(args as PatchFileInput),
+    write_file: (args) => writeFileTool(String(args.path ?? ''), String(args.content ?? '')),
+    read_command_output: (args) => readCommandOutputTool(String(args.task_id ?? ''), typeof args.wait_ms === 'number' ? args.wait_ms : undefined),
+    stop_command: (args) => stopCommandTool(String(args.task_id ?? '')),
+  };
+
+  mcpServer = createMcpServer({
+    tools: buildToolDefinitions(localHandlers, shellCapabilities.selected.description),
+    resources: buildResourceDefinitions(workspaceService),
+    prompts: buildPromptDefinitions(),
+  });
+
+  const host = {
+    readFile: readFileTool,
+    writeFile: writeFileTool,
+    find: findTool,
+    ls: lsTool,
+    listWorkspace: listWorkspaceTool,
+    listWorkspaceFiles: () => workspaceService.listFiles(),
+    grep: grepTool,
+    patchFile: patchFileTool,
+    runCommand: runCommandTool,
+    readCommandOutput: readCommandOutputTool,
+    stopCommand: stopCommandTool,
+    getToolDefinitions: () => agentCodingToolDefinitions({ shellDescription: shellCapabilities.selected.description }),
+    shellCapabilities,
     commandWhitelist: whitelistStore,
     isToolEnabled: registryIsToolEnabled,
     registry: {
@@ -574,30 +420,13 @@ export function createCodingToolHost(
     mcp: mcpServer,
   };
 
-  const EFFECTS: Record<string, ApprovalEffect> = {
-    read_file: 'read',
-    search_in_workspace: 'read',
-    read_lints: 'read',
-    diff_file: 'read',
-    list_workspace: 'read',
-    list_versions: 'read',
-    write_file: 'write',
-    patch_file: 'write',
-    create_snapshot: 'write',
-    restore_snapshot: 'write',
-    run_command: 'execute',
-    read_command_output: 'read',
-    stop_command: 'execute',
-    ask_user: 'interactive',
-  };
-
   async function approvalSubject(
     toolName: string,
     input: Record<string, unknown>,
     origin: ApprovalOrigin,
   ): Promise<ApprovalSubject> {
     let normalizedInput: Record<string, unknown> = { ...input };
-    let effect = EFFECTS[toolName] ?? (toolName.startsWith('mcp__') ? 'external' : 'external');
+    let effect: ApprovalEffect = codingToolSpec(toolName)?.effect ?? 'external';
     let summary = `执行 ${toolName}`;
     let command: string | undefined;
     let matchedRule: string | undefined;
@@ -607,6 +436,7 @@ export function createCodingToolHost(
       command = normalizeCommand(String(input.command ?? ''));
       normalizedInput = {
         command,
+        shell: shellCapabilities.selected.kind,
         ...(typeof input.timeout_ms === 'number' ? { timeout_ms: input.timeout_ms } : {}),
         ...(typeof input.run_in_background === 'boolean' ? { run_in_background: input.run_in_background } : {}),
       };
@@ -623,10 +453,14 @@ export function createCodingToolHost(
     } else if (toolName === 'write_file' || toolName === 'patch_file') {
       const path = String(input.path ?? '').trim().replace(/\\/g, '/');
       normalizedInput = { ...input, path };
-      const payloadLength = String(toolName === 'write_file' ? input.content ?? '' : input.patch ?? '').length;
+      const payloadLength = toolName === 'write_file'
+        ? String(input.content ?? '').length
+        : input.mode === 'targeted' && Array.isArray(input.edits)
+          ? input.edits.length
+          : Number(input.expected_occurrences ?? 0);
       summary = toolName === 'write_file'
         ? `写入 ${path}（内容 ${payloadLength} 字符）`
-        : `修改 ${path}（补丁 ${payloadLength} 字符）`;
+        : `修改 ${path}（${input.mode === 'targeted' ? `${payloadLength} 处定点编辑` : `${payloadLength} 处全量替换`}）`;
       if (!path || !await safeMutationPath(cwd(), path)) hardDeniedReason = '目标路径超出工作区或经过不安全的链接';
     } else if (toolName.startsWith('mcp__')) {
       summary = `调用外部工具 ${toolName.replace(/^mcp__/, '').replace('__', ' · ')}`;
@@ -707,8 +541,11 @@ export function createCodingToolHost(
     switch (toolName) {
       case 'read_file': return host.readFile(String(args.path ?? ''));
       case 'write_file': return host.writeFile(String(args.path ?? ''), String(args.content ?? ''));
-      case 'patch_file': return host.patchFile(String(args.path ?? ''), String(args.patch ?? ''));
-      case 'search_in_workspace': return host.searchInWorkspace(String(args.query ?? ''), typeof args.path === 'string' ? args.path : undefined);
+      case 'find': return host.find(args as Parameters<typeof findPaths>[1], context.signal);
+      case 'ls': return host.ls(args as Parameters<typeof listDirectory>[1]);
+      case 'list_workspace': return host.listWorkspace(args as Parameters<typeof buildWorkspaceTree>[1], context.signal);
+      case 'grep': return host.grep(args as Parameters<typeof grepWorkspace>[1], context.signal);
+      case 'patch_file': return host.patchFile(args as PatchFileInput);
       case 'run_command': return host.runCommand(String(args.command ?? ''), {
         approvalGranted: true,
         signal: context.signal,
@@ -717,12 +554,6 @@ export function createCodingToolHost(
       });
       case 'read_command_output': return host.readCommandOutput(String(args.task_id ?? ''), typeof args.wait_ms === 'number' ? args.wait_ms : undefined);
       case 'stop_command': return host.stopCommand(String(args.task_id ?? ''));
-      case 'read_lints': return host.readLints(typeof args.path === 'string' ? args.path : undefined);
-      case 'diff_file': return host.diffFile(String(args.path ?? ''), typeof args.snapshotId === 'string' ? args.snapshotId : undefined);
-      case 'list_workspace': return host.listWorkspace();
-      case 'list_versions': return host.listVersions();
-      case 'create_snapshot': return host.createSnapshot(typeof args.name === 'string' ? args.name : undefined, typeof args.description === 'string' ? args.description : undefined);
-      case 'restore_snapshot': return host.restoreSnapshot(String(args.snapshotId ?? ''));
       default:
         if (toolName.startsWith('mcp__') && context.executeExternal) {
           return context.executeExternal(toolName, args, context.signal);

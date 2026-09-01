@@ -101,7 +101,7 @@ function buildSystemSections(
     scope.kind === 'workspace'
       ? 'You are DexCode, a coding agent responsible for tasks in this Session workspace.'
       : 'You are DexCode in general conversation mode. No workspace is attached, so workspace file and command tools are unavailable.',
-    'Use ask_user only for destructive actions or decisions that cannot be safely inferred.',
+    'When a destructive action or consequential choice requires user input, ask in ordinary conversation instead of inventing a tool result.',
     'When the task is done, summarize results in concise Chinese.',
   ];
   if (scope.kind === 'workspace') {

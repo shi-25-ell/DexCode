@@ -168,7 +168,7 @@ function projectLedger(records: SessionLedgerRecord[], agents: AgentTreeSnapshot
     ));
     if (candidate?.type === 'message') legacyFinalAssistantSeqs.add(candidate.seq);
   }
-  const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && ['compact_context', 'spawn_agent', 'wait_agent', 'followup_agent', 'stop_agent'].includes(record.tool) ? [record.callId] : []));
+  const internalContextCalls = new Set(records.flatMap((record) => record.type === 'tool_started' && ['read_artifact', 'compact_context', 'spawn_agent', 'wait_agent', 'followup_agent', 'stop_agent'].includes(record.tool) ? [record.callId] : []));
   const completedTools = new Map(records.flatMap((record) => record.type === 'tool_completed' ? [[record.callId, record] as const] : []));
   const approvalDecisionById = new Map(records.flatMap((record) => record.type === 'approval_resolved' ? [[record.approvalId, record.decision] as const] : []));
   const commandApprovalByCall = new Map<string, { approvalId: string; decision?: string }>();

@@ -1,4 +1,6 @@
-export type JsonSchema = Record<string, unknown>;
+import { validateJsonSchema, type JsonSchema } from '../shared/json-schema.ts';
+
+export type { JsonSchema } from '../shared/json-schema.ts';
 
 export type McpToolHandler = (args: Record<string, unknown>) => unknown | Promise<unknown>;
 export type McpResourceHandler = () => unknown | Promise<unknown>;
@@ -61,37 +63,6 @@ export type McpJsonRpcResponse = {
   error?: { code: number; message: string; data?: unknown };
 };
 
-function assertObject(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
-}
-
-function validateSchema(input: Record<string, unknown>, schema: JsonSchema) {
-  const required = Array.isArray(schema.required) ? (schema.required as string[]) : [];
-  const properties = assertObject(schema.properties);
-
-  for (const key of required) {
-    if (!(key in input)) return `Missing required property: ${key}`;
-  }
-
-  for (const [key, value] of Object.entries(input)) {
-    const propSchema = assertObject(properties[key]);
-    const expectedType = typeof propSchema.type === 'string' ? propSchema.type : undefined;
-    if (!expectedType) continue;
-    if (expectedType === 'array') {
-      if (!Array.isArray(value)) return `Invalid type for ${key}: expected array`;
-      continue;
-    }
-    if (expectedType === 'null') {
-      if (value !== null) return `Invalid type for ${key}: expected null`;
-      continue;
-    }
-    if (typeof value !== expectedType) return `Invalid type for ${key}: expected ${expectedType}`;
-  }
-
-  return null;
-}
-
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
@@ -116,7 +87,7 @@ export function createMcpServer(options: {
   function validateToolCall(name: string, args: Record<string, unknown>): string | null {
     const tool = toolMap.get(name);
     if (!tool) return `Tool not found: ${name}`;
-    return validateSchema(args, tool.inputSchema);
+    return validateJsonSchema(args, tool.inputSchema);
   }
 
   async function callTool(name: string, args: Record<string, unknown> = {}): Promise<McpCallResult> {
@@ -146,7 +117,7 @@ export function createMcpServer(options: {
   async function getPrompt(name: string, args: Record<string, unknown> = {}): Promise<McpPromptResult> {
     const prompt = promptMap.get(name);
     if (!prompt) return { success: false, prompt: name, error: `Prompt not found: ${name}` };
-    const validationError = validateSchema(args, prompt.inputSchema);
+    const validationError = validateJsonSchema(args, prompt.inputSchema);
     if (validationError) return { success: false, prompt: name, error: validationError };
     try {
       const data = await prompt.handler(args);

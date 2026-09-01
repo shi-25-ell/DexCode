@@ -10,7 +10,7 @@ function tool(toolName: string, callRef: string, status: ToolViewStatus = 'succe
   return presentTool({
     callRef,
     tool: toolName,
-    args: toolName === 'search_in_workspace' ? { query: callRef, path: 'src' } : toolName === 'run_command' ? { command: callRef } : { path },
+    args: toolName === 'grep' ? { pattern: callRef, path: 'src' } : toolName === 'run_command' ? { command: callRef } : { path },
     result: failed ? { error: `error-${callRef}` } : { ok: true, content: 'one\ntwo' },
     status,
     ...(toolName === 'write_file' || toolName === 'patch_file' ? { fileDiff: { path, before: 'old', after: 'new' } } : {}),
@@ -22,7 +22,7 @@ function sequence(tools: ToolPresentation[]) {
 }
 
 test('large consecutive inspection and modification runs stay in one stable batch', () => {
-  const reads = sequence(Array.from({ length: 25 }, (_, index) => tool(index % 5 === 0 ? 'search_in_workspace' : 'read_file', `read-${index}`)));
+  const reads = sequence(Array.from({ length: 25 }, (_, index) => tool(index % 5 === 0 ? 'grep' : 'read_file', `read-${index}`)));
   assert.equal(reads.length, 1);
   assert.equal(reads[0]?.kind, 'tool_batch');
   if (reads[0]?.kind === 'tool_batch') {
@@ -81,7 +81,7 @@ test('consecutive commands merge across their individual approval cards', () => 
   if (output[0]?.kind === 'tool_batch') {
     assert.equal(output[0].batch.id, 'tool-batch-command-command-1');
     assert.deepEqual(output[0].batch.members.map((member) => member.callRef), ['command-1', 'command-2']);
-    assert.equal(toolBatchSummary(output[0].batch), '执行了 2 个命令 · 失败 1 个');
+    assert.equal(toolBatchSummary(output[0].batch), '执行了 2 个命令操作 · 失败 1 个');
     assert.deepEqual(toolBatchStatus(output[0].batch), { status: 'warning', failed: 1 });
   }
   assert.deepEqual(output.slice(1).map((entry) => entry.key), ['approval-1', 'approval-2']);
@@ -152,7 +152,7 @@ test('history keeps command approvals separate while annotating the merged comma
 test('history uses start order, ignores completion order, and matches live batching', () => {
   const now = '2026-09-01T00:00:00.000Z';
   const first = tool('read_file', 'call-first');
-  const second = tool('search_in_workspace', 'call-second');
+  const second = tool('grep', 'call-second');
   const third = tool('read_file', 'call-third');
   const fourth = tool('read_file', 'call-fourth');
   const session: Session = {
@@ -160,7 +160,7 @@ test('history uses start order, ignores completion order, and matches live batch
     messages: [], taskSummaries: [], activeTaskId: null,
     ledger: [
       { seq: 1, at: now, runId: 'run-1', type: 'tool_started', callId: 'call-first', tool: 'read_file', input: { path: 'first.ts' } },
-      { seq: 2, at: now, runId: 'run-1', type: 'tool_started', callId: 'call-second', tool: 'search_in_workspace', input: { query: 'x' } },
+      { seq: 2, at: now, runId: 'run-1', type: 'tool_started', callId: 'call-second', tool: 'grep', input: { pattern: 'x' } },
       { seq: 3, at: now, runId: 'run-1', type: 'tool_completed', callId: 'call-second', presentation: second },
       { seq: 4, at: now, runId: 'run-1', type: 'tool_completed', callId: 'call-first', presentation: first },
       { seq: 5, at: now, runId: 'run-1', type: 'message', message: { role: 'assistant', content: null } },

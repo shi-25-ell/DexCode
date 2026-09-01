@@ -68,7 +68,7 @@ describe('ToolBatchCard', () => {
         member('second', 'failed', { toolName: 'run_command', category: 'command', name: '执行命令', target: 'npm run lint', approval: { status: 'denied', addedToWhitelist: false } }),
       ],
     } }));
-    expect(screen.getByText('执行了 2 个命令 · 失败 1 个')).toBeInTheDocument();
+    expect(screen.getByText('执行了 2 个命令操作 · 失败 1 个')).toBeInTheDocument();
     expect(screen.getByText('部分失败')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '执行命令，展开批次详情' }));
     expect(screen.getByText('npm test')).toBeInTheDocument();

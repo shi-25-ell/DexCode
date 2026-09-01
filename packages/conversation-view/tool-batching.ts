@@ -1,7 +1,5 @@
 import type { ToolBatchPresentation, ToolBatchType, ToolPresentation, ToolViewStatus } from '../shared/types.ts';
-
-const INSPECTION_TOOLS = new Set(['read_file', 'search_in_workspace', 'list_workspace', 'read_lints', 'diff_file']);
-const MODIFICATION_TOOLS = new Set(['write_file', 'patch_file']);
+import { codingToolSpec } from '../tool-gateway/tool-registry.ts';
 
 export type ToolSequenceInput<T extends Pick<ToolPresentation, 'callRef' | 'toolName'>, B> =
   | { kind: 'tool'; key: string; tool: T }
@@ -13,10 +11,7 @@ export type ToolSequenceOutput<T extends Pick<ToolPresentation, 'callRef' | 'too
   | { kind: 'boundary'; key: string; value: B; transparentFor?: ToolBatchType[] };
 
 export function toolBatchType(toolName: string): ToolBatchType | undefined {
-  if (INSPECTION_TOOLS.has(toolName)) return 'inspection';
-  if (MODIFICATION_TOOLS.has(toolName)) return 'modification';
-  if (toolName === 'run_command') return 'command';
-  return undefined;
+  return codingToolSpec(toolName)?.presentation.batch;
 }
 
 export function batchToolSequence<T extends Pick<ToolPresentation, 'callRef' | 'toolName'>, B>(
@@ -67,14 +62,14 @@ export function toolBatchStatus(batch: Pick<ToolBatchPresentation, 'members'>): 
 export function toolBatchSummary(batch: Pick<ToolBatchPresentation, 'type' | 'members'>): string {
   if (batch.type === 'inspection') {
     const files = new Set(batch.members.flatMap((member) => (
-      (member.toolName === 'read_file' || member.toolName === 'diff_file') && member.target ? [member.target] : []
+      member.toolName === 'read_file' && member.target ? [member.target] : []
     ))).size;
-    const searches = batch.members.filter((member) => member.toolName === 'search_in_workspace').length;
+    const searches = batch.members.filter((member) => member.toolName === 'find' || member.toolName === 'grep').length;
     return [files ? `检查了 ${files} 个文件` : '', searches ? `搜索 ${searches} 次` : '', `${batch.members.length} 项操作`].filter(Boolean).join(' · ');
   }
   if (batch.type === 'command') {
     const failed = batch.members.filter((member) => member.status === 'failed').length;
-    return `执行了 ${batch.members.length} 个命令 · 失败 ${failed} 个`;
+    return `执行了 ${batch.members.length} 个命令操作 · 失败 ${failed} 个`;
   }
   const files = new Set(batch.members.flatMap((member) => {
     const path = member.fileChange?.path ?? member.target;

@@ -40,6 +40,8 @@ import {
   type AgentOrchestrationPort,
 } from '../agent-manager/contracts.ts';
 import { agentOrchestrationToolDefinitions } from './tool-definitions.ts';
+import { validateJsonSchema } from '../shared/json-schema.ts';
+import type { PatchFileInput } from '../tool-gateway/structured-edit.ts';
 
 export type CodingToolHost = {
   readFile: (path: string) => Promise<unknown> | unknown;
@@ -47,14 +49,13 @@ export type CodingToolHost = {
   runCommand: (command: string, ctx?: { onCommandConfirm?: CommandConfirmHook; signal?: AbortSignal; timeoutMs?: number; runInBackground?: boolean }) => unknown;
   readCommandOutput?: (taskId: string, waitMs?: number) => unknown;
   stopCommand?: (taskId: string) => unknown;
-  readLints?: (path?: string) => unknown;
-  diffFile?: (path: string, snapshotId?: string) => unknown;
-  listWorkspace: () => unknown;
-  searchInWorkspace: (query: string, path?: string) => unknown;
-  patchFile: (path: string, patch: string) => unknown;
-  listVersions: () => unknown;
-  createSnapshot: (name?: string, description?: string) => unknown;
-  restoreSnapshot: (snapshotId: string) => unknown;
+  find: (input: { pattern: string; path?: string; limit?: number }, signal?: AbortSignal) => unknown;
+  ls: (input?: { path?: string; limit?: number }) => unknown;
+  listWorkspace: (input?: { depth?: number }, signal?: AbortSignal) => unknown;
+  listWorkspaceFiles?: () => unknown;
+  grep: (input: { pattern: string; path?: string; glob?: string; ignoreCase?: boolean; literal?: boolean; context?: number; limit?: number }, signal?: AbortSignal) => unknown;
+  patchFile: (input: PatchFileInput) => unknown;
+  getToolDefinitions?: () => typeof LOCAL_TOOL_DEFINITIONS;
   executeAgentTool?: (toolName: string, args: Record<string, unknown>, context: AgentToolExecutionContext) => Promise<unknown>;
   executeManagedMemoryTool?: (toolName: string, args: Record<string, unknown>, context: { runId: string; sessionId?: string; signal: AbortSignal }) => Promise<unknown>;
   isToolEnabled?: (name: string) => boolean;
@@ -256,28 +257,7 @@ function validationError(
 ): string | undefined {
   const definition = definitions.find((item) => item.function.name === name);
   if (!definition) return `unknown or disabled tool: ${name}`;
-  const schema = definition.function.parameters;
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
-  const shape = schema as { required?: unknown; properties?: unknown; additionalProperties?: unknown };
-  const required = Array.isArray(shape.required) ? shape.required.filter((value): value is string => typeof value === 'string') : [];
-  for (const key of required) if (!(key in args)) return `missing required tool argument: ${key}`;
-  const properties = shape.properties && typeof shape.properties === 'object' && !Array.isArray(shape.properties)
-    ? shape.properties as Record<string, { type?: unknown }>
-    : {};
-  if (shape.additionalProperties === false) {
-    const unknown = Object.keys(args).find((key) => !(key in properties));
-    if (unknown) return `unknown tool argument: ${unknown}`;
-  }
-  for (const [key, value] of Object.entries(args)) {
-    const expected = properties[key]?.type;
-    if (typeof expected !== 'string') continue;
-    const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
-    const matches = expected === 'integer'
-      ? typeof value === 'number' && Number.isInteger(value)
-      : actual === expected;
-    if (!matches) return `tool argument ${key} must be ${expected}`;
-  }
-  return undefined;
+  return validateJsonSchema(args, definition.function.parameters as Record<string, unknown>) ?? undefined;
 }
 
 async function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -363,26 +343,24 @@ export function createExecutor(
   const toolFns: Record<string, (args: Record<string, unknown>) => unknown> = {
     read_file: ({ path }) => codingToolHost.readFile(path as string),
     write_file: ({ path, content }) => codingToolHost.writeFile(path as string, content as string),
-    patch_file: ({ path, patch }) => codingToolHost.patchFile(path as string, patch as string),
-    search_in_workspace: ({ query, path }) => codingToolHost.searchInWorkspace(query as string, path as string | undefined),
+    find: (args) => codingToolHost.find(args as Parameters<CodingToolHost['find']>[0]),
+    ls: (args) => codingToolHost.ls(args as Parameters<CodingToolHost['ls']>[0]),
+    list_workspace: (args) => codingToolHost.listWorkspace(args as Parameters<CodingToolHost['listWorkspace']>[0]),
+    grep: (args) => codingToolHost.grep(args as Parameters<CodingToolHost['grep']>[0]),
+    patch_file: (args) => codingToolHost.patchFile(args as PatchFileInput),
     run_command: ({ command, timeout_ms, run_in_background }) => codingToolHost.runCommand(command as string, {
       ...(typeof timeout_ms === 'number' ? { timeoutMs: timeout_ms } : {}),
       ...(typeof run_in_background === 'boolean' ? { runInBackground: run_in_background } : {}),
     }),
     read_command_output: ({ task_id, wait_ms }) => codingToolHost.readCommandOutput?.(String(task_id ?? ''), typeof wait_ms === 'number' ? wait_ms : undefined) ?? { error: 'read_command_output unavailable' },
     stop_command: ({ task_id }) => codingToolHost.stopCommand?.(String(task_id ?? '')) ?? { error: 'stop_command unavailable' },
-    read_lints: ({ path }) => codingToolHost.readLints?.(path as string | undefined) ?? { error: 'read_lints unavailable' },
-    diff_file: ({ path, snapshotId }) => codingToolHost.diffFile?.(path as string, snapshotId as string | undefined) ?? { error: 'diff_file unavailable' },
-    list_workspace: () => codingToolHost.listWorkspace(),
-    list_versions: () => codingToolHost.listVersions(),
-    create_snapshot: ({ name, description }) => codingToolHost.createSnapshot(name as string | undefined, description as string | undefined),
-    restore_snapshot: ({ snapshotId }) => codingToolHost.restoreSnapshot(snapshotId as string),
   };
 
   async function buildToolDefinitions(includeContextTools = false, policy?: ToolPolicy) {
+    const codingTools = codingToolHost.getToolDefinitions?.() ?? LOCAL_TOOL_DEFINITIONS;
     const local = skillRegistry && policy?.allowSkills !== false
-      ? [...LOCAL_TOOL_DEFINITIONS, ...MEMORY_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS]
-      : [...LOCAL_TOOL_DEFINITIONS, ...MEMORY_TOOL_DEFINITIONS];
+      ? [...codingTools, ...MEMORY_TOOL_DEFINITIONS, ...SKILL_TOOL_DEFINITIONS]
+      : [...codingTools, ...MEMORY_TOOL_DEFINITIONS];
     const enabled = codingToolHost.isToolEnabled
       ? local.filter((tool) => codingToolHost.isToolEnabled?.(tool.function.name))
       : local;
@@ -770,7 +748,7 @@ export function createExecutor(
           toolsUsed.push(toolName);
           let toolResult: unknown;
           let fileDiff: FileDiff | undefined;
-          const semanticContextTool = toolName === 'compact_context' || isAgentOrchestrationTool(toolName);
+          const semanticContextTool = toolName === 'read_artifact' || toolName === 'compact_context' || isAgentOrchestrationTool(toolName);
           const policyDenied = !policyAllows(toolName, options.toolPolicy);
           const orchestrationInvalid = isAgentOrchestrationTool(toolName) ? validateOrchestrationToolInput(toolName, args) : undefined;
           const invalid = policyDenied
@@ -808,14 +786,7 @@ export function createExecutor(
               : { status: 'rejected', error: invalid };
             if (invalid) {
               // Rejected calls still receive a paired tool result but never reach an execution adapter.
-            } else if (toolName === 'ask_user') {
-              if (!onConfirm) toolResult = { status: 'blocked', code: 'approval_required', tool: toolName, reason: 'interactive confirmation is unavailable for this Agent' };
-              else {
-                if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'waiting_confirm' });
-                toolResult = { answer: await onConfirm(String(args.question ?? 'Please confirm'), Array.isArray(args.options) ? args.options.map(String) : undefined) };
-              }
             } else if (toolName === 'read_artifact' && options.context) {
-              markToolRunning();
               toolResult = await options.context.readArtifact({
                 ref: String(args.ref ?? ''),
                 ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
@@ -986,7 +957,6 @@ export function createExecutor(
                 toolResult = { error: `unknown tool: ${toolName}` };
               }
               toolResult = enrichToolResult(toolName, toolResult);
-              if (toolName === 'restore_snapshot') filesModified.push('[workspace restored from snapshot]');
             }
           } catch (error) {
             toolResult = { error: error instanceof Error ? error.message : String(error) };

@@ -546,7 +546,7 @@ const MEMORY_AGENT_TOOL_POLICY: ToolPolicy = {
 
 Memory Agent 不得调用：
 
-- `write_file`、`patch_file`、`restore_snapshot`。
+- `write_file`、`patch_file`。
 - `run_command`。
 - 任意外部 MCP。
 - Agent/多 Agent 工具。

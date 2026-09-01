@@ -29,7 +29,7 @@ type ChildRunInput = {
 
 type Handle = { sessionId: string; agentId: string; agentRunId: string; abortController: AbortController; promise: Promise<StoredAgentRunResult> };
 
-const WRITE_TOOLS = new Set(['write_file', 'patch_file', 'run_command', 'restore_snapshot', 'create_snapshot']);
+const WRITE_TOOLS = new Set(['write_file', 'patch_file', 'run_command']);
 const BUILTIN_AGENT_NAMES = new Set(['general-purpose', 'assistant', 'researcher', 'reviewer']);
 
 function isWriter(agent: AgentRecord): boolean {

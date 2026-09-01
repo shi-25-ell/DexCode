@@ -52,7 +52,6 @@ type RequestContext = {
   selectedFile?: string | null;
   name?: string;
   description?: string;
-  snapshotId?: string;
 };
 
 type WorkspaceFile = {
@@ -62,10 +61,6 @@ type WorkspaceFile = {
 
 type WorkspaceTreeResponse = {
   tree: unknown[];
-};
-
-type VersionListResponse = {
-  versions: unknown[];
 };
 
 type FileUpdateResponse = {
@@ -376,6 +371,15 @@ function cancelPendingRun(runId: string, reason: string) {
 const modelClient = createModelClient();
 const sessionRepository: SessionRepository = createSessionRepository();
 const multiAgentFeatureEnabled = multiAgentEnabled();
+const configuredCommandShell = process.env.DEX_COMMAND_SHELL?.trim().toLowerCase();
+if (configuredCommandShell && configuredCommandShell !== 'powershell' && configuredCommandShell !== 'bash') {
+  throw new Error(`DEX_COMMAND_SHELL must be powershell or bash, received: ${configuredCommandShell}`);
+}
+const commandShellOptions = {
+  ...(configuredCommandShell ? { preferred: configuredCommandShell as 'powershell' | 'bash' } : {}),
+  ...(process.env.DEX_POWERSHELL_PATH?.trim() ? { powershellPath: process.env.DEX_POWERSHELL_PATH.trim() } : {}),
+  ...(process.env.DEX_GIT_BASH_PATH?.trim() ? { bashPath: process.env.DEX_GIT_BASH_PATH.trim() } : {}),
+};
 const agentActivityStream = createAgentActivityStream();
 let agentInboxWake: (sessionId: string) => void = () => undefined;
 const agentStore = createAgentStore({
@@ -468,7 +472,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     stateDir,
   });
   await nextWorkspaceService.loadFromDisk();
-  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService, { approvalModeStore });
+  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService, { approvalModeStore, shell: commandShellOptions });
   const nextContextManager = createContextManager(nextCodingToolHost);
   const nextSkillRegistry = createSkillRegistry({ workspaceRoot: workspace.canonicalRootPath });
   await nextSkillRegistry.loadAll();
@@ -1866,12 +1870,6 @@ export function startRuntimeServer() {
       return;
     }
 
-    if (url.pathname === '/api/versions' && req.method === 'GET') {
-      const versionsResponse: VersionListResponse = { versions: await workspaceService.listVersions() };
-      sendJson(res, 200, versionsResponse);
-      return;
-    }
-
     // ── MCP tool/resource/prompt 辅助路由 ──
     if (url.pathname === '/api/mcp/tools') {
       sendJson(res, 200, codingToolHost.mcp.listTools());
@@ -2112,28 +2110,6 @@ export function startRuntimeServer() {
 
       const result = await codingToolHost.runCommand(command);
       sendJson(res, 200, result);
-      return;
-    }
-
-    if (url.pathname === '/api/version/snapshot' && req.method === 'POST') {
-      const parsed = await parseBody<RequestContext>(req);
-      try {
-        const result = await workspaceService.createSnapshot(parsed.name ?? '', parsed.description ?? '');
-        sendJson(res, 200, result);
-      } catch (error: unknown) {
-        sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'Failed to create snapshot' });
-      }
-      return;
-    }
-
-    if (url.pathname === '/api/version/restore' && req.method === 'POST') {
-      const parsed = await parseBody<RequestContext>(req);
-      try {
-        const result = await workspaceService.restoreSnapshot(parsed.snapshotId ?? '');
-        sendJson(res, 200, result);
-      } catch (error: unknown) {
-        sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'Failed to restore snapshot' });
-      }
       return;
     }
 

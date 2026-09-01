@@ -15,11 +15,10 @@ function toolHost() {
     writeFile: () => ({ ok: true }),
     runCommand: () => ({ ok: true }),
     listWorkspace: () => [],
-    searchInWorkspace: () => [],
+    find: () => ({ paths: [] }),
+    ls: () => ({ entries: [] }),
+    grep: () => ({ match_count: 0, output: '' }),
     patchFile: () => ({ ok: true }),
-    listVersions: () => [],
-    createSnapshot: () => ({ ok: true }),
-    restoreSnapshot: () => ({ ok: true }),
   };
 }
 

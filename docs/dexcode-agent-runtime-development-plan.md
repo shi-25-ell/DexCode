@@ -581,8 +581,10 @@ internal-readonly
 
 ```text
 read_file
-search_in_workspace
+find
+ls
 list_workspace
+grep
 ```
 
 禁止：
@@ -591,8 +593,6 @@ list_workspace
 write_file
 patch_file
 run_command
-restore_snapshot
-create_snapshot
 external MCP
 Skill activation
 ```

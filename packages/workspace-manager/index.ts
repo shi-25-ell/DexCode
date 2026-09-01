@@ -2,25 +2,17 @@ import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DEFAULT_PROJECT_ID, type VersionSnapshot } from '../shared/index.ts';
 export { createWorkspaceRegistry, type WorkspaceRecord } from './registry.ts';
-import {
-  applyAtLineAnchor,
-  applyFuzzyReplacement,
-  parseLineAnchor,
-} from '../tool-gateway/patch-matcher.ts';
-
-export type WorkspaceSearchHit = {
-  path: string;
-  line: number;
-  column: number;
-  snippet: string;
-};
+import { FileMutationQueue } from '../tool-gateway/file-mutation-queue.ts';
+import { adaptLegacyPatch } from '../tool-gateway/legacy-patch-adapter.ts';
+import { applyStructuredEdit, type PatchFileInput } from '../tool-gateway/structured-edit.ts';
 
 export type PatchFileResult = {
   ok: boolean;
   action: 'patched' | 'patch_failed';
   file?: WorkspaceFile;
   tree?: TreeNode[];
-  diff?: { beforeLines: number; afterLines: number; replacements: number };
+  diff?: { beforeLines: number; afterLines: number; replacements: number; unified: string; eol: 'LF' | 'CRLF'; bom: boolean };
+  deprecated?: boolean;
   error?: string;
 };
 
@@ -66,61 +58,6 @@ function createNodeId(type: 'file' | 'folder', path: string) {
   return `${type}-${normalized.replace(/[^\w.-]+/g, '-') || 'root'}`;
 }
 
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function splitLines(content: string) {
-  return content.split(/\r?\n/);
-}
-
-function stripCodeFence(value: string) {
-  return value
-    .replace(/^```(?:diff|patch|text)?\s*/i, '')
-    .replace(/\s*```$/, '')
-    .trim();
-}
-
-function parseUnifiedDiff(patchText: string) {
-  const lines = patchText.split(/\r?\n/);
-  const hunks: Array<{ before: string[]; after: string[] }> = [];
-  let currentBefore: string[] = [];
-  let currentAfter: string[] = [];
-  let mode: 'before' | 'after' | null = null;
-
-  const flush = () => {
-    if (currentBefore.length || currentAfter.length) {
-      hunks.push({ before: currentBefore, after: currentAfter });
-      currentBefore = [];
-      currentAfter = [];
-    }
-  };
-
-  for (const line of lines) {
-    if (line.startsWith('@@') || line.startsWith('*** ') || line.startsWith('--- ') || line.startsWith('+++ ')) continue;
-    if (line.startsWith('-')) {
-      if (mode === 'after') flush();
-      mode = 'before';
-      currentBefore.push(line.slice(1));
-      continue;
-    }
-    if (line.startsWith('+')) {
-      mode = 'after';
-      currentAfter.push(line.slice(1));
-      continue;
-    }
-    if (!line.trim()) {
-      if (mode) {
-        currentBefore.push('');
-        currentAfter.push('');
-      }
-      continue;
-    }
-  }
-
-  flush();
-  return hunks.filter((hunk) => hunk.before.length || hunk.after.length);
-}
 
 function flattenTree(nodes: TreeNode[], prefix = ''): WorkspaceFile[] {
   return nodes.flatMap((node) => {
@@ -246,6 +183,7 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
     rootDir,
     ...createVersionPaths(rootDir),
   };
+  const mutationQueue = new FileMutationQueue();
 
   async function ensureWorkspaceDir() {
     await mkdir(state.rootDir, { recursive: true });
@@ -370,178 +308,67 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
     return listFiles().find((item) => item.path === normalized) ?? null;
   }
 
-  function searchInWorkspace(query: string, path?: string): WorkspaceSearchHit[] {
-    const normalizedQuery = query.trim();
-    if (!normalizedQuery) return [];
 
-    const escaped = escapeRegExp(normalizedQuery);
-    const matcher = new RegExp(escaped, 'gi');
-    const normalizedPath = path ? normalizePath(path) : '';
-    const files = path ? listFiles().filter((file) => file.path === normalizedPath || file.path.startsWith(`${normalizedPath}/`)) : listFiles();
-    const hits: WorkspaceSearchHit[] = [];
-
-    for (const file of files) {
-      const lines = splitLines(String(file.content ?? ''));
-      lines.forEach((line, index) => {
-        matcher.lastIndex = 0;
-        if (!matcher.test(line)) return;
-        const matchIndex = line.toLowerCase().indexOf(normalizedQuery.toLowerCase());
-        const column = Math.max(1, matchIndex + 1);
-        hits.push({
-          path: file.path,
-          line: index + 1,
-          column,
-          snippet: line.trim(),
-        });
-      });
+  async function patchFile(input: PatchFileInput): Promise<PatchFileResult>;
+  async function patchFile(path: string, legacyPatch: string): Promise<PatchFileResult>;
+  async function patchFile(inputOrPath: PatchFileInput | string, legacyPatch?: string): Promise<PatchFileResult> {
+    const legacy = typeof inputOrPath === 'string';
+    let input: PatchFileInput;
+    try {
+      input = legacy
+        ? adaptLegacyPatch(inputOrPath, String(legacyPatch ?? ''))
+        : inputOrPath;
+    } catch (error) {
+      return { ok: false, action: 'patch_failed', error: error instanceof Error ? error.message : String(error) };
     }
-
-    return hits;
-  }
-
-  async function patchFile(path: string, patch: string): Promise<PatchFileResult> {
-    const normalized = normalizePath(path);
-    const file = findFile(normalized);
-    if (!file) return { ok: false, action: 'patch_failed', error: `File not found: ${normalized}` };
-
-    const before = String(file.content ?? '');
-    const beforeLines = splitLines(before).length;
-    const patchText = stripCodeFence(String(patch ?? '').trim());
-    if (!patchText) return { ok: false, action: 'patch_failed', error: 'Patch content is empty' };
-
-    const applyReplacement = (source: string, beforeBlock: string, afterBlock: string) => {
-      const result = applyFuzzyReplacement(source, beforeBlock, afterBlock);
-      return { content: result.content, replaced: result.replaced, hint: result.hint };
-    };
-
-    const applyLineReplacement = (source: string, searchLine: string, replaceLine: string) => {
-      const lines = splitLines(source);
-      const normalizedSearch = searchLine.trim();
-      const index = lines.findIndex((line) => line.trim() === normalizedSearch || line.includes(normalizedSearch));
-      if (index < 0) return { content: source, replaced: false };
-      lines[index] = replaceLine;
-      return { content: lines.join('\n'), replaced: true };
-    };
-
-    const applyBlockDiff = (source: string, hunks: Array<{ before: string[]; after: string[] }>) => {
-      let next = source;
-      let replacedAny = false;
-      for (const hunk of hunks) {
-        const beforeBlock = hunk.before.join('\n').trim();
-        const afterBlock = hunk.after.join('\n').trim();
-        if (!beforeBlock && !afterBlock) continue;
-        const result = applyReplacement(next, beforeBlock, afterBlock) as {
-          content: string;
-          replaced: boolean;
-          hint?: string;
-        };
-        if (!result.replaced) return { content: source, replaced: false, hint: result.hint };
-        next = result.content;
-        replacedAny = true;
-      }
-      return { content: next, replaced: replacedAny };
-    };
-
-    let after = before;
-    let replacements = 0;
-
-    const anchor = parseLineAnchor(patchText);
-    if (anchor) {
-      let beforeBlock = '';
-      let afterBlock = '';
-      if (anchor.rest.includes('\n---\n')) {
-        [beforeBlock, afterBlock] = anchor.rest.split(/\n---\n/);
-      } else if (anchor.rest.includes('=>')) {
-        const [left, right] = anchor.rest.split(/\s*=>\s*/);
-        beforeBlock = left ?? '';
-        afterBlock = right ?? '';
-      } else {
+    const normalized = normalizePath(input.path);
+    return mutationQueue.run(normalized, async () => {
+      await ensureWorkspaceDir();
+      await assertNoReparsePoint(normalized);
+      const filePath = resolveWorkspacePath(normalized);
+      let before: string;
+      try {
+        before = await readFile(filePath, 'utf8');
+      } catch (error) {
         return {
           ok: false,
           action: 'patch_failed',
-          error: '行号锚点格式：@@ line N 后接 "before\\n---\\nafter" 或 "before => after"',
+          error: (error as { code?: string }).code === 'ENOENT' ? `File not found: ${normalized}` : String(error),
         };
       }
-      const anchored = applyAtLineAnchor(after, anchor.line, beforeBlock, afterBlock);
-      if (!anchored.replaced) {
-        return {
-          ok: false,
-          action: 'patch_failed',
-          error: anchored.hint ?? `Patch target not found near line ${anchor.line} in ${normalized}`,
-        };
+      let applied;
+      try {
+        applied = applyStructuredEdit(before, { ...input, path: normalized });
+      } catch (error) {
+        return { ok: false, action: 'patch_failed', error: error instanceof Error ? error.message : String(error) };
       }
-      after = anchored.content;
-      replacements = 1;
-    } else if (patchText.includes('@@') && (patchText.includes('+') || patchText.includes('-'))) {
-      const hunks = parseUnifiedDiff(patchText);
-      const result = applyBlockDiff(after, hunks) as { content: string; replaced: boolean; hint?: string };
-      if (!result.replaced) {
-        return {
-          ok: false,
-          action: 'patch_failed',
-          error: result.hint ?? `Patch target not found in ${normalized}`,
-        };
+
+      const temporary = `${filePath}.dexcode-${crypto.randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, applied.content, 'utf8');
+        await rename(temporary, filePath);
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => {});
+        return { ok: false, action: 'patch_failed', error: `Atomic file replacement failed: ${error instanceof Error ? error.message : String(error)}` };
       }
-      after = result.content;
-      replacements = hunks.length;
-    } else {
-      const replacementBlocks = patchText
-        .split(/\n{2,}/)
-        .map((block) => block.trim())
-        .filter(Boolean);
-
-      for (const block of replacementBlocks) {
-        let beforeBlock = '';
-        let afterBlock = '';
-
-        if (block.includes('\n---\n')) {
-          [beforeBlock, afterBlock] = block.split(/\n---\n/);
-        } else if (block.includes('=>')) {
-          const [left, right] = block.split(/\s*=>\s*/);
-          beforeBlock = left ?? '';
-          afterBlock = right ?? '';
-        } else if (block.includes('\n')) {
-          const [left, right] = block.split(/\n/);
-          beforeBlock = left ?? '';
-          afterBlock = right ?? '';
-        } else {
-          return { ok: false, action: 'patch_failed', error: 'Invalid patch format. Use unified diff, "before\n---\nafter", or "before => after".' };
-        }
-
-        if (!beforeBlock.trim()) return { ok: false, action: 'patch_failed', error: 'Patch before block is empty' };
-        if (!afterBlock.trim()) return { ok: false, action: 'patch_failed', error: 'Patch after block is empty' };
-
-        const lineResult = applyLineReplacement(after, beforeBlock, afterBlock);
-        const blockResult = lineResult.replaced
-          ? lineResult
-          : applyReplacement(after, beforeBlock.trim(), afterBlock.trim());
-        if (!blockResult.replaced) {
-          const hint = 'hint' in blockResult ? (blockResult as { hint?: string }).hint : undefined;
-          return {
-            ok: false,
-            action: 'patch_failed',
-            error: hint ?? `Patch target not found in ${normalized}`,
-          };
-        }
-        after = blockResult.content;
-        replacements += 1;
-      }
-    }
-
-    await assertNoReparsePoint(normalized);
-    state.tree = upsertNode(state.tree, normalized.split('/').filter(Boolean), after);
-    const filePath = resolveWorkspacePath(normalized);
-    const dirPath = filePath.slice(0, filePath.lastIndexOf('/'));
-    if (dirPath) await mkdir(dirPath, { recursive: true });
-    await writeFile(filePath, after, 'utf8');
-
-    return {
-      ok: true,
-      action: 'patched',
-      file: { path: normalized, content: after },
-      tree: listTree(),
-      diff: { beforeLines, afterLines: splitLines(after).length, replacements },
-    };
+      state.tree = upsertNode(state.tree, normalized.split('/').filter(Boolean), applied.content);
+      if (legacy) console.warn(`[tool-deprecation] legacy patch_file input used for ${normalized}`);
+      return {
+        ok: true,
+        action: 'patched',
+        file: { path: normalized, content: applied.content },
+        tree: listTree(),
+        diff: {
+          beforeLines: applied.beforeLines,
+          afterLines: applied.afterLines,
+          replacements: applied.replacements,
+          unified: applied.diff,
+          eol: applied.eol,
+          bom: applied.bom,
+        },
+        ...(legacy ? { deprecated: true } : {}),
+      };
+    });
   }
 
   async function updateFile(path: string, content: string) {
@@ -553,7 +380,7 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
     state.tree = upsertNode(state.tree, segments, content);
 
     const filePath = resolveWorkspacePath(normalized);
-    const dir = filePath.slice(0, filePath.lastIndexOf('/'));
+    const dir = dirname(filePath);
     if (dir) await mkdir(dir, { recursive: true });
     await writeFile(filePath, content, 'utf8');
 
@@ -597,7 +424,7 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
     await assertNoReparsePoint(nextPath);
     const nextAbsolute = resolveWorkspacePath(nextPath);
 
-    const nextDir = nextAbsolute.slice(0, nextAbsolute.lastIndexOf('/'));
+    const nextDir = dirname(nextAbsolute);
     if (nextDir) await mkdir(nextDir, { recursive: true });
     await rename(oldAbsolute, nextAbsolute);
 
@@ -764,7 +591,6 @@ export function createWorkspaceService(options: { projectId?: string; rootDir?: 
     listTree,
     listFiles,
     findFile,
-    searchInWorkspace,
     patchFile,
     updateFile,
     createFolder,

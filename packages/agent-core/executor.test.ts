@@ -75,11 +75,10 @@ function toolHost(timeline: string[] = []) {
       writeFile: (_path: string, next: string) => { timeline.push('effect'); content = next; return { ok: true }; },
       runCommand: () => null,
       listWorkspace: () => [],
-      searchInWorkspace: () => [],
+      find: () => ({ paths: [] }),
+      ls: () => ({ entries: [] }),
+      grep: () => ({ match_count: 0, output: '' }),
       patchFile: () => null,
-      listVersions: () => [],
-      createSnapshot: () => null,
-      restoreSnapshot: () => null,
     },
     read: () => content,
   };
@@ -200,6 +199,37 @@ test('streams text deltas and completes a no-tool Run', async () => {
   assert.equal(result.status, 'completed');
   assert.equal(result.finalContent, 'done');
   assert.deepEqual(events.find((event) => (event as { type?: string }).type === 'chunk'), { type: 'chunk', chunk: 'done' });
+});
+
+test('read_artifact remains internal and emits no frontend tool lifecycle', async () => {
+  const { host } = toolHost();
+  const runEvents: RunEventPayload[] = [];
+  let reads = 0;
+  const engine: ContextEngine = {
+    async prepare(input) { return prepared(input); },
+    async recoverFromOverflow(input) { return prepared({ ...input, forceSummary: true }); },
+    async recordProviderUsage() {},
+  };
+  const context = {
+    ...contextRuntime(engine),
+    readArtifact: async () => { reads += 1; return { content: 'artifact body' }; },
+  };
+  const result = await createExecutor(host).runReActLoop(scriptedModel([{
+    content: '', reasoning: '',
+    toolCalls: [{ id: 'artifact-call', name: 'read_artifact', arguments: { ref: 'artifact-ref' } }],
+    finishReason: 'tool_calls',
+  }, {
+    content: 'done', reasoning: '', toolCalls: [], finishReason: 'stop',
+  }]), [{ role: 'user', content: 'read it' }], () => {}, undefined, {
+    context,
+    presentation: { emit: (event) => runEvents.push(event) },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(reads, 1);
+  assert.equal(runEvents.some((event) => (
+    (event.type === 'tool_started' || event.type === 'tool_progress' || event.type === 'tool_finished')
+    && event.callId === 'artifact-call'
+  )), false);
 });
 
 test('orchestration tools receive immutable caller context and stay out of ordinary Tool Cards', async () => {

@@ -183,8 +183,12 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
       { task: 'background' },
       { ...caller('spawn-background'), callerRunId: 'main-background' },
     ) as { agent_id: string };
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    const pendingBackground = await store.pendingNotifications(sessionId);
+    let pendingBackground = await store.pendingNotifications(sessionId);
+    const notificationDeadline = Date.now() + 1_000;
+    while (pendingBackground.length === 0 && Date.now() < notificationDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      pendingBackground = await store.pendingNotifications(sessionId);
+    }
     assert.equal(pendingBackground.length, 1);
     assert.equal(pendingBackground[0]?.agentId, background.agent_id);
   } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }); }

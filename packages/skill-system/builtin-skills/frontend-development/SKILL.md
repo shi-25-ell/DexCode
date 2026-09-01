@@ -1,7 +1,7 @@
 ---
 name: frontend-development
 description: Build or modify user-facing frontend interfaces. 用于前端界面开发和修改，包括页面、组件、布局、样式、响应式适配、交互状态、可访问性和用户可见体验优化。
-allowed-tools: read_file search_in_workspace patch_file write_file run_command
+allowed-tools: read_file find grep patch_file write_file run_command
 ---
 
 # Frontend Development

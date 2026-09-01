@@ -39,7 +39,7 @@ describe('RunActivity', () => {
         ],
       }), needsResync: false,
     }));
-    expect(screen.getByText('执行了 2 个命令 · 失败 0 个')).toBeInTheDocument();
+    expect(screen.getByText('执行了 2 个命令操作 · 失败 0 个')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: '允许一次' })).toHaveLength(2);
   });
 

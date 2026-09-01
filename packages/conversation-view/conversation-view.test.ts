@@ -391,6 +391,24 @@ test('projection marks only the explicit final assistant message and upgrades co
   assert.equal(legacy[1]?.kind === 'assistant' ? legacy[1].final : undefined, true);
 });
 
+test('projection never creates a history card for read_artifact', () => {
+  const now = new Date().toISOString();
+  const session: Session = {
+    sessionId: 'session-artifact',
+    scope: { kind: 'general' },
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [
+      { seq: 1, at: now, runId: 'run-artifact', type: 'tool_started', callId: 'artifact-call', tool: 'read_artifact', input: { ref: 'opaque-ref' } },
+      { seq: 2, at: now, runId: 'run-artifact', type: 'tool_completed', callId: 'artifact-call', presentation: presentTool({ callRef: 'artifact-call', tool: 'read_artifact', result: { content: 'hidden' } }) },
+    ],
+  };
+  assert.deepEqual(projectConversation(session).items, []);
+});
+
 test('projection marks a consumed Steer user message without hiding it', () => {
   const now = new Date().toISOString();
   const runId = 'run-steer-projection';

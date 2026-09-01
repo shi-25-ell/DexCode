@@ -5,7 +5,7 @@
 ## 功能
 
 - **聊天驱动**：向 AI 下达自然语言编码指令，单 Agent Run 通过 ReAct 循环直接执行，不包含 Orchestrator 或多 Agent 调度
-- **智能文件编辑**：Agent 优先用 `patch_file` 做局部修改，仅在新建或整文件重写时使用 `write_file`；支持 `search_in_workspace` 先定位再修改
+- **智能文件编辑**：Agent 优先用严格的 `patch_file` 做局部修改，仅在新建或整文件重写时使用 `write_file`；通过 `find`、`ls`、`grep` 和 `list_workspace` 定位代码
 - **文件管理**：浏览、编辑、创建、重命名、删除工作区文件
 - **真实流式输出**：OpenAI-compatible SSE 会被解析为统一的文本、reasoning、tool call 和 terminal 事件，再通过有界 SSE 队列输出
 - **可恢复会话**：多会话独立隔离，持久化 Run ledger、终态报告、上下文清单和压缩 checkpoint
@@ -68,6 +68,12 @@ MCP、工具、Skill、白名单、项目知识均从统一 React 外壳进入�
 ```dotenv
 # 逗号分隔；移除注册项后，侧边栏和设置路由同时收口
 DEX_DISABLED_CAPABILITIES=project-knowledge
+
+# 命令工具默认使用 PowerShell；仅在 Git Bash 探测可用时选择 bash
+DEX_COMMAND_SHELL=powershell
+# 可选：显式指定可执行文件，启动时会探测版本，不可用则明确失败
+DEX_POWERSHELL_PATH=C:\Program Files\PowerShell\7\pwsh.exe
+DEX_GIT_BASH_PATH=C:\Program Files\Git\bin\bash.exe
 
 # 构建时替换品牌图标；缺省使用 public/dexcode-icon.png
 VITE_BRAND_ICON_URL=/my-brand.svg
