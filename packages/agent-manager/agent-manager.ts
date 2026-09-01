@@ -30,6 +30,7 @@ type ChildRunInput = {
 type Handle = { sessionId: string; agentId: string; agentRunId: string; abortController: AbortController; promise: Promise<StoredAgentRunResult> };
 
 const WRITE_TOOLS = new Set(['write_file', 'patch_file', 'run_command', 'restore_snapshot', 'create_snapshot']);
+const BUILTIN_AGENT_NAMES = new Set(['general-purpose', 'assistant', 'researcher', 'reviewer']);
 
 function isWriter(agent: AgentRecord): boolean {
   const allow = agent.definitionSnapshot.toolPolicy.allow ?? [];
@@ -106,7 +107,7 @@ export function createAgentManager(options: {
   store: AgentStore;
   definitions: AgentDefinitionRegistry;
   runChild(input: ChildRunInput): Promise<AgentRunResult>;
-  limits?: { maxConcurrentAgents?: number; maxAgentsPerSession?: number; maxDepth?: number; maxConcurrentSharedWriters?: number; maxOrchestrationOpsPerRun?: number; maxStalledOrchestrationOps?: number };
+  limits?: { maxConcurrentAgents?: number; maxAgentsPerSession?: number; maxAgentRecordsPerSession?: number; maxDepth?: number; maxConcurrentSharedWriters?: number; maxOrchestrationOpsPerRun?: number; maxStalledOrchestrationOps?: number };
 }): AgentOrchestrationPort & {
   list(sessionId: string): Promise<AgentTreeSnapshot | null>;
   detail(sessionId: string, agentId: string): Promise<{ agent: AgentRecord; runs: AgentRunRecord[]; messages: ChatMessage[]; tools: AgentToolRecord[] } | null>;
@@ -117,6 +118,7 @@ export function createAgentManager(options: {
   const limits = {
     maxConcurrentAgents: options.limits?.maxConcurrentAgents ?? 4,
     maxAgentsPerSession: options.limits?.maxAgentsPerSession ?? 8,
+    maxAgentRecordsPerSession: options.limits?.maxAgentRecordsPerSession ?? 64,
     maxDepth: options.limits?.maxDepth ?? 1,
     maxConcurrentSharedWriters: options.limits?.maxConcurrentSharedWriters ?? 1,
     maxOrchestrationOpsPerRun: options.limits?.maxOrchestrationOpsPerRun ?? 32,
@@ -189,7 +191,11 @@ export function createAgentManager(options: {
 
   const launch = (agent: AgentRecord, run: AgentRunRecord, initialMessages: ChatMessage[]): Handle => {
     const abortController = new AbortController();
-    const maxRunDurationMs = agent.definitionSnapshot.budget.maxRunDurationMs;
+    const currentBuiltin = BUILTIN_AGENT_NAMES.has(agent.definitionName) ? options.definitions.resolve(agent.definitionName)?.definition : undefined;
+    const effectiveAgent = currentBuiltin
+      ? { ...agent, definitionSnapshot: { ...agent.definitionSnapshot, budget: { ...agent.definitionSnapshot.budget, ...currentBuiltin.budget } } }
+      : agent;
+    const maxRunDurationMs = effectiveAgent.definitionSnapshot.budget.maxRunDurationMs;
     const durationTimer = maxRunDurationMs === undefined ? undefined : setTimeout(() => {
       abortController.abort(`Agent Run exceeded maxRunDurationMs (${maxRunDurationMs})`);
     }, maxRunDurationMs);
@@ -214,7 +220,7 @@ export function createAgentManager(options: {
     const promise = (async () => {
       let result: StoredAgentRunResult;
       try {
-        result = storedResult(await options.runChild({ sessionId: agent.sessionId, agent, run, messages: initialMessages, persistenceHooks, signal: abortController.signal }));
+        result = storedResult(await options.runChild({ sessionId: agent.sessionId, agent: effectiveAgent, run, messages: initialMessages, persistenceHooks, signal: abortController.signal }));
       } catch (error) {
         result = {
           status: abortController.signal.aborted ? 'interrupted' : 'failed',
@@ -248,7 +254,8 @@ export function createAgentManager(options: {
     const existing = await loadTree(caller.sessionId);
     const replay = existing?.operations[`${caller.callerRunId}:${caller.toolCallId}`];
     if (replay?.agentRunId) return { agent_id: replay.agentId, agent_run_id: replay.agentRunId, status: 'running', replayed: true };
-    if ((existing?.agents.length ?? 0) >= limits.maxAgentsPerSession) throw new AgentManagerError('capacity_exceeded', 'Session child-agent capacity is exhausted');
+    if ((existing?.agents.filter((item) => item.createdByRunId === caller.callerRunId).length ?? 0) >= limits.maxAgentsPerSession) throw new AgentManagerError('capacity_exceeded', 'Main Run child-agent capacity is exhausted');
+    if ((existing?.agents.length ?? 0) >= limits.maxAgentRecordsPerSession) throw new AgentManagerError('history_capacity_exceeded', 'Session child-agent history capacity is exhausted');
     if (handles.size >= limits.maxConcurrentAgents) throw new AgentManagerError('capacity_exceeded', 'Concurrent child-agent capacity is exhausted');
     const requestedDefinition = input.agent?.trim() || DEFAULT_AGENT_DEFINITION_NAME;
     const resolved = options.definitions.resolve(requestedDefinition);

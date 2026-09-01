@@ -237,3 +237,39 @@ test('session stop is durable, consumes terminal notifications and requires an e
     assert.equal((await manager.list(sessionId))?.control.halted, false);
   } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }); }
 });
+
+test('historical built-in Agents inherit current safety budgets on follow-up', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dexcode-agent-budget-upgrade-'));
+  const sessionId = 'session-budget-upgrade';
+  const store = createAgentStore({ sessionsDir: root });
+  const definitions = createAgentDefinitionRegistry();
+  const { agent, run } = records(sessionId);
+  agent.definitionSnapshot.budget = { maxModelTurns: 200, maxRetriesPerTurn: 1, maxOutputTokens: 16_384, maxResultBytes: 64 * 1024 };
+  let observedBudget: AgentRecord['definitionSnapshot']['budget'] | undefined;
+  const runChild = async (input: Parameters<Parameters<typeof createAgentManager>[0]['runChild']>[0]): Promise<AgentRunResult> => {
+    observedBudget = input.agent.definitionSnapshot.budget;
+    const now = new Date().toISOString();
+    return {
+      runId: input.run.agentRunId, parentRunId: input.run.invokedByRunId, profile: 'child', origin: 'orchestrated', status: 'completed', terminationReason: 'natural_completion', finalContent: 'done',
+      messages: [], modelTurnCount: 1, modelAttemptCount: 1, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, unknown: 0 }, toolsUsed: [], filesModified: [], fileChanges: [], skillsUsed: [],
+      contextSummaryUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, contextRefreshWarnings: [], runtimeWarnings: [], startedAt: now, completedAt: now, durationMs: 1,
+    };
+  };
+  try {
+    await store.createAgentRun(sessionId, agent, run, 'main-1:spawn-old');
+    const completedAt = new Date().toISOString();
+    await store.append(sessionId, [{
+      type: 'agent_run_terminal', agentId: agent.agentId, agentRunId: run.agentRunId, status: 'failed', completedAt,
+      result: { status: 'failed', terminationReason: 'model_failure', finalContent: '', toolsUsed: [], filesModified: [], error: { code: 'MODEL_TIMEOUT', message: 'old timeout' } },
+    }]);
+    const manager = createAgentManager({ enabled: true, store, definitions, runChild });
+    const caller = { sessionId, callerRunId: 'main-new', callerTurn: 1, toolCallId: 'followup-new', delegationGroupId: 'group-new', forkSnapshot: [] };
+    await manager.followup({ agentId: agent.agentId, task: 'retry safely' }, caller);
+    await manager.wait({ agentIds: [agent.agentId], block: true, timeoutMs: 1_000 }, { ...caller, toolCallId: 'wait-new' });
+    assert.equal(observedBudget?.maxModelTurns, 64);
+    assert.equal(observedBudget?.modelRequestTimeoutMs, 300_000);
+    assert.equal(observedBudget?.maxRunDurationMs, 900_000);
+    assert.equal(observedBudget?.maxTotalTokens, 1_500_000);
+    await manager.shutdown();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

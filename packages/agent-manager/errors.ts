@@ -3,6 +3,7 @@ export type AgentErrorCode =
   | 'not_found'
   | 'agent_busy'
   | 'capacity_exceeded'
+  | 'history_capacity_exceeded'
   | 'depth_exceeded'
   | 'definition_not_found'
   | 'context_mode_forbidden'
