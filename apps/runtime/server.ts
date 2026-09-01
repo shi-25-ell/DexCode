@@ -486,7 +486,11 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     stateDir,
   });
   await nextWorkspaceService.loadFromDisk();
-  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService, { approvalModeStore, shell: commandShellOptions });
+  const nextCodingToolHost = createCodingToolHost(nextWorkspaceService, {
+    approvalModeStore,
+    shell: commandShellOptions,
+    trustedReadRoots: [globalSkillsRoot],
+  });
   const nextContextManager = createContextManager(nextCodingToolHost);
   const nextSkillRegistry = createSkillRegistry({ workspaceRoot: workspace.canonicalRootPath, userSkillsRoot: globalSkillsRoot });
   await nextSkillRegistry.loadAll();

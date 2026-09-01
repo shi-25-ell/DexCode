@@ -1,5 +1,5 @@
 import { readFile, stat } from 'node:fs/promises';
-import { relative } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { toolFailure, type ToolResult } from '../shared/tool-result.ts';
 import { resolveWorkspacePath } from './directory-walker.ts';
 import { READ_FILE_LIMITS } from './tool-limits.ts';
@@ -36,7 +36,7 @@ function logicalLines(content: string): string[] {
 
 function pathFailure(path: string, error: unknown): ToolResult<never> {
   const message = error instanceof Error ? error.message : String(error);
-  if (/escapes the root|outside the root/i.test(message)) {
+  if (/escapes the root|outside (?:the )?(?:allowed read )?roots?/i.test(message)) {
     return toolFailure('blocked', 'PATH_OUTSIDE_WORKSPACE', message, { path });
   }
   if (/not found/i.test(message) || (error as { code?: string }).code === 'ENOENT') {
@@ -45,7 +45,31 @@ function pathFailure(path: string, error: unknown): ToolResult<never> {
   return toolFailure('failed', 'EXECUTION_FAILED', message, { path });
 }
 
-export async function readWorkspaceFile(root: string, input: ReadFileInput, signal?: AbortSignal): Promise<ReadFileResult> {
+function isWithinRoot(root: string, target: string): boolean {
+  const relation = relative(resolve(root), resolve(target));
+  return relation === '' || (!relation.startsWith('..') && !isAbsolute(relation));
+}
+
+async function resolveReadablePath(workspaceRoot: string, requested: string, trustedReadRoots: readonly string[]) {
+  const roots = isAbsolute(requested) ? [workspaceRoot, ...trustedReadRoots] : [workspaceRoot];
+  for (const root of roots) {
+    const lexical = resolve(root, requested);
+    if (!isWithinRoot(root, lexical)) continue;
+    return {
+      absolutePath: await resolveWorkspacePath(root, requested),
+      readRoot: root,
+      workspace: resolve(root) === resolve(workspaceRoot),
+    };
+  }
+  throw new Error('Path is outside the allowed read roots');
+}
+
+export async function readWorkspaceFile(
+  root: string,
+  input: ReadFileInput,
+  signal?: AbortSignal,
+  trustedReadRoots: readonly string[] = [],
+): Promise<ReadFileResult> {
   const cancelled = () => signal?.aborted
     ? toolFailure('cancelled', 'CANCELLED', 'read_file was cancelled', { path: input.path })
     : undefined;
@@ -58,8 +82,13 @@ export async function readWorkspaceFile(root: string, input: ReadFileInput, sign
     return toolFailure('invalid_arguments', 'INVALID_ARGUMENTS', `limit must be an integer between 1 and ${READ_FILE_LIMITS.maxLines}`, { path: input.path, limit: input.limit });
   }
   let absolutePath: string;
+  let displayPath: string;
   try {
-    absolutePath = await resolveWorkspacePath(root, input.path);
+    const resolved = await resolveReadablePath(root, input.path, trustedReadRoots);
+    absolutePath = resolved.absolutePath;
+    displayPath = resolved.workspace
+      ? relative(root, absolutePath).replace(/\\/g, '/')
+      : absolutePath.replace(/\\/g, '/');
     const pathCancellation = cancelled();
     if (pathCancellation) return pathCancellation;
     if (!(await stat(absolutePath)).isFile()) {
@@ -94,7 +123,7 @@ export async function readWorkspaceFile(root: string, input: ReadFileInput, sign
   }
   if (lines.length === 0) {
     return {
-      path: relative(root, absolutePath).replace(/\\/g, '/'),
+      path: displayPath,
       content: '',
       start_line: 1,
       end_line: 0,
@@ -138,7 +167,7 @@ export async function readWorkspaceFile(root: string, input: ReadFileInput, sign
         : 'requested_limit' as const
     : undefined;
   return {
-    path: relative(root, absolutePath).replace(/\\/g, '/'),
+    path: displayPath,
     content: selected.join('\n'),
     start_line: offset,
     end_line: endIndex,

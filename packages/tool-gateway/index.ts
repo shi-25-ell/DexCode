@@ -162,6 +162,7 @@ export function createCodingToolHost(
     approvalModeStore?: Pick<ApprovalModeStore, 'getMode'>;
     shell?: ShellResolverOptions;
     rg?: Omit<EnsureRgOptions, 'managedDir'> & { managedDir?: string };
+    trustedReadRoots?: readonly string[];
   } = {},
 ) {
   const whitelistStore = createCommandWhitelistStore(workspaceService.projectDir);
@@ -330,7 +331,7 @@ export function createCodingToolHost(
   }
 
   const readFileTool = wrapWithStats('read_file', runtimeToolSpecs.get('read_file')!.description,
-    (input: ReadFileInput, signal?: AbortSignal) => readWorkspaceFile(workspaceService.getRootDir(), input, signal));
+    (input: ReadFileInput, signal?: AbortSignal) => readWorkspaceFile(workspaceService.getRootDir(), input, signal, options.trustedReadRoots));
   const readFileHost = (path: string, options: Omit<ReadFileInput, 'path'> = {}, signal?: AbortSignal) => readFileTool({ path, ...options }, signal);
   const readFileForDiff = async (path: string) => {
     const rootDir = workspaceService.getRootDir();

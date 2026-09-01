@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -68,5 +68,29 @@ test('read_file returns coded failures for invalid offsets, binary data, and wor
     if (!cancelled.ok) assert.equal(cancelled.error.code, 'CANCELLED');
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('read_file permits absolute files under a trusted read-only root without widening workspace paths', async () => {
+  const temporary = await mkdtemp(join(tmpdir(), 'dex-read-trusted-'));
+  const workspaceRoot = join(temporary, 'workspace');
+  const trustedSkillsRoot = join(temporary, 'user', '.dexcode', 'skills');
+  const skillResource = join(trustedSkillsRoot, 'codebase-design', 'DESIGN-IT-TWICE.md');
+  const outsideFile = join(temporary, 'outside.txt');
+  try {
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(join(trustedSkillsRoot, 'codebase-design'), { recursive: true });
+    await writeFile(skillResource, 'trusted skill resource', 'utf8');
+    await writeFile(outsideFile, 'still blocked', 'utf8');
+
+    const trusted = await readWorkspaceFile(workspaceRoot, { path: skillResource }, undefined, [trustedSkillsRoot]);
+    assert.equal(normalizeToolResult(trusted).ok, true);
+    assert.equal('content' in trusted ? trusted.content : null, 'trusted skill resource');
+
+    const outside = normalizeToolResult(await readWorkspaceFile(workspaceRoot, { path: outsideFile }, undefined, [trustedSkillsRoot]));
+    assert.equal(outside.ok, false);
+    if (!outside.ok) assert.equal(outside.error.code, 'PATH_OUTSIDE_WORKSPACE');
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
   }
 });

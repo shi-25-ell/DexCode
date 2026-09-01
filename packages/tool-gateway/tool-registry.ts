@@ -37,6 +37,7 @@ const objectSchema = (
 });
 
 const pathProperty = { type: 'string', minLength: 1, description: '相对工作区根目录的路径' };
+const readPathProperty = { type: 'string', minLength: 1, description: '相对工作区根目录的路径，或 ~/.dexcode/skills 内文件的绝对路径' };
 
 const PATCH_INPUT_SCHEMA = {
   type: 'object',
@@ -96,9 +97,9 @@ export function codingToolSpecs(options: { shellDescription?: string } = {}): Co
     },
     {
       name: 'read_file',
-      description: `按行读取工作区文本文件的最新磁盘内容。offset 是从 1 开始的起始行，limit 是最多读取行数；默认和单次最多 ${READ_FILE_LIMITS.maxLines} 行，同时受 ${READ_FILE_LIMITS.maxBytes / 1024}KB 上限约束。结果截断时使用 next_offset 继续。修改已有文件前先读取。`,
+      description: `按行读取工作区或 ~/.dexcode/skills 内文本文件的最新磁盘内容；全局 Skill 文件可用绝对路径直接读取。offset 是从 1 开始的起始行，limit 是最多读取行数；默认和单次最多 ${READ_FILE_LIMITS.maxLines} 行，同时受 ${READ_FILE_LIMITS.maxBytes / 1024}KB 上限约束。结果截断时使用 next_offset 继续。修改已有文件前先读取。`,
       inputSchema: objectSchema({
-        path: pathProperty,
+        path: readPathProperty,
         offset: { type: 'integer', minimum: 1, description: '从 1 开始的起始行，默认 1' },
         limit: { type: 'integer', minimum: 1, maximum: READ_FILE_LIMITS.maxLines, description: `最多读取行数，默认且最大 ${READ_FILE_LIMITS.defaultLines}` },
       }, ['path']),

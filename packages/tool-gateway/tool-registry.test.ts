@@ -56,6 +56,7 @@ test('model-visible schemas and descriptions match the implemented read and sear
   assert.deepEqual(Object.keys(readProperties), ['path', 'offset', 'limit']);
   assert.equal(readProperties.offset?.minimum, 1);
   assert.equal(readProperties.limit?.maximum, READ_FILE_LIMITS.maxLines);
+  assert.match(String(readProperties.path?.description ?? ''), /\.dexcode\/skills/);
   assert.match(read?.description ?? '', /offset.*1/);
   assert.match(read?.description ?? '', new RegExp(String(READ_FILE_LIMITS.maxBytes / 1024)));
 
