@@ -29,6 +29,9 @@ describe('Subagent settings', () => {
     const fetchMock = renderPanel({ agents: [...builtins, custom], limit: 10, customLimit: 7, diagnostics: [] });
 
     expect(await screen.findByText('general-purpose')).toBeInTheDocument();
+    expect(document.querySelector('.subagent-grid')).toBeInTheDocument();
+    expect(document.querySelectorAll('.subagent-card')).toHaveLength(4);
+    expect(document.querySelectorAll('.subagent-avatar')).toHaveLength(4);
     expect(screen.queryByText('assistant')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'general-purpose：已启用' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'researcher：已启用' })).toBeInTheDocument();

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Pencil, Plus, Trash2 } from 'lucide-react';
+import { Bot, Pencil, Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { apiJson } from '../api';
 import { PanelHeader, SettingsDialog, SettingsFeedback, Toggle } from './settings-shared';
@@ -91,9 +91,13 @@ export function SubagentsPanel() {
       action={<><span className="settings-count">{count}/{limit}</span><button className="primary-button" onClick={openNew} disabled={atCapacity} title={atCapacity ? '已达到子智能体数量上限' : undefined}><Plus size={15} />新建子智能体</button></>}
     />
     <SettingsFeedback loading={query.isLoading} error={query.error ?? toggle.error ?? remove.error} empty={!query.isLoading && count === 0 ? '暂无子智能体' : undefined} />
-    <div className="settings-list">{query.data?.agents.map((agent) => <article className="settings-row subagent-row" key={agent.name}>
+    <div className="settings-list subagent-grid">{query.data?.agents.map((agent) => <article className="settings-row subagent-card" key={agent.name}>
       <div className="settings-row-main">
-        <div className="settings-row-title"><strong>{agent.name}</strong><span>{agent.source === 'builtin' ? '内置' : '自定义'}</span><span>{agent.enabled ? '已启用' : '已停用'}</span></div>
+        <div className="subagent-card-top">
+          <span className="subagent-avatar" aria-hidden="true"><Bot size={25} strokeWidth={1.8} /></span>
+          <div className="subagent-badges"><span>{agent.source === 'builtin' ? '内置' : '自定义'}</span><span>{agent.enabled ? '已启用' : '已停用'}</span></div>
+        </div>
+        <strong className="subagent-card-name" title={agent.name}>{agent.name}</strong>
         <p>{agent.description}</p>
         <div className="settings-meta">文件权限：{permissionLabel(agent.filePermission)} · 上下文：{contextLabel(agent.contextMode)}</div>
         <details className="subagent-instructions"><summary>查看子智能体指令</summary><pre>{agent.instructions}</pre></details>
