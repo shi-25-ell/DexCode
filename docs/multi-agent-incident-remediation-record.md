@@ -153,3 +153,51 @@ React 状态只保留必要的异步状态；按钮可见性、后台活跃状�
 - `cad4cd3`：长任务预算续租、每 Main Run 身份容量和历史上限。
 - `c5ce03d`：完成通知改为独立 Main Run，并跨 delegation group 有界合批。
 
+## 8. 等待期恢复与 Child 上下文压缩补充修复
+
+### 8.1 新发现的等待期竞态
+
+后续真实复跑发现，后台 Agent 通知已经能启动新的 Main Run，但页面仍可能把权威快照中的活动 Run 当成一次无法恢复的中断：
+
+1. 页面轮询得到 `state: running/waiting` 与 `activeRun` 时，旧的 hydrate 逻辑无条件生成“上次运行已中断”错误卡片。
+2. Agent 完成通知创建的 Main Run 没有原始浏览器请求作为订阅者；页面虽然能轮询到它，却没有接入它的 V2 事件流。
+3. 等待期间提交的 Steer 已进入持久化队列，但页面收不到 `user_message_committed`，只能等最终快照刷新后才看到消息。
+
+修复后，带有权威 `activeRun` 的运行中快照只恢复活动 Run 骨架，不再伪造中断；只有运行中快照缺少 `activeRun` 时才展示真实的恢复失败。Runtime 为现存 V2 Run 增加按 Run ID 订阅与 replay 接口，Web 检测到“后端有活动 Run、本地没有流”时自动接入，并继续使用同一套事件 reducer 处理消息、工具、终态和重连去重。后台通知 Run 不再因为浏览器连接关闭而被停止。
+
+### 8.2 Child 复用共享上下文引擎
+
+Child 原先显式使用 `isolated` 上下文策略，绕过 Main 的四层上下文整理。现在 Child 与 Main 共用同一个 Context Engine 和策略实现，但以独立的 `ContextOwner` 运行：
+
+- Main owner 为 Session；Child owner 为 Session + Agent ID。
+- manifest、provider usage、摘要与 artifact 生命周期都携带 owner，缓存只在同一 owner 内复用。
+- Session Repository 允许可信的 Child 上下文记录与活动 Main Run 并发追加，同时校验 Session 与 owner 一致性。
+- Conversation projection 排除 Agent-owned 上下文卡片与用量，避免给现有 Transcript 增加适配压力。
+- follow-up 继续使用同一 Agent owner，因此可以复用该 Child 已有的摘要与归档结果。
+
+该实现没有复制第二套 ReAct 或压缩循环，也没有改变 Main 的压缩策略。
+
+### 8.3 真实宽屏回归
+
+回归会话：`session-1b5e4806-c19b-4f30-bd05-b70e7e34ea39`。
+
+- 用户 Main Run `33d63681-934b-47da-9801-925d93ebc5ef` 真正并行创建 3 个 Child，没有身份增殖。
+- 三个 Child 运行期间，以 Steer 发送“这是等待期间的回归测试消息……”。消息发送后立即出现在 Transcript；在 50,313 ms 安全边界等待后提交，Main 在 Child 仍运行时确认收到并继续等待。
+- 三个 Child 全部自然完成后，通知触发新的后台 Main Run `3f5ed0e9-52f4-46a5-bd36-dfdfdea8d2b5`。页面自动接入其流并完整显示最终综合，没有出现“上次运行已中断”或恢复错误。
+- 回归产生 35 次 Agent-owned context prepare、35 次对应 provider usage；三个 owner 均保持隔离。其中 10 次实际触发 `large_tool_results` 层，把大型工具结果外置为 artifact 后继续运行。
+- 任务完成后刷新页面，等待期消息、确认回复和最终综合都能从持久化记录恢复。
+- 页面正常刷新会提前中止 Agent activity stream，避免把浏览器主动关闭连接记录成 `network error` 告警。
+- 浏览器 console 最终为 0 条 error/warning。只读命令适配失败与未配置 MCP 的连接失败保留在各自工具/服务诊断中，没有被错误升级成会话恢复失败。
+
+### 8.4 最终自动化验证
+
+- 后端测试：160/160 通过。
+- Web 测试：72/72 通过。
+- TypeScript 检查：通过。
+- Web 生产构建：通过。
+
+### 8.5 本轮提交
+
+- `209db09`：恢复活动 Run 骨架并接入后台 Main Run 事件流。
+- `efc1747`：Child 接入 owner 隔离的共享上下文压缩机制。
+- `c2af3df`：页面卸载时主动终止 Agent activity stream，消除正常刷新告警。
