@@ -47,7 +47,7 @@ DexCode 应新增一个独立的 `managed-memory` 深模块。它不是现有“
 
 | 术语 | 含义 |
 | --- | --- |
-| 项目知识（Project Knowledge） | 现有用户手动编辑的 `project-memory.md`。内容偏项目约定、架构说明、编码规范和人工维护的经验。 |
+| 项目知识（Project Knowledge） | 现有用户手动编辑的 `DEXCODE.md`。内容偏项目约定、架构说明、编码规范和人工维护的经验。 |
 | 自动记忆（Managed Memory） | 本文新增的 LLM-managed file memory。由 Agent 在对话中自主创建、更新、删除和召回。 |
 | 入口索引（Entrypoint） | 自动记忆目录中的 `MEMORY.md`。只包含主题文件链接和一句话 hook，不直接承载详细记忆。 |
 | 主题文件（Topic File） | 带 frontmatter 的 Markdown 文件，例如 `feedback_testing.md`、`project_release_context.md`。 |
@@ -64,19 +64,19 @@ DexCode 应新增一个独立的 `managed-memory` 深模块。它不是现有“
 | 维度 | 项目知识 | 自动记忆 |
 | --- | --- | --- |
 | 谁维护 | 用户手动编辑 | LLM 主动维护，用户可查看/关闭/删除 |
-| 当前文件 | `workspace-data/<workspaceId>/project-memory.md` | `workspace-data/<workspaceId>/managed-memory/**` |
+| 当前文件 | `workspace-data/<workspaceId>/DEXCODE.md` | `workspace-data/<workspaceId>/managed-memory/**` |
 | 典型内容 | 架构、规范、稳定说明 | 用户偏好、纠正与确认、非代码可推导的背景、外部信息指针 |
-| Context source | `projectMemory` | 新增 `managedMemory` |
+| Context source | `projectKnowledge` | 新增 `managedMemory` |
 | 写入入口 | 现有 HTTP API / 设置页 | `memory_*` Agent 工具 + 独立诊断 API |
 | 检索 | 现有 Markdown 分段匹配 | `MEMORY.md` + frontmatter manifest + 模型选择器 |
 
 禁止事项：
 
-- 不把现有 `/api/project-memory` 改造成自动记忆接口。
-- 不让后台 Memory Agent 调用 `writeProjectMemory()` 或 `appendProjectMemory()`。
+- 不把现有 `/api/project-knowledge` 改造成自动记忆接口。
+- 不让后台 Memory Agent 调用 `writeProjectKnowledge()` 或 `appendProjectKnowledge()`。
 - 不在现有“项目知识”设置面板中偷偷加入自动写入。
 - 不把两者合并成同一个 `ContextSection`，否则无法单独计量、关闭和诊断。
-- 不迁移用户现有 `project-memory.md`；它保持原语义和原路径。
+- 不迁移用户现有 `DEXCODE.md`；它保持原语义和原路径。
 
 ---
 
@@ -124,8 +124,8 @@ DexCode 应新增一个独立的 `managed-memory` 深模块。它不是现有“
 5. 没有 Recall selector、相关记忆注入、去重、大小限制和陈旧性提示。
 6. 没有 Run 结束后的后台 Extraction、直接写入互斥、游标、合并运行与退出 drain。
 7. 没有跨会话 Consolidation。
-8. `ContextSection.source` 和 `ContextBreakdown` 只有 `projectMemory`，无法区分自动记忆。
-9. 现有 `project-memory.md` 写入不是本系统的事务基础，不能直接扩展来承载并发 LLM 写入。
+8. `ContextSection.source` 和 `ContextBreakdown` 只有 `projectKnowledge`，无法区分自动记忆。
+9. 现有 `DEXCODE.md` 写入不是本系统的事务基础，不能直接扩展来承载并发 LLM 写入。
 10. Runtime Server 当前没有统一的后台记忆任务关闭与排空流程。
 
 ---
@@ -349,7 +349,7 @@ export interface ManagedMemorySystem {
   drain(input?: { timeoutMs?: number }): Promise<ManagedMemoryDrainResult>;
   inspect(workspaceId: string): Promise<ManagedMemorySnapshot>;
   updateSettings(workspaceId: string, patch: ManagedMemorySettingsPatch): Promise<ManagedMemorySettings>;
-  clearProjectMemory(workspaceId: string, input: ClearProjectMemoryInput): Promise<ClearProjectMemoryResult>;
+  clearManagedMemory(workspaceId: string, input: ClearManagedMemoryInput): Promise<ClearManagedMemoryResult>;
 }
 ```
 
@@ -991,7 +991,7 @@ workspace mutation lock
 export type ContextSectionSource =
   | 'systemPrompt'
   | 'workspaceCode'
-  | 'projectMemory'
+  | 'projectKnowledge'
   | 'managedMemory';
 
 export type ContextBreakdown = {
@@ -999,7 +999,7 @@ export type ContextBreakdown = {
   workspaceCode: number;
   recentConversation: number;
   toolResults: number;
-  projectMemory: number;
+  projectKnowledge: number;
   managedMemory: number;
   toolDefinitions: number;
   other: number;
@@ -1146,10 +1146,10 @@ POST   /api/managed-memory/rebuild-index
 - general scope 返回 `WORKSPACE_REQUIRED`。
 - 读取接口不创建 Session，不影响 lazy materialization。
 - GET 可以确保 memory 目录存在，但不能创建 conversation。
-- `DELETE /api/managed-memory` 是“清空项目记忆”的唯一管理入口，必须由前端用户明确触发并携带二次确认 token；模型工具不能调用。
+- `DELETE /api/managed-memory` 是“清空记忆”的唯一管理入口，必须由前端用户明确触发并携带二次确认 token；模型工具不能调用。
 - 清空操作先阻止新的 Recall/Extraction/Consolidation 调度，Abort 并排空该 Workspace 已排队的后台记忆任务，再取得 mutation lock；随后删除 `MEMORY.md`、全部 topic、checkpoint、consolidation state 和不再有效的审计派生状态，最后创建空索引。
 - 清空必须递增 Workspace memory generation。清空前启动、清空后才返回的旧后台任务因 generation 不匹配而禁止提交，避免记忆刚被用户清空又被旧任务写回来。
-- 清空保留 `settings.json`，因此不会擅自改变“启用项目记忆”开关；返回删除文件数、释放字节数和新的 generation，不返回被删除正文。
+- 清空保留 `settings.json`，因此不会擅自改变“启用记忆”开关；返回删除文件数、释放字节数和新的 generation，不返回被删除正文。
 - 手动 consolidate 返回后台 task 状态，不占用当前 Main Run。
 - API 返回相对路径；绝对状态目录只在本机诊断字段且默认不下发。
 
@@ -1169,27 +1169,27 @@ POST   /api/managed-memory/rebuild-index
 
 卡片名称必须是“记忆”，不能叫“自动记忆”或“项目知识”。点击后进入独立的“记忆”页面；页面沿用 DexCode 现有设置页的容器、字号、间距、开关和危险按钮样式，不照搬其他产品的布局。
 
-当前页面只呈现“项目记忆”模块。模块至少包含以下两项：
+当前页面只呈现“自动记忆”模块。模块至少包含以下两项：
 
-#### 16.3.1 启用项目记忆
+#### 16.3.1 启用记忆
 
-- 行标题固定为“启用项目记忆”。
+- 行标题固定为“启用记忆”。
 - 说明文案建议为：“允许 Agent 为当前项目自动收集、更新和使用记忆。”
 - 右侧使用现有 Switch 组件，状态来自当前 Workspace 的 `ManagedMemorySettings.enabled`。
 - 切换开关调用 `PUT /api/managed-memory/settings`，只修改 `enabled`；保存期间显示 pending 状态并防止重复提交，失败则恢复原状态并显示可操作错误。
-- 关闭后立即停止新 Run 的 Recall、记忆工具注入、Extraction 和 Consolidation，但保留磁盘上的项目记忆；已经开始的后台任务必须 Abort 或在提交时因 generation/settings 校验而放弃写入。
-- 再次开启后从保留的项目记忆继续工作，不自动重建、不清空、不创建 Conversation。
+- 关闭后立即停止新 Run 的 Recall、记忆工具注入、Extraction 和 Consolidation，但保留磁盘上的自动记忆；已经开始的后台任务必须 Abort 或在提交时因 generation/settings 校验而放弃写入。
+- 再次开启后从保留的自动记忆继续工作，不自动重建、不清空、不创建 Conversation。
 
-`extractionEnabled`、`recallEnabled`、`consolidationEnabled` 等细粒度字段保留为后端灰度和诊断配置，不在普通页面拆成多个用户开关。对用户而言，“启用项目记忆”必须是一个语义完整的总开关。
+`extractionEnabled`、`recallEnabled`、`consolidationEnabled` 等细粒度字段保留为后端灰度和诊断配置，不在普通页面拆成多个用户开关。对用户而言，“启用记忆”必须是一个语义完整的总开关。
 
-#### 16.3.2 清空项目记忆
+#### 16.3.2 清空记忆
 
-- 行标题固定为“清空项目记忆”，说明当前操作会清除 Agent 为这个项目保存的全部记忆。
+- 行标题固定为“清空记忆”，说明当前操作会清除 Agent 为这个项目保存的全部记忆。
 - 右侧使用现有危险操作按钮，按钮文案为“清空”。
 - 点击后必须出现二次确认对话框，明确显示当前项目名称，并说明该操作不可撤销、不会删除对话记录、不会修改手动维护的“项目知识”。
 - 确认后调用 `DELETE /api/managed-memory`；执行期间禁用开关和清空按钮，成功后显示清空结果并刷新状态，失败时不能在 UI 中伪报已清空。
 - 清空只针对当前稳定 `workspaceId`，后端不得接受前端传入任意目录或跨 Workspace 清理。
-- 即使“启用项目记忆”处于关闭状态，用户仍可清空已经保留的项目记忆。
+- 即使“启用记忆”处于关闭状态，用户仍可清空已经保留的自动记忆。
 
 #### 16.3.3 页面状态
 
@@ -1199,7 +1199,7 @@ POST   /api/managed-memory/rebuild-index
 - 页面读取设置和状态不能创建 Session，也不能触发 Recall、Extraction 或 Consolidation。
 - 当前版本不把 topic 文件列表、单条删除、“立即整理”“重建索引”和内部运行诊断放进普通用户页面；这些信息保留在日志、telemetry 和开发诊断接口中，避免把 LLM-managed memory 重新做成手动知识编辑器。
 
-不要把项目记忆页面做成第二个大 textarea，也不要允许用户直接编辑 `MEMORY.md` 或 topic 文件；用户控制面只有启用/关闭和整体清空，记忆正文仍由 LLM 管理。
+不要把自动记忆页面做成第二个大 textarea，也不要允许用户直接编辑 `MEMORY.md` 或 topic 文件；用户控制面只有启用/关闭和整体清空，记忆正文仍由 LLM 管理。
 
 ---
 
@@ -1277,7 +1277,7 @@ POST   /api/managed-memory/rebuild-index
 | `packages/session-store/journal-*` | 若 refs 使用新 ledger record，补 codec/reducer/schema/recovery。 |
 | `apps/runtime/server.ts` | 为每个 Workspace 创建 ManagedMemorySystem；新增 API；接 shutdown drain。 |
 | `packages/capability-registry/index.ts` | 在能力中心增加“记忆”卡片，路由到独立记忆页面。 |
-| `apps/web/src/settings/memory-panel.tsx` | 新增“记忆”页面及“启用项目记忆”“清空项目记忆”控制。 |
+| `apps/web/src/settings/memory-panel.tsx` | 新增“记忆”页面及“启用记忆”“清空记忆”控制。 |
 | `apps/web/src/settings/types.ts` | 新增 API 类型。 |
 | `apps/web/src/conversation/context-card.tsx` | 显示“自动记忆” token breakdown。 |
 | `apps/web/src/api.ts` | 如有需要，补 DELETE/路径编码辅助。 |
@@ -1430,16 +1430,16 @@ POST   /api/managed-memory/rebuild-index
 任务：
 
 1. 在能力中心新增“记忆”卡片，并接入 `/settings/memory` 独立页面。
-2. 新增 `memory-panel.tsx`，实现“启用项目记忆”总开关。
-3. 实现 `DELETE /api/managed-memory`、二次确认和“清空项目记忆”危险操作。
+2. 新增 `memory-panel.tsx`，实现“启用记忆”总开关。
+3. 实现 `DELETE /api/managed-memory`、二次确认和“清空记忆”危险操作。
 4. 清空链路补齐后台任务 Abort、mutation lock、generation fence、空索引恢复和结果刷新。
-5. 明确区分项目记忆与现有项目知识；页面不提供正文编辑能力。
+5. 明确区分自动记忆与现有项目知识；页面不提供正文编辑能力。
 6. 补 API、React 组件和交互测试。
 
 完成门槛：
 
 - 用户能从能力中心的“记忆”卡片进入页面。
-- 用户可以关闭项目记忆且已有文件不被删除，再次开启后可以继续使用。
+- 用户可以关闭自动记忆且已有文件不被删除，再次开启后可以继续使用。
 - 用户可以通过二次确认清空当前项目的全部记忆；旧后台任务不会在清空后重新写回。
 - GET 设置页不会创建 Session。
 - 页面不复用项目知识 textarea，不暴露内部 topic 编辑器，并保持 DexCode 现有视觉结构。
@@ -1457,7 +1457,7 @@ POST   /api/managed-memory/rebuild-index
 完成门槛：
 
 - 切到 `off` 并重启后，系统完全回到无自动记忆行为，已有文件仍可恢复。
-- `project-memory.md` 行为与 API 无回归。
+- `DEXCODE.md` 行为与 API 无回归。
 - 所有核心链路测试、lint、Web 测试和 dev smoke 通过。
 
 ---
@@ -1595,8 +1595,8 @@ POST   /api/managed-memory/rebuild-index
 12. 达到阈值后 Consolidation 能合并、纠错、删除和重建索引，并有互斥锁。
 13. `four_layer` 与 `legacy` 都保持相同记忆语义。
 14. Context evidence 能指出本 Run 实际使用的 topic path、digest、mtime 和截断状态。
-15. 能力中心存在“记忆”卡片并可进入独立页面；页面明确提供“启用项目记忆”总开关和“清空项目记忆”危险操作。
-16. 关闭项目记忆会停止 Recall、工具注入和后台写入但保留文件；清空仅作用于当前 Workspace，经过二次确认且不会被旧后台任务写回。
+15. 能力中心存在“记忆”卡片并可进入独立页面；页面明确提供“启用记忆”总开关和“清空记忆”危险操作。
+16. 关闭自动记忆会停止 Recall、工具注入和后台写入但保留文件；清空仅作用于当前 Workspace，经过二次确认且不会被旧后台任务写回。
 17. 日志与 telemetry 不泄漏记忆正文或敏感数据。
 18. 以下命令全部通过：
 

@@ -386,7 +386,7 @@ opaque reference 可以出现在 URL，但页面不得把 URL 片段显示成标
 | Skill | 查看、导入、启停 Skill | U3 先链接现有 `/skills.html`，U5 再迁入 React 路由 |
 | 白名单 | 管理命令执行白名单 | U3 先链接现有 `/whitelist.html`，U5 再迁入 React 路由 |
 | 快照 | 创建、查看和恢复工作区快照 | U3 先链接现有 `/snapshots.html`，U5 再迁入 React 路由 |
-| 项目知识 | 查看和编辑项目知识 | U3 先链接现有 `/project-memory.html`，U5 再迁入 React 路由 |
+| 项目知识 | 查看和编辑项目知识 | U3 先链接现有 `/settings/project-knowledge`，U5 再迁入 React 路由 |
 
 功能约束：
 

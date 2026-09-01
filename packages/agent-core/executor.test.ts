@@ -85,7 +85,7 @@ function toolHost(timeline: string[] = []) {
 }
 
 function prepared(input: PrepareContextInput): PreparedContext {
-  const breakdown = { systemPrompt: 2, workspaceCode: 0, recentConversation: 3, toolResults: 0, projectMemory: 0, managedMemory: 0, toolDefinitions: 1, other: 1 };
+  const breakdown = { systemPrompt: 2, workspaceCode: 0, recentConversation: 3, toolResults: 0, projectKnowledge: 0, managedMemory: 0, toolDefinitions: 1, other: 1 };
   return {
     messages: [{ role: 'system', content: 'system' }, ...input.canonicalMessages],
     manifest: {

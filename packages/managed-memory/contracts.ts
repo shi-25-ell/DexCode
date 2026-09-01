@@ -195,8 +195,8 @@ export type ManagedMemorySnapshot = {
   };
 };
 
-export type ClearProjectMemoryInput = { confirmationToken: string };
-export type ClearProjectMemoryResult = { deletedFiles: number; releasedBytes: number; generation: number };
+export type ClearManagedMemoryInput = { confirmationToken: string };
+export type ClearManagedMemoryResult = { deletedFiles: number; releasedBytes: number; generation: number };
 export type ManagedMemoryDrainResult = { completed: boolean; aborted: number; pending: number };
 
 export type MemorySelectionInput = {
@@ -230,5 +230,5 @@ export interface ManagedMemorySystem {
   drain(input?: { timeoutMs?: number }): Promise<ManagedMemoryDrainResult>;
   inspect(workspaceId: string): Promise<ManagedMemorySnapshot>;
   updateSettings(workspaceId: string, patch: ManagedMemorySettingsPatch): Promise<ManagedMemorySettings>;
-  clearProjectMemory(workspaceId: string, input: ClearProjectMemoryInput): Promise<ClearProjectMemoryResult>;
+  clearManagedMemory(workspaceId: string, input: ClearManagedMemoryInput): Promise<ClearManagedMemoryResult>;
 }

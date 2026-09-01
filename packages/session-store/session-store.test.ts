@@ -90,7 +90,7 @@ test('Session repository records a user-visible compaction only when a new summa
     const session = await repository.createSession();
     const runId = crypto.randomUUID();
     const now = new Date().toISOString();
-    const breakdown = { systemPrompt: 2, workspaceCode: 0, recentConversation: 3, toolResults: 0, projectMemory: 0, managedMemory: 0, toolDefinitions: 1, other: 1 };
+    const breakdown = { systemPrompt: 2, workspaceCode: 0, recentConversation: 3, toolResults: 0, projectKnowledge: 0, managedMemory: 0, toolDefinitions: 1, other: 1 };
     const activity = {
       operationRef: 'context-cheap',
       layers: ['middle_archive'] as const,
@@ -334,14 +334,36 @@ test('Session repository rejects a Run whose workspace differs from its Session 
   }
 });
 
-test('project memory is isolated by workspace identity', async () => {
+test('project knowledge is isolated by workspace identity', async () => {
   const repository = createSessionRepository({ projectId: `test-memory-scope-${crypto.randomUUID()}` });
   const projectDir = dirname(repository.sessionsDir);
   try {
-    await repository.writeProjectMemory('memory-a', 'workspace-a');
-    await repository.writeProjectMemory('memory-b', 'workspace-b');
-    assert.equal(await repository.readProjectMemory('workspace-a'), 'memory-a\n');
-    assert.equal(await repository.readProjectMemory('workspace-b'), 'memory-b\n');
+    const saved = await repository.writeProjectKnowledge('knowledge-a', 'workspace-a');
+    await repository.writeProjectKnowledge('knowledge-b', 'workspace-b');
+    assert.equal(saved.path, join(projectDir, 'workspace-data', 'workspace-a', 'DEXCODE.md'));
+    assert.equal(await repository.readProjectKnowledge('workspace-a'), 'knowledge-a\n');
+    assert.equal(await repository.readProjectKnowledge('workspace-b'), 'knowledge-b\n');
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('legacy project-memory.md migrates to DEXCODE.md without changing content', async () => {
+  const repository = createSessionRepository({ projectId: `test-project-knowledge-migration-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  const stateDir = join(projectDir, 'workspace-data', 'workspace-legacy');
+  const legacyPath = join(stateDir, 'project-memory.md');
+  const targetPath = join(stateDir, 'DEXCODE.md');
+  try {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(legacyPath, '# Existing project knowledge\n', 'utf8');
+
+    const result = await repository.getProjectKnowledge('workspace-legacy');
+
+    assert.equal(result.path, targetPath);
+    assert.equal(result.content, '# Existing project knowledge\n');
+    assert.equal(await readFile(targetPath, 'utf8'), '# Existing project knowledge\n');
+    await assert.rejects(() => readFile(legacyPath, 'utf8'), /ENOENT/);
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }

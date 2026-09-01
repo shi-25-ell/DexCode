@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { DEFAULT_PROJECT_ID } from '../shared/index.ts';
 import { conversationTitle } from '../conversation-view/title.ts';
@@ -8,6 +8,7 @@ import type {
   CompactionCheckpoint,
   ContextActivity,
   ContextArtifactRef,
+  ContextBreakdown,
   ContextManifest,
   ContextManifestV2,
   ContextOwner,
@@ -58,7 +59,8 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
   const sessionsDir = join(process.cwd(), 'workspaces', projectId, 'sessions');
   const filesystem = createJsonlFilesystem(sessionsDir);
   const currentFile = join(sessionsDir, 'current.json');
-  const memoryFile = join(projectDir, 'project-memory.md');
+  const projectKnowledgeFile = join(projectDir, 'DEXCODE.md');
+  const legacyProjectKnowledgeFile = join(projectDir, 'project-memory.md');
   const workspaceDataDir = join(projectDir, 'workspace-data');
   const locks = new Map<string, Promise<void>>();
   const activeRuns = new Set<string>();
@@ -68,7 +70,9 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
   let currentLock: Promise<void> = Promise.resolve();
   let materializationLock: Promise<void> = Promise.resolve();
 
-  const defaultProjectMemory = `# 项目记忆
+  const projectKnowledgeMigrationLocks = new Map<string, Promise<void>>();
+
+  const defaultProjectKnowledge = `# 项目知识
 
 ## 编码规范
 - 使用 TypeScript 严格模式
@@ -116,14 +120,69 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     throw new Error('Session has an invalid scope');
   }
 
+  function normalizeContextBreakdown(breakdown: ContextBreakdown): ContextBreakdown {
+    const legacy = breakdown as ContextBreakdown & { projectMemory?: number };
+    return {
+      systemPrompt: breakdown.systemPrompt ?? 0,
+      workspaceCode: breakdown.workspaceCode ?? 0,
+      recentConversation: breakdown.recentConversation ?? 0,
+      toolResults: breakdown.toolResults ?? 0,
+      projectKnowledge: breakdown.projectKnowledge ?? legacy.projectMemory ?? 0,
+      managedMemory: breakdown.managedMemory ?? 0,
+      toolDefinitions: breakdown.toolDefinitions ?? 0,
+      other: breakdown.other ?? 0,
+    };
+  }
+
+  function normalizeContextActivity(activity: ContextActivity): ContextActivity {
+    return {
+      ...activity,
+      beforeBreakdown: normalizeContextBreakdown(activity.beforeBreakdown),
+      afterBreakdown: normalizeContextBreakdown(activity.afterBreakdown),
+    };
+  }
+
+  function normalizeContextManifest(manifest: ContextManifest): ContextManifest {
+    if (manifest.version !== 2) return manifest;
+    return {
+      ...manifest,
+      breakdown: normalizeContextBreakdown(manifest.breakdown),
+      ...(manifest.activity ? { activity: normalizeContextActivity(manifest.activity) } : {}),
+    };
+  }
+
+  function normalizeContextUsage(usage: ContextUsageSnapshot): ContextUsageSnapshot {
+    return usage.breakdown ? { ...usage, breakdown: normalizeContextBreakdown(usage.breakdown) } : usage;
+  }
+
+  function normalizeLedgerRecord(record: SessionLedgerRecord): SessionLedgerRecord {
+    if (record.type === 'context_committed') return { ...record, manifest: normalizeContextManifest(record.manifest) };
+    if (record.type === 'context_prepare_committed') return { ...record, manifest: normalizeContextManifest(record.manifest) as ContextManifestV2 };
+    if (record.type === 'context_compaction_completed') {
+      return {
+        ...record,
+        presentation: record.presentation.breakdown
+          ? { ...record.presentation, breakdown: normalizeContextBreakdown(record.presentation.breakdown) }
+          : record.presentation,
+      };
+    }
+    if (record.type === 'context_usage_observed') return { ...record, usage: normalizeContextUsage(record.usage) };
+    if (record.type === 'run_terminal' && record.report.latestContextUsage) {
+      return { ...record, report: { ...record.report, latestContextUsage: normalizeContextUsage(record.report.latestContextUsage) } };
+    }
+    return record;
+  }
+
   function normalized(session: Session): Session {
     return {
       ...session,
       scope: normalizeScope(session.scope),
       revision: session.revision ?? 0,
-      ledger: session.ledger ?? [],
-      runReports: session.runReports ?? [],
-      contextManifests: session.contextManifests ?? [],
+      ledger: (session.ledger ?? []).map(normalizeLedgerRecord),
+      runReports: (session.runReports ?? []).map((report) => report.latestContextUsage
+        ? { ...report, latestContextUsage: normalizeContextUsage(report.latestContextUsage) }
+        : report),
+      contextManifests: (session.contextManifests ?? []).map(normalizeContextManifest),
       compactionCheckpoints: session.compactionCheckpoints ?? [],
       contextSummaries: session.contextSummaries ?? [],
       contextArtifacts: session.contextArtifacts ?? [],
@@ -163,10 +222,43 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return item;
   }
 
-  function memoryPath(workspaceId?: string): string {
-    if (!workspaceId) return memoryFile;
+  function projectKnowledgePath(workspaceId?: string): string {
+    if (!workspaceId) return projectKnowledgeFile;
+    if (!/^workspace-[a-zA-Z0-9-]+$/.test(workspaceId)) throw new Error('Invalid workspace id');
+    return join(workspaceDataDir, workspaceId, 'DEXCODE.md');
+  }
+
+  function legacyProjectKnowledgePath(workspaceId?: string): string {
+    if (!workspaceId) return legacyProjectKnowledgeFile;
     if (!/^workspace-[a-zA-Z0-9-]+$/.test(workspaceId)) throw new Error('Invalid workspace id');
     return join(workspaceDataDir, workspaceId, 'project-memory.md');
+  }
+
+  async function ensureProjectKnowledgeMigrated(workspaceId?: string): Promise<void> {
+    const target = projectKnowledgePath(workspaceId);
+    const legacy = legacyProjectKnowledgePath(workspaceId);
+    const key = workspaceId ?? 'project';
+    const previous = projectKnowledgeMigrationLocks.get(key) ?? Promise.resolve();
+    const migration = previous.then(async () => {
+      try {
+        await access(target);
+        return;
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'ENOENT') throw error;
+      }
+      try {
+        await mkdir(dirname(target), { recursive: true });
+        await rename(legacy, target);
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'ENOENT') throw error;
+      }
+    });
+    projectKnowledgeMigrationLocks.set(key, migration);
+    try {
+      await migration;
+    } finally {
+      if (projectKnowledgeMigrationLocks.get(key) === migration) projectKnowledgeMigrationLocks.delete(key);
+    }
   }
 
   async function withSessionLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
@@ -1322,35 +1414,40 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function readProjectMemory(workspaceId?: string): Promise<string> {
+  async function readProjectKnowledge(workspaceId?: string): Promise<string> {
+    await ensureProjectKnowledgeMigrated(workspaceId);
     try {
-      return await readFile(memoryPath(workspaceId), 'utf8');
-    } catch {
+      return await readFile(projectKnowledgePath(workspaceId), 'utf8');
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT') throw error;
       return '';
     }
   }
 
-  async function getProjectMemory(workspaceId?: string): Promise<{ content: string; path: string; exists: boolean; template: string }> {
-    const target = memoryPath(workspaceId);
+  async function getProjectKnowledge(workspaceId?: string): Promise<{ content: string; path: string; exists: boolean; template: string }> {
+    await ensureProjectKnowledgeMigrated(workspaceId);
+    const target = projectKnowledgePath(workspaceId);
     try {
       return {
         content: await readFile(target, 'utf8'),
         path: target,
         exists: true,
-        template: defaultProjectMemory,
+        template: defaultProjectKnowledge,
       };
-    } catch {
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT') throw error;
       return {
         content: '',
         path: target,
         exists: false,
-        template: defaultProjectMemory,
+        template: defaultProjectKnowledge,
       };
     }
   }
 
-  async function writeProjectMemory(content: string, workspaceId?: string): Promise<{ content: string; path: string; updatedAt: string }> {
-    const target = memoryPath(workspaceId);
+  async function writeProjectKnowledge(content: string, workspaceId?: string): Promise<{ content: string; path: string; updatedAt: string }> {
+    await ensureProjectKnowledgeMigrated(workspaceId);
+    const target = projectKnowledgePath(workspaceId);
     await ensureProjectDir();
     await mkdir(dirname(target), { recursive: true });
     const normalized = content.replace(/\r\n/g, '\n').trimEnd();
@@ -1359,11 +1456,11 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return { content: `${normalized}\n`, path: target, updatedAt };
   }
 
-  async function appendProjectMemory(entry: string, section = 'Agent 任务经验', workspaceId?: string): Promise<{ content: string; path: string; updatedAt: string }> {
+  async function appendProjectKnowledge(entry: string, section = 'Agent 任务经验', workspaceId?: string): Promise<{ content: string; path: string; updatedAt: string }> {
     const trimmed = entry.trim();
-    if (!trimmed) throw new Error('Project memory entry is empty');
+    if (!trimmed) throw new Error('Project knowledge entry is empty');
 
-    const current = (await readProjectMemory(workspaceId)).trimEnd() || defaultProjectMemory.trimEnd();
+    const current = (await readProjectKnowledge(workspaceId)).trimEnd() || defaultProjectKnowledge.trimEnd();
     const heading = `## ${section}`;
     const datedEntry = `- ${new Date().toISOString().slice(0, 10)}: ${trimmed.replace(/\s+/g, ' ')}`;
     const escaped = section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1372,7 +1469,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       ? current.replace(sectionPattern, `$1\n${datedEntry}`)
       : `${current}\n\n${heading}\n${datedEntry}`;
 
-    return writeProjectMemory(next, workspaceId);
+    return writeProjectKnowledge(next, workspaceId);
   }
 
   async function listSessions(scope?: SessionScope): Promise<Array<{
@@ -1502,10 +1599,10 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     requeueSteers,
     setQueuePaused,
     finishRun,
-    readProjectMemory,
-    getProjectMemory,
-    writeProjectMemory,
-    appendProjectMemory,
+    readProjectKnowledge,
+    getProjectKnowledge,
+    writeProjectKnowledge,
+    appendProjectKnowledge,
     listSessions,
     switchSession,
     deleteSession,

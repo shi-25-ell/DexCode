@@ -5,7 +5,7 @@ type WorkspaceSummary = {
   selectedFile: string | null;
   selectedFileContent: WorkspaceFile | null;
   workspaceSummary: string;
-  projectMemorySummary: string;
+  projectKnowledgeSummary: string;
   contextBudget: {
     maxFiles: number;
     maxChars: number;
@@ -15,7 +15,7 @@ type WorkspaceSummary = {
 };
 
 type BuildForPromptOptions = {
-  projectMemory?: string;
+  projectKnowledge?: string;
 };
 
 type TaskComplexity = 'simple' | 'medium' | 'complex';
@@ -221,7 +221,7 @@ function splitMemorySections(memory: string): Array<{ title: string; body: strin
       current = { title: heading[2].trim(), body: [] };
       continue;
     }
-    if (!current) current = { title: 'Project Memory', body: [] };
+    if (!current) current = { title: 'Project Knowledge', body: [] };
     current.body.push(line);
   }
 
@@ -231,8 +231,8 @@ function splitMemorySections(memory: string): Array<{ title: string; body: strin
     .filter((section) => section.title || section.body);
 }
 
-function retrieveProjectMemory(memory: string, promptTokens: string[], maxChars: number): string {
-  const normalized = memory.trim();
+function retrieveProjectKnowledge(knowledge: string, promptTokens: string[], maxChars: number): string {
+  const normalized = knowledge.trim();
   if (!normalized) return '';
   if (normalized.length <= Math.min(maxChars, 2000)) return normalized;
 
@@ -289,8 +289,8 @@ export function createContextManager(codingToolHost: {
         selectedFile,
         promptTokens,
       });
-      const projectMemorySummary = retrieveProjectMemory(
-        buildOptions.projectMemory ?? '',
+      const projectKnowledgeSummary = retrieveProjectKnowledge(
+        buildOptions.projectKnowledge ?? '',
         promptTokens,
         Math.max(1200, Math.round(budget.maxChars * 0.2)),
       );
@@ -300,7 +300,7 @@ export function createContextManager(codingToolHost: {
         selectedFile,
         selectedFileContent,
         workspaceSummary,
-        projectMemorySummary,
+        projectKnowledgeSummary,
         contextBudget: {
           maxFiles: budget.maxFiles,
           maxChars: budget.maxChars,
@@ -314,6 +314,6 @@ export function createContextManager(codingToolHost: {
 
 export const contextManagerInternals = {
   assessComplexity,
-  retrieveProjectMemory,
+  retrieveProjectKnowledge,
   tokenize,
 };

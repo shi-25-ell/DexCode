@@ -89,7 +89,7 @@ test('clear preserves settings, increments generation and removes topics', async
   try {
     await value.system.store.upsert(upsertInput('op-clear'));
     const before = await value.system.updateSettings('workspace-a', { enabled: false });
-    const result = await value.system.clearProjectMemory('workspace-a', { confirmationToken: 'CLEAR_MANAGED_MEMORY' });
+    const result = await value.system.clearManagedMemory('workspace-a', { confirmationToken: 'CLEAR_MANAGED_MEMORY' });
     assert.ok(result.generation > before.generation);
     assert.equal((await value.system.inspect('workspace-a')).settings.enabled, false);
     assert.equal((await value.system.store.scan('workspace-a')).length, 0);

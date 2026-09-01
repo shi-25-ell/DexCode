@@ -9,7 +9,7 @@
 - `executor` 负责 ReAct 循环和工具调用。
 - `tool-gateway` 提供读写文件、搜索、命令执行、版本快照等本地工具。
 - `mcp-server` 与 `mcp-client` 支持本地 MCP 暴露和外部 MCP 工具接入。
-- `session-store` 负责会话、任务摘要和项目记忆。
+- `session-store` 负责会话、任务摘要和项目知识。
 
 现有系统有工具系统和 MCP 能力，但还没有真正意义上的 Skill 系统。我们要实现的 Skill 系统不应是玩具级 prompt 片段管理，而应尽量接近 Claude Code、OpenAI Codex 等主流 AI coding 软件的 Skill 机制。
 

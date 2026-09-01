@@ -109,8 +109,8 @@ function successSummary(tool: string, result: unknown, status: ToolViewStatus): 
   if (tool === 'read_command_output') return String(objectValue(result).status ?? '') === 'background' ? '命令仍在后台运行' : '后台命令已结束';
   if (tool === 'stop_command') return '后台命令已停止';
   if (tool === 'activate_skill' || tool === 'read_skill') return '已加载能力说明';
-  if (tool === 'memory_upsert') return '项目记忆已更新';
-  if (tool === 'memory_remove') return '项目记忆已删除';
+  if (tool === 'memory_upsert') return '记忆已更新';
+  if (tool === 'memory_remove') return '记忆已删除';
   if (tool.startsWith('mcp__')) return '外部工具调用完成';
   return '执行完成';
 }

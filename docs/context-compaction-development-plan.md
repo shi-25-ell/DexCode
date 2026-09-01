@@ -24,7 +24,7 @@
 
 ```text
 runTask
-  -> context-builder 选择工作区代码和项目记忆
+  -> context-builder 选择工作区代码和项目知识
   -> projectHistory 在 Run 开始前裁剪一次历史
   -> Executor 创建 workingMessages
   -> while 循环反复调用模型、追加 assistant/tool 消息
@@ -38,7 +38,7 @@ runTask
 Web 输入框底部当前优先显示最近一次 provider 返回的 `inputTokens`。这个数字对“刚刚已经发送的那一次请求”是实测值，但存在两个语义问题：
 
 1. 它不能表示工具执行后、下一次请求发送前正在增长的上下文，会滞后一个模型调用。
-2. provider usage 缺失时，当前 fallback 使用历史 manifest 的估算，只统计历史消息，没有完整覆盖系统提示词、工作区代码、项目记忆、当前请求和工具定义。
+2. provider usage 缺失时，当前 fallback 使用历史 manifest 的估算，只统计历史消息，没有完整覆盖系统提示词、工作区代码、项目知识、当前请求和工具定义。
 
 本次改造必须先定义百分比的准确含义：
 
@@ -69,7 +69,7 @@ Web 输入框底部当前优先显示最近一次 provider 返回的 `inputToken
 
 - 根据当前 prompt 选择工作区文件。
 - 提取相关代码片段。
-- 选择项目记忆。
+- 选择项目知识。
 - 返回工作区上下文及其来源元数据。
 
 它不负责会话裁剪、工具结果外置、摘要调用或 provider token 预算。
@@ -355,7 +355,7 @@ targetTokens = hardLimit * targetRatio
 - `workspaceCode`：工作区文件摘要和代码片段。
 - `recentConversation`：user/assistant 普通文本与摘要后的近期对话。
 - `toolResults`：模型请求中的工具结果、预览和 artifact 引用。
-- `projectMemory`：按任务选出的项目记忆。
+- `projectKnowledge`：按任务选出的项目知识。
 - `toolDefinitions`：工具 schema、名称和描述。
 - `other`：消息包装及无法归类的协议开销。
 
@@ -484,7 +484,7 @@ type ContextUsage = {
 工作区代码       5.4k
 近期对话         4.8k
 工具结果         1.2k
-项目记忆         0.7k
+项目知识         0.7k
 工具定义与其他   1.1k
 
 本轮处理：

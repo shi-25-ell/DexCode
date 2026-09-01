@@ -3,7 +3,7 @@ import type { ContextSection } from '../context-engine/index.ts';
 import type { ChatMessage, ToolResultMessage } from '../shared/types.ts';
 import {
   DEFAULT_MANAGED_MEMORY_SETTINGS,
-  type ClearProjectMemoryInput,
+  type ClearManagedMemoryInput,
   type EnqueueMemoryExtractionInput,
   type InternalMemoryRunner,
   type ManagedMemoryDrainResult,
@@ -368,7 +368,7 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
     return settings;
   }
 
-  async function clearProjectMemory(workspaceId: string, input: ClearProjectMemoryInput) {
+  async function clearManagedMemory(workspaceId: string, input: ClearManagedMemoryInput) {
     if (input.confirmationToken !== 'CLEAR_MANAGED_MEMORY') throw new Error('Managed memory clear confirmation token is invalid');
     pendingBySession.clear();
     pendingConsolidation = false;
@@ -389,7 +389,7 @@ export function createManagedMemoryCoordinator(options: CoordinatorOptions) {
     drain,
     inspect,
     updateSettings,
-    clearProjectMemory,
+    clearManagedMemory,
     async executeTool(name: string, args: Record<string, unknown>, context: ManagedMemoryToolContext) {
       if (options.mode !== 'on') return { error: 'Managed memory writes are disabled by runtime mode', code: 'MEMORY_DISABLED' };
       return executeTool(name, args, context);

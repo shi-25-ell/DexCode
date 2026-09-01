@@ -55,7 +55,7 @@ export type ContextBreakdown = {
   workspaceCode: number;
   recentConversation: number;
   toolResults: number;
-  projectMemory: number;
+  projectKnowledge: number;
   managedMemory: number;
   toolDefinitions: number;
   other: number;

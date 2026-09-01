@@ -55,7 +55,7 @@ type PromptContext = {
   selectedFile: string | null;
   selectedFileContent: unknown;
   workspaceSummary: string;
-  projectMemorySummary?: string;
+  projectKnowledgeSummary?: string;
   contextBudget: {
     includedFiles: string[];
     maxChars: number;
@@ -68,7 +68,7 @@ type ContextManager = {
   buildForPrompt: (
     prompt: string,
     selectedFile?: string | null,
-    options?: { projectMemory?: string },
+    options?: { projectKnowledge?: string },
   ) => Promise<PromptContext>;
 };
 
@@ -92,7 +92,7 @@ function pairedMessages(messages: ChatMessage[]): ChatMessage[] {
 
 function buildSystemSections(
   context: PromptContext,
-  projectMemory: string,
+  projectKnowledge: string,
   taskSummaries: TaskSummary[],
   skillsBlock = '',
   scope: SessionScope = { kind: 'general' },
@@ -116,8 +116,8 @@ function buildSystemSections(
   if (scope.kind === 'workspace') {
     sections.push({ source: 'workspaceCode', content: `## Workspace Summary\n${context.workspaceSummary || '(empty workspace)'}` });
   }
-  const memory = context.projectMemorySummary?.trim() || projectMemory.trim();
-  if (memory) sections.push({ source: 'projectMemory', content: `## Project Memory\n${memory}` });
+  const knowledge = context.projectKnowledgeSummary?.trim() || projectKnowledge.trim();
+  if (knowledge) sections.push({ source: 'projectKnowledge', content: `## Project Knowledge\n${knowledge}` });
   const recent = taskSummaries.slice(-5);
   if (recent.length > 0) {
     const recentParts = ['## Recent Tasks'];
@@ -306,18 +306,18 @@ export function createCodingAgent(
     let result: AgentRunResult;
     let managedMemoryRefs: import('../shared/types.ts').ManagedMemoryContextRef[] = [];
     try {
-      const projectMemory = await sessionRepository.readProjectMemory(
+      const projectKnowledge = await sessionRepository.readProjectKnowledge(
         agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : undefined,
       );
       const [context, preparedMemory] = await Promise.all([
         agentEnvironment.scope.kind === 'workspace'
-          ? contextManager.buildForPrompt(userPrompt, selectedFile, { projectMemory })
+          ? contextManager.buildForPrompt(userPrompt, selectedFile, { projectKnowledge })
           : Promise.resolve({
             prompt: userPrompt,
             selectedFile: null,
             selectedFileContent: null,
             workspaceSummary: '',
-            projectMemorySummary: '',
+            projectKnowledgeSummary: '',
             contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
           }),
         agentEnvironment.scope.kind === 'workspace' && managedMemory
@@ -326,7 +326,7 @@ export function createCodingAgent(
       ]);
       const systemSections = [...buildSystemSections(
         context,
-        projectMemory,
+        projectKnowledge,
         session.taskSummaries,
         skillsBlock(effectiveSkillRegistry, userPrompt),
         agentEnvironment.scope,
@@ -380,13 +380,13 @@ export function createCodingAgent(
       const refreshDirective = async (directive: string) => {
         const [refreshedContext, refreshedMemory] = await Promise.all([
           agentEnvironment.scope.kind === 'workspace'
-            ? contextManager.buildForPrompt(directive, null, { projectMemory })
+            ? contextManager.buildForPrompt(directive, null, { projectKnowledge })
             : Promise.resolve({
                 prompt: directive,
                 selectedFile: null,
                 selectedFileContent: null,
                 workspaceSummary: '',
-                projectMemorySummary: '',
+                projectKnowledgeSummary: '',
                 contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
               }),
           agentEnvironment.scope.kind === 'workspace' && managedMemory
@@ -397,7 +397,7 @@ export function createCodingAgent(
         return {
           systemSections: [...buildSystemSections(
             refreshedContext,
-            projectMemory,
+            projectKnowledge,
             session.taskSummaries,
             skillsBlock(effectiveSkillRegistry, directive),
             agentEnvironment.scope,
@@ -546,7 +546,7 @@ export function createCodingAgent(
           selectedFile: null,
           selectedFileContent: null,
           workspaceSummary: '',
-          projectMemorySummary: '',
+          projectKnowledgeSummary: '',
           contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
         };
     const system: SystemMessage = {
@@ -585,15 +585,15 @@ export function createCodingAgent(
   }): Promise<AgentRunResult> {
     if (agentEnvironment.scope.kind !== 'workspace') throw new Error('Child Agents require a workspace');
     if (!sessionRepository) throw new Error('Child Agent persistence requires a Session repository');
-    const projectMemory = input.agent.definitionSnapshot.memoryPolicy.read
-      ? await sessionRepository.readProjectMemory(agentEnvironment.scope.workspaceId)
+    const projectKnowledge = input.agent.definitionSnapshot.memoryPolicy.read
+      ? await sessionRepository.readProjectKnowledge(agentEnvironment.scope.workspaceId)
       : '';
-    const context = await contextManager.buildForPrompt(input.run.input, null, { projectMemory });
+    const context = await contextManager.buildForPrompt(input.run.input, null, { projectKnowledge });
     const session = await sessionRepository.loadSession(input.sessionId);
     if (!session) throw new Error(`Session not found: ${input.sessionId}`);
     const sections: ContextSection[] = [
       { source: 'systemPrompt', content: `You are a DexCode child Agent named ${input.agent.name}.\n${input.agent.definitionSnapshot.systemPrompt}\nDo not ask for interactive approval. If an operation is blocked, report it and continue safely.` },
-      ...buildSystemSections(context, projectMemory, [], '', agentEnvironment.scope).slice(1),
+      ...buildSystemSections(context, projectKnowledge, [], '', agentEnvironment.scope).slice(1),
     ];
     const preparedMemory = managedMemory && input.agent.definitionSnapshot.memoryPolicy.read
       ? await managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId: input.sessionId, contextOwnerId: `agent:${input.agent.agentId}`, runId: input.run.agentRunId, query: input.run.input, signal: input.signal })

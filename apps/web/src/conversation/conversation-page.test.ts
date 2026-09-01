@@ -192,13 +192,13 @@ describe('conversation presentation', () => {
     }
 
     rerender(createElement(ToolCard, { tool: {
-      callRef: 'memory-remove', toolName: 'memory_remove', category: 'memory', name: '删除记忆', target: 'obsolete.md', status: 'succeeded', summary: '项目记忆已删除',
+      callRef: 'memory-remove', toolName: 'memory_remove', category: 'memory', name: '删除记忆', target: 'obsolete.md', status: 'succeeded', summary: '记忆已删除',
     } }));
     expect(screen.getByText('删除记忆')).toBeInTheDocument();
-    expect(screen.getByText('项目记忆已删除')).toBeInTheDocument();
+    expect(screen.getByText('记忆已删除')).toBeInTheDocument();
 
     rerender(createElement(ToolCard, { tool: {
-      callRef: 'memory-upsert', toolName: 'memory_upsert', category: 'memory', name: '更新记忆', target: 'project.md', status: 'succeeded', summary: '项目记忆已更新',
+      callRef: 'memory-upsert', toolName: 'memory_upsert', category: 'memory', name: '更新记忆', target: 'project.md', status: 'succeeded', summary: '记忆已更新',
       rawOutput: '---\nname: Project\ndescription: Current project facts\ntype: project\n---\n\n# Build\n\nUse npm test.\n',
     } }));
     fireEvent.click(screen.getByRole('button', { name: '更新记忆，展开输出内容' }));
@@ -232,7 +232,7 @@ describe('conversation presentation', () => {
       archivedMessages: 18,
       archivedConversationSegments: 4,
       summarizedMessages: 0,
-      breakdown: { systemPrompt: 500, workspaceCode: 1_000, recentConversation: 2_000, toolResults: 500, projectMemory: 300, managedMemory: 0, toolDefinitions: 500, other: 200 },
+      breakdown: { systemPrompt: 500, workspaceCode: 1_000, recentConversation: 2_000, toolResults: 500, projectKnowledge: 300, managedMemory: 0, toolDefinitions: 500, other: 200 },
     };
 
     render(createElement(ContextCard, { context }));

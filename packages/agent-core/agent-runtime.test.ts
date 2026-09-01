@@ -110,7 +110,7 @@ test('internal readonly Agent has isolated context, lineage, tools and persisten
   ]);
   assert.deepEqual(requests[0]?.tools.sort(), ['find', 'grep', 'list_workspace', 'ls', 'read_file']);
   assert.equal(requests[0]?.maxTokens, 321);
-  assert.equal(requests[0]?.messages.some((message) => message.role === 'system' && /Available Skills|Recent Tasks|Project Memory/.test(message.content)), false);
+  assert.equal(requests[0]?.messages.some((message) => message.role === 'system' && /Available Skills|Recent Tasks|Project Knowledge/.test(message.content)), false);
   assert.deepEqual(runtimeEvents, [
     'agent_start',
     'tool_call_requested',

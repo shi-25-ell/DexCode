@@ -65,6 +65,8 @@ npm start
 
 MCP、工具、Skill、白名单、项目知识均从统一 React 外壳进入。入口来自 `CapabilityRegistry`，不是 Sidebar 内的固定数组：
 
+项目知识按 Workspace 保存为 `DEXCODE.md`，由用户维护并供 Agent 按需读取；Agent 自动维护的长期“记忆”使用独立的 `managed-memory/` 存储、API 和工具，两者不会互相写入。
+
 ```dotenv
 # 逗号分隔；移除注册项后，侧边栏和设置路由同时收口
 DEX_DISABLED_CAPABILITIES=project-knowledge
@@ -75,7 +77,7 @@ DEX_COMMAND_SHELL=powershell
 DEX_POWERSHELL_PATH=C:\Program Files\PowerShell\7\pwsh.exe
 DEX_GIT_BASH_PATH=C:\Program Files\Git\bin\bash.exe
 
-# 构建时替换品牌图标；缺省使用 public/dexcode-icon.png
+# 构建时替换品牌 Logo；缺省使用 public/dexcode-logo.svg
 VITE_BRAND_ICON_URL=/my-brand.svg
 ```
 
@@ -142,7 +144,7 @@ LLM_PROVIDER=doubao
 | `WEB_PORT` | 否 | Vite 开发服务器端口，默认 `5173`；占用时明确失败 |
 | `RUNTIME_ORIGIN` | 否 | Vite 开发代理目标；默认跟随 `PORT` |
 | `DEX_DISABLED_CAPABILITIES` | 否 | 要从产品外壳移除的能力 ID，逗号分隔 |
-| `VITE_BRAND_ICON_URL` | 否 | 前端构建时使用的品牌图标 URL |
+| `VITE_BRAND_ICON_URL` | 否 | 前端构建时使用的品牌 Logo URL |
 
 **向后兼容**：`DOUBAO_API_KEY` / `DOUBAO_MODEL` / `DOUBAO_BASE_URL` 变量在未设置 `LLM_*` 时仍然生效。
 

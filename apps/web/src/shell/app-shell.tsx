@@ -6,7 +6,7 @@ import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 
 import { useNavigate } from 'react-router-dom';
 import { apiJson, resolveWorkspace, scopeWorkspaceRef } from '../api';
 import type { ConversationScope } from '../types';
-import { BrandIcon } from '../shared/brand-icon';
+import { BrandLogo } from '../shared/brand-logo';
 import { CapabilityCenter } from './capability-center';
 import { ConversationHistory } from './conversation-history';
 import { WorkspacePicker } from './workspace-picker';
@@ -67,8 +67,7 @@ function SidebarContent({ scope, conversationRef, closeMobile }: { scope: Conver
   return (
     <div className="sidebar-content">
       <div className="brand-row">
-        <BrandIcon />
-        <span className="brand-name">DexCode</span>
+        <BrandLogo />
       </div>
       <WorkspacePicker value={path} loading={loadingPath} error={pathError} onChange={setPath} onResolve={submitWorkspace} />
       <ConversationHistory
@@ -109,7 +108,7 @@ export function AppShell({ scope, conversationRef, title, status = 'idle', child
         <aside className="desktop-sidebar">
           {collapsed ? (
             <div className="collapsed-rail">
-              <BrandIcon />
+              <BrandLogo compact />
               <button aria-label="展开侧边栏" onClick={() => setCollapsed(false)}><ChevronLeft className="flip" size={18} /></button>
             </div>
           ) : <SidebarContent scope={scope} conversationRef={conversationRef} />}

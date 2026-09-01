@@ -18,7 +18,7 @@ import type {
 } from '../shared/types.ts';
 
 export type ContextSection = {
-  source: 'systemPrompt' | 'workspaceCode' | 'projectMemory' | 'managedMemory';
+  source: 'systemPrompt' | 'workspaceCode' | 'projectKnowledge' | 'managedMemory';
   content: string;
 };
 
@@ -159,7 +159,7 @@ function emptyBreakdown(): ContextBreakdown {
     workspaceCode: 0,
     recentConversation: 0,
     toolResults: 0,
-    projectMemory: 0,
+    projectKnowledge: 0,
     managedMemory: 0,
     toolDefinitions: 0,
     other: 0,

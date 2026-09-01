@@ -1040,7 +1040,7 @@ export function startRuntimeServer() {
 
     if (url.pathname === '/api/managed-memory' && req.method === 'DELETE') {
       const body = await parseBody<{ confirmationToken?: string }>(req);
-      sendJson(res, 200, await requestRuntime.managedMemory.clearProjectMemory(requestRuntime.workspace.workspaceId, { confirmationToken: body.confirmationToken ?? '' }));
+      sendJson(res, 200, await requestRuntime.managedMemory.clearManagedMemory(requestRuntime.workspace.workspaceId, { confirmationToken: body.confirmationToken ?? '' }));
       return;
     }
 
@@ -1835,27 +1835,27 @@ export function startRuntimeServer() {
       return;
     }
 
-    // ── POST /api/workspace/load（切换工作区目录）──
-    if (url.pathname === '/api/project-memory' && req.method === 'GET') {
-      sendJson(res, 200, await sessionRepository.getProjectMemory(requestRuntime.workspace.workspaceId));
+    // ── Project Knowledge (DEXCODE.md) ──
+    if (url.pathname === '/api/project-knowledge' && req.method === 'GET') {
+      sendJson(res, 200, await sessionRepository.getProjectKnowledge(requestRuntime.workspace.workspaceId));
       return;
     }
 
-    if (url.pathname === '/api/project-memory' && req.method === 'PUT') {
+    if (url.pathname === '/api/project-knowledge' && req.method === 'PUT') {
       const { content } = await parseBody<RequestContext>(req);
-      const updated = await sessionRepository.writeProjectMemory(content ?? '', requestRuntime.workspace.workspaceId);
+      const updated = await sessionRepository.writeProjectKnowledge(content ?? '', requestRuntime.workspace.workspaceId);
       sendJson(res, 200, { ok: true, ...updated });
       return;
     }
 
-    if (url.pathname === '/api/project-memory/append' && req.method === 'POST') {
+    if (url.pathname === '/api/project-knowledge/append' && req.method === 'POST') {
       const { entry, section } = await parseBody<RequestContext>(req);
       if (!entry?.trim()) {
         sendJson(res, 400, { error: 'entry is required' });
         return;
       }
       try {
-        const updated = await sessionRepository.appendProjectMemory(entry, section, requestRuntime.workspace.workspaceId);
+        const updated = await sessionRepository.appendProjectKnowledge(entry, section, requestRuntime.workspace.workspaceId);
         sendJson(res, 200, { ok: true, ...updated });
       } catch (err) {
         sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });

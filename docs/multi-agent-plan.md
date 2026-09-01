@@ -597,7 +597,7 @@ Child 的 manifest、summary、artifact 按 `agentId` 隔离。fork seed 建议�
 
 ### Managed Memory
 
-- Child 默认允许读取 Project Memory。
+- Child 默认允许读取 Project Knowledge。
 - Managed Memory recall 使用 `contextOwnerId = agent:<agentId>`。
 - actor 增加 `child-agent`，并记录 agentId。
 - researcher/reviewer 默认禁止 memory mutation tools。

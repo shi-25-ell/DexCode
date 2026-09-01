@@ -1776,7 +1776,7 @@ provided messages
 
 - Main Skills
 - Recent Tasks
-- Main Project Memory
+- Main Project Knowledge
 - Main persona
 
 ---

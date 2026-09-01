@@ -148,5 +148,5 @@ export interface SessionRepository {
   beginRunFromQueue(input: { sessionId: string; runId: string; context: RunContext; operationId: string }): Promise<{ session: Session; item: QueueItemView; message: UserMessage } | null>;
   requeueSteers(input: { sessionId: string; runId: string; reason: QueueRequeueReason; operationId: string }): Promise<{ items: QueueItemView[]; sessionRevision: number }>;
   setQueuePaused(input: { sessionId: string; paused: boolean; operationId: string; reason?: QueuePauseReason }): Promise<{ paused: boolean; sessionRevision: number }>;
-  readProjectMemory(workspaceId?: string): Promise<string>;
+  readProjectKnowledge(workspaceId?: string): Promise<string>;
 }
