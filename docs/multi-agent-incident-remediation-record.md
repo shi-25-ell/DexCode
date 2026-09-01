@@ -201,3 +201,53 @@ Child 原先显式使用 `isolated` 上下文策略，绕过 Main 的四层上�
 - `209db09`：恢复活动 Run 骨架并接入后台 Main Run 事件流。
 - `efc1747`：Child 接入 owner 隔离的共享上下文压缩机制。
 - `c2af3df`：页面卸载时主动终止 Agent activity stream，消除正常刷新告警。
+
+## 9. Child 后台运行时的新消息路由补充修复
+
+### 9.1 根因
+
+后续会话 `session-6eed93c2-b8c7-4fe9-a07a-e62407e409f3` 暴露了另一个状态混淆：前端用同一个 `sessionHasActiveWork` 同时决定“是否展示会话级停止按钮”和“输入是否应进入 Queue/Steer”。这个值把活动 Main Run 与后台 Child Run 合并计算，因此 Main 已结束、只剩 Child 运行时，输入仍被错误标记为后续消息。
+
+这两个判断的语义不同：
+
+- 只要 Main 或任一 Child 仍在运行，就应保留“停止全部运行”。
+- 只有 Main Run 仍在运行时，新输入才可以选择 Queue/Steer。
+- Main 已结束而 Child 在后台运行时，新输入必须直接创建新的用户 Main Run；此时不展示“后续消息”和“调整当前方向”。
+
+修复将 `mainHasActiveWork` 与 `sessionHasActiveWork` 分开派生。提交路由和后续消息设置只读取前者，会话级停止和轮询继续读取后者，没有增加另一份镜像状态。
+
+### 9.2 六个 Agent 的来源
+
+该会话的 Agent journal 只有六次 `agent_created`，关系是明确的两批各三个：
+
+1. 原始用户 Main Run `143c7b9c-4186-4fbe-92b6-41552bd7075e` 创建第一批三个设计 Agent，随后在 Child 仍运行时自然结束。
+2. Main 结束后的“你好”被前端错误写成 `next_run` Queue item，并在 `03:24:46` 启动新的用户 Main Run `71d94877-c8ae-484f-b2b4-c227e36ea805`。
+3. 新 Main Run 从未完成的历史任务继续推理，又创建了第二批三个设计 Agent。
+
+没有 Child 创建 Child，也没有一次工具调用同时创建六个 Agent。第二批属于模型在额外用户 Run 中重新规划原任务的选择，但触发这个额外 Run 的消息路由是产品缺陷。修复后的真实回归中，后台 Child 运行时创建的新 Main Run 遵循当前用户指令，没有重复创建 Agent。
+
+### 9.3 前台等待转为后台执行的原因
+
+行为变化来自运行时工具契约更新，不是模型从项目记忆中自行学会：提交 `8f6ad60` 将 Child 完成改为后台自动交付，并在 `spawn_agent` 结果中明确要求 Main 不要立即轮询或阻塞等待。该 Workspace 的托管记忆当时只有空索引标题，没有保存任何后台编排策略；对应请求中的 managed memory 也只有约 10 至 11 tokens。
+
+因此，模型从前台等待转为后台 Child 是对新工具反馈的正常响应。后台模式本身保留，不需要回退；本轮只修复它暴露出的前端消息路由边界。
+
+### 9.4 真实宽屏回归
+
+回归会话：`session-41cad1f3-7bb7-4692-a88b-9e5a86635805`。
+
+- 原始 Main Run 创建一个只读 Child 后自然结束；在 Child 仍为 `Agents 1/1` 时，页面没有活动 Main Run。
+- 此时“停止全部运行”保留，发送按钮为普通“发送”，“后续消息/调整当前方向”不可见。
+- 在该状态下发送第二条消息后 150 ms 内，消息已出现在 Transcript，并创建 `origin: user` 的新 Main Run；原 Child 仍为 `1/1`。
+- Session journal 没有为第二条消息写入 `queue_enqueued` 或 `queue_consumed`；新 Main Run 只回复当前消息，没有创建第二个 Agent。
+- 全程浏览器 console 为 0 条 error/warning，页面没有中断恢复卡或 Queue 区域闪现。
+- 测试结束后通过会话级停止终止回归 Child，Agent Tree 收敛为全部结束。
+
+### 9.5 验证与提交
+
+- 回归测试先复现 `true`（错误进入 Queue），修复后转为 `false`（创建新 Main Run）。
+- 后端测试：160/160 通过。
+- Web 测试：73/73 通过。
+- TypeScript 检查：通过。
+- Web 生产构建：通过。
+- `9c166d4`：拆分 Main 活动与会话活动语义，修复 Child-only 期间的新消息路由。
