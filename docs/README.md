@@ -1,129 +1,41 @@
-# DexCode
+# DexCode 文档
 
-> 当前核心架构以 [`架构.md`](架构.md)、[`core-refactor-plan.md`](core-refactor-plan.md) 和 [`core-refactor-implementation-report.md`](core-refactor-implementation-report.md) 为准。其他含 Orchestrator 或多 Agent 的文档属于历史记录。
+本目录只把两类文档视为现行依据：当前架构和当前使用指南。开发计划即使已经完成，也保留在 `completed-plans/` 中作为设计记录，不再承担描述现状的职责。
 
-> Web 主界面下一阶段的产品与开发基线见 [`web-ui-refactor-development-design.md`](web-ui-refactor-development-design.md)。该文档覆盖流式单列对话、侧边栏、草稿会话、Tool Card、展示投影、浅色主题和 React 定向重构。
+## 当前文档
 
-> 全局逐次批准、自动文件修改与完全访问三种批准模式的开发基线见 [`approval-mode-development-plan.md`](approval-mode-development-plan.md)。该文档覆盖实时生效语义、统一工具批准策略、能力中心前端改造、白名单迁移和分步本地提交计划。
+- [`architecture.md`](architecture.md)：当前 Runtime、Session、Context、工具、Multi-Agent 和 Web 架构。
+- [`guides/template-generation.md`](guides/template-generation.md)：当前项目模板 API 和使用边界。
+- [`guides/skills.md`](guides/skills.md)：当前 Skill 生命周期、加载范围和 API。
+- [仓库 README](../README.md)：安装、配置、主要能力与 API 概览。
 
-这是一个面向本地工作区的 DexCode，目标是验证一条最核心的闭环：
+当当前文档与完成计划发生冲突时，以当前代码和 `architecture.md` 为准。
 
-1. 用户输入需求
-2. Agent 读取工作区上下文
-3. Agent 通过受控工具读写文件、执行命令
-4. 前端展示对话、文件树、编辑器与工具结果
-5. 用户继续手动编辑或继续对话
+## 已完成计划
 
-当前项目重点不是完整平台化能力，而是先把“可用、可见、可持续迭代”的开发闭环跑通。
+这些文档记录需求背景、设计取舍和当时的实施顺序。其状态已统一标记为“已实施”；其中的“当前问题”“当前基线”和分支信息均指计划编写时，不代表现在的代码。
 
----
+- [`completed-plans/core-refactor.md`](completed-plans/core-refactor.md)
+- [`completed-plans/web-ui-refactor.md`](completed-plans/web-ui-refactor.md)
+- [`completed-plans/approval-mode.md`](completed-plans/approval-mode.md)
+- [`completed-plans/agent-streaming-presentation.md`](completed-plans/agent-streaming-presentation.md)
+- [`completed-plans/queue-steer.md`](completed-plans/queue-steer.md)
+- [`completed-plans/agent-runtime.md`](completed-plans/agent-runtime.md)
+- [`completed-plans/context-compaction.md`](completed-plans/context-compaction.md)
+- [`completed-plans/managed-memory.md`](completed-plans/managed-memory.md)
+- [`completed-plans/multi-agent.md`](completed-plans/multi-agent.md)
+- [`completed-plans/coding-tools-refactor.md`](completed-plans/coding-tools-refactor.md)
+- [`completed-plans/multi-agent-incident-remediation.md`](completed-plans/multi-agent-incident-remediation.md)
 
-## 当前能力
+## 实施与事件记录
 
-### 前端
-- 三栏布局：对话 / 编辑器 / 工作区文件树
-- 支持拖拽调整三栏宽度
-- 支持文件树展开 / 收起
-- 支持右键菜单
-- 支持自定义新建 / 重命名 / 删除弹窗
-- 支持工具调用结果折叠展示
-- 支持编辑器手动修改与自动保存
-- 空工作区启动
+- [`records/core-refactor-implementation.md`](records/core-refactor-implementation.md)
+- [`records/multi-agent-incident-remediation.md`](records/multi-agent-incident-remediation.md)
 
-### 后端
-- 工作区文件树读取
-- 文件读取 / 写入
-- 新建文件夹
-- 重命名文件或文件夹
-- 删除文件或文件夹
-- Agent 预览流式输出
-- 工具调用结果回传前端
+## 文档维护规则
 
-### Agent
-- 上下文构建
-- 文件相关性排序
-- 上下文压缩与预算控制
-- 阶段化编排雏形：planning / execution / review / summary
-- 工具调用结果结构化输出
-
----
-
-## 项目结构
-
-```text
-repo/
-├─ apps/
-│  ├─ web/              # 前端界面
-│  └─ runtime/          # Agent runtime 与 HTTP API
-├─ packages/
-│  ├─ agent-core/       # Agent 编排核心
-│  ├─ context-builder/  # 上下文构建与压缩
-│  ├─ tool-gateway/     # 工具接口封装
-│  ├─ workspace-manager/# 工作区管理
-│  └─ shared/           # 共享类型与常量
-├─ 文档/                # 设计文档、状态摘要、说明
-└─ workspaces/          # 实际工作区内容
-```
-
----
-
-## 运行方式
-运行命令：
-cd dexcode
-npm run dev
-
-> 这里是 核心版本 级项目，具体启动命令以当前仓库的脚本配置为准。
-
-通常流程是：
-
-1. 安装依赖
-2. 启动 runtime
-3. 打开 web 前端
-4. 在界面中输入需求开始使用
-
----
-
-## 目前的设计取舍
-
-### 为什么是空工作区启动
-空工作区更适合验证 Agent 的真实生成能力，也避免默认模板干扰测试。
-
-### 为什么工具结果要折叠显示
-工具执行结果是调试信息，同时也需要保留在对话区，因此使用可展开块兼顾可读性与可追溯性。
-
-### 为什么有上下文预算控制
-为了避免工作区内容过多导致模型输入过长，当前使用启发式相关性排序 + 限量 + 截断压缩的方式控制上下文。
-
----
-
-## 当前已知限制
-
-- 还没有版本快照 / 回滚
-- 还没有完整 Preview Runner
-- 还没有完整 State Store
-- 还没有完整的多轮自动迭代闭环
-- 受控命令执行还可以进一步增强安全策略
-- Agent 编排仍然是轻量阶段化实现，还未完全升级为更复杂的多阶段系统
-
----
-
-## 后续演进方向
-
-- 增加快照与回滚
-- 增加预览运行与错误收集
-- 增加任务状态持久化
-- 增加更强的 reviewer 与自动迭代
-- 让上下文控制更接近 token 级预算
-- 让 Agent 编排更贴近 Planner / Executor / Reviewer / Summarizer 的完整体系
-
----
-
-## 说明
-
-这个项目当前定位是 核心版本，不追求一次性做完所有能力，而是优先保证：
-
-- 能看见
-- 能修改
-- 能执行
-- 能回显
-- 能持续迭代
+1. 只有 `architecture.md`、`guides/` 和仓库 README 可以使用“当前实现”“当前支持”等现状表述。
+2. 完成计划必须保留顶部状态说明，新增能力不回填成计划编写时已经存在。
+3. 文档只引用仓库相对路径，不记录开发者机器上的绝对路径。
+4. 文档只记录 DexCode 自身可以从代码、测试或运行结果验证的事实。
+5. 删除、移动或重命名文档后，必须检查 Markdown 链接和仓库内路径。

@@ -1,5 +1,8 @@
 # DexCode Core 重构实施说明
 
+> 记录状态：已完成的阶段实施记录  
+> 本文只描述 Core 重构当时的交付结果，不代表当前完整能力。JSONL、Context Engine、Managed Memory、Queue/Steer 和 Multi-Agent 均在此后加入；现状以 [`../architecture.md`](../architecture.md) 为准。
+
 ## 1. 交付结论
 
 本轮已把 `packages/agent-core` 从 Planner/Orchestrator/Reviewer/Summarizer 驱动的多阶段 demo，重构为单 Agent Run 的真实流式执行链路。生产 provider 只保留 OpenAI/OpenAI-compatible；本地执行只以 Windows 为支持目标。
@@ -16,7 +19,7 @@
 - HTTP SSE 增加有界队列、delta 合并、backpressure 和断连取消。
 - 固定 40 条消息截断替换为带 manifest/digest/checkpoint 的 token-budget projection。
 
-详细目标和不变量见 [`core-refactor-plan.md`](core-refactor-plan.md)，当前模块说明见 [`架构.md`](架构.md)。
+详细目标和不变量见 [`../completed-plans/core-refactor.md`](../completed-plans/core-refactor.md)，当前模块说明见 [`../architecture.md`](../architecture.md)。
 
 ## 2. Git 提交
 

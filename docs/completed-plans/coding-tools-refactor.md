@@ -2,12 +2,11 @@
 
 ## 1. 文档状态
 
-- 状态：待评审、待实施
-- 当前基线分支：本地 `multi-agent`
-- 远程操作：禁止 push，除非用户后续明确授权
+- 状态：已实施
+- 当前工具来源：`packages/tool-gateway/tool-registry.ts`
 - 适配平台：Windows 优先；PowerShell 是默认 shell，Bash 是可选能力
 
-本文只固化已经讨论确认的工具目标、兼容边界、实施顺序和验收标准，不在本轮修改工具实现。正式实施前需要重新核对分支、HEAD、工作区状态和相关工具链源码，避免基线变化导致计划与源码错位。
+本文保留实施前确认的工具目标、兼容边界、实施顺序和验收标准。当前注册的十个第一方编程工具与本计划目标一致；现状以 [`../architecture.md`](../architecture.md) 和权威 registry 为准。
 
 ## 2. 已确认决策
 
@@ -748,7 +747,7 @@ packages/tool-gateway/
 ### 阶段 7：文档迁移与总体验收
 
 1. 更新 README 的工具表、命令示例和限制说明。
-2. 更新系统设计、核心实现方案和工具链文档。
+2. 更新当前架构、工具契约和使用文档。
 3. 更新批准模式计划中的工具分类、Hard Guard 和 shell 描述。
 4. 更新 Agent Runtime、Multi-Agent、Memory、Skill、Queue/Steer 等依赖工具集合的文档。
 5. 对历史项目总结增加“现状变更”说明，避免篡改当时事实，同时不把旧行为描述成当前能力。
@@ -856,28 +855,9 @@ npm run build:web
 
 若仓库在实施期间调整脚本，以当时 `package.json` 为准，但不能只运行最小单测后跳过全量类型检查和构建。
 
-## 16. 文档迁移清单
+## 16. 文档迁移结果
 
-实施时先通过 `rg` 重新生成真实引用清单。当前已知至少需要复核：
-
-- `README.md`
-- `docs/系统设计文档.md`
-- `docs/核心实现方案.md`
-- `docs/Agent Web 应用技术方案.md`
-- `docs/approval-mode-development-plan.md`
-- `docs/dexcode-agent-runtime-development-plan.md`
-- `docs/agent-streaming-presentation-development-plan.md`
-- `docs/managed-project-memory-development-plan.md`
-- `docs/multi-agent-plan.md`
-- `docs/steer-queue-development-plan.md`
-- `docs/web-ui-refactor-development-design.md`
-- `docs/core-refactor-implementation-report.md`
-- `docs/其他板块/skill系统设计文档.md`
-- `docs/其他板块/会话管理与工具管理项目总结.md`
-- `docs/其他板块/工具链优化项目总结.md`
-- `docs/其他板块/架构与多智能体.md`
-
-每份文档至少核对：工具总数、名称、`grep` 参数与限制、只读分类、批准行为、shell 语法、错误 fallback、子 Agent 能力和返回格式。不能只做字符串替换而保留已经失效的架构结论。
+工具总数、名称、`grep` 参数与限制、只读分类、批准行为、shell 语法、错误 fallback、子 Agent 能力和返回格式已经收口到仓库 README、`docs/architecture.md` 和代码中的权威 registry。早期重复总结已删除，避免旧行为继续被描述为当前能力。
 
 ## 17. 验收标准
 

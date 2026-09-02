@@ -1,5 +1,8 @@
 # DexCode Multi-Agent V1 开发计划
 
+> 文档状态：已实施  
+> 实施结果：`packages/agent-manager`、Child journal、Agent Inbox、四个 orchestration tools、Agent activity stream、Web Agent Drawer、预算和停止语义均已落地。实际实现默认开启 Multi-Agent，并在后续事故修复中加入后台通知、无进展熔断和会话级停止。正文中的“当前基线”指计划编写时；现状以 [`../architecture.md`](../architecture.md) 为准。
+
 ## 结论
 
 DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent Loop、Executor、ModelClient 或 ToolHost 体系。
@@ -21,7 +24,7 @@ DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent L
 
 真正需要新增的是一个“深模块”式 `AgentManager`：对外只暴露生命周期原语，对内隐藏并发、持久化、恢复和状态转换。Executor 只依赖一个 orchestration port，不反向依赖具体 Manager。
 
-本轮仅进行了只读审计，没有修改源码。当前工作树干净，`npm test` 的 125 项测试全部通过，`npm run lint` 通过。
+本计划起草阶段只进行了只读审计；后续已经按计划完成实现和验证。
 
 ---
 
@@ -31,7 +34,7 @@ DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent L
 
 1. **AgentRuntime 已经是统一执行入口**
 
-   [agent-runtime.ts](D:/AgentDevelop/DexCode/packages/agent-core/agent-runtime.ts:19) 已定义：
+   `packages/agent-core/agent-runtime.ts` 已定义：
 
    - `AgentRunIdentity`
    - `parentRunId`
@@ -45,11 +48,11 @@ DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent L
    - `runInternalAgent()`
    - `persistence: 'child'`
 
-   其中 `child` 目前只是显式拒绝的预留策略，[对应入口](D:/AgentDevelop/DexCode/packages/agent-core/agent-runtime.ts:233) 正好可以作为 Multi-Agent 持久化扩展点。
+   其中 `child` 在计划基线中是显式拒绝的预留策略，对应入口可以作为 Multi-Agent 持久化扩展点。
 
 2. **Executor 已覆盖完整 ReAct 语义**
 
-   [executor.ts](D:/AgentDevelop/DexCode/packages/agent-core/executor.ts:341) 已负责：
+   `packages/agent-core/executor.ts` 已负责：
 
    - 模型与工具迭代
    - tool call/result 配对
@@ -63,11 +66,11 @@ DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent L
 
 3. **现有内部 Agent 已证明可以复用同一 Runtime**
 
-   [agent-core/index.ts](D:/AgentDevelop/DexCode/packages/agent-core/index.ts:168) 已让 Managed Memory 通过同一个 Runtime 启动内部 Agent。这证明 in-process 多 Run 本身可行。
+   `packages/agent-core/index.ts` 已让 Managed Memory 通过同一个 Runtime 启动内部 Agent。这证明 in-process 多 Run 本身可行。
 
 4. **Context Engine 已有安全的消息分段和工具批次处理**
 
-   [context-engine/index.ts](D:/AgentDevelop/DexCode/packages/context-engine/index.ts:99) 已具备：
+   `packages/context-engine/index.ts` 已具备：
 
    - conversation segment
    - closed tool batch
@@ -80,7 +83,7 @@ DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent L
 
 5. **Tool Gateway 已有 fail-closed 权限体系**
 
-   [tool-gateway/index.ts](D:/AgentDevelop/DexCode/packages/tool-gateway/index.ts:623) 可继续处理 Child 的文件、命令和 MCP 调用。P0 只需要给 Child 注入非交互审批策略。
+   `packages/tool-gateway/index.ts` 可继续处理 Child 的文件、命令和 MCP 调用。P0 只需要给 Child 注入非交互审批策略。
 
 6. **JSONL、reducer、recovery、replay 模式可以复用**
 
@@ -90,7 +93,7 @@ DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent L
 
 1. **Session 只允许一个 active Run**
 
-   [session-store/index.ts](D:/AgentDevelop/DexCode/packages/session-store/index.ts:618) 和 [journal-reducer.ts](D:/AgentDevelop/DexCode/packages/session-store/journal-reducer.ts:79) 都严格维护单一 `activeTaskId`。
+   `packages/session-store/index.ts` 和 `packages/session-store/journal-reducer.ts` 都严格维护单一 `activeTaskId`。
 
    因此并发 Child Run 绝不能作为普通 `run_started` 写入主 Session ledger，否则会破坏：
 
@@ -102,7 +105,7 @@ DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent L
 
 2. **当前 Run Protocol 是单 Run 状态机**
 
-   [contracts.ts](D:/AgentDevelop/DexCode/packages/run-protocol/contracts.ts:93) 的 envelope 由一个 `runId` 和连续 `seq` 驱动；Web 也只维护一个 active Run。
+   `packages/run-protocol/contracts.ts` 的 envelope 由一个 `runId` 和连续 `seq` 驱动；Web 也只维护一个 active Run。
 
    并行 Child 不能伪装成 Main Run 的 tool/message event。
 
@@ -112,13 +115,13 @@ DexCode 已具备实现 Multi-Agent V1 的主要基础，不需要新增 Agent L
 
 4. **`createCodingAgent()` 隐藏了 Child 所需的装配逻辑**
 
-   当前 system sections、Managed Memory、ToolHost、Context Engine 都在主任务路径中组装，[主 Runtime 调用](D:/AgentDevelop/DexCode/packages/agent-core/index.ts:400) 不能直接被 AgentManager 复用。
+   计划基线中的 system sections、Managed Memory、ToolHost、Context Engine 都在主任务路径中组装，不能直接被 AgentManager 复用。
 
    应抽出 Child Run factory，而不是让 AgentManager复制这段逻辑。
 
 5. **Managed Memory recall 以 sessionId 为主要上下文范围**
 
-   [managed-memory/contracts.ts](D:/AgentDevelop/DexCode/packages/managed-memory/contracts.ts:101) 需要增加独立 `contextOwnerId`，否则 Main 和多个 Child 之间可能互相影响 recall 去重。
+   `packages/managed-memory/contracts.ts` 需要增加独立 `contextOwnerId`，否则 Main 和多个 Child 之间可能互相影响 recall 去重。
 
 6. **SkillRegistry 可能包含可变激活状态**
 
@@ -652,7 +655,7 @@ agent_resync_required
 - `agent_created`、started、finished、recovered 不可丢弃。
 - tool/activity progress 可以 coalesce。
 - 不向 Main conversation 流式注入 Child token delta。
-- Child 完成不会自动创建新的 Main Run。
+- 同调用 Run 通过前台等待取得 Child 结果；后台完成则由 completion inbox 在后续独立 Main Run 中交付。
 - `wait_agent` 是 Main 获取结果的正式途径。
 - `spawn_agent`、`wait_agent`、`followup_agent`、`stop_agent` 不投影为普通 Tool Card。
 - presentation layer 按稳定 `agentId` 聚合 lifecycle；followup 更新原 Agent Card，不创建第二张卡。
@@ -660,7 +663,7 @@ agent_resync_required
 
 运行时增加独立的 Session activity stream，解决 Child 在 Main Run terminal 后仍可能继续运行的问题。重连超出 replay window 时返回完整 Agent tree snapshot。
 
-[ConversationViewSnapshot](D:/AgentDevelop/DexCode/packages/conversation-view/contracts.ts:36) 增加：
+`ConversationViewSnapshot` 增加：
 
 ```ts
 agents: {
@@ -828,7 +831,7 @@ Web 使用独立 `agentTree`/`agentActivity` reducer，不修改现有 `activeRu
 - AgentId、AgentRunId、Definition、状态机、错误码。
 - 四个工具 schema。
 - `AgentOrchestrationPort`。
-- `MULTI_AGENT_ENABLED` feature flag，默认关闭。
+- `MULTI_AGENT_ENABLED` feature flag；实际实现默认开启，显式设为 `false` 或 `off` 时关闭。
 - 不接入 Runtime。
 
 验收：

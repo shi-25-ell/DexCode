@@ -1,8 +1,10 @@
 # DexCode 项目级自动记忆系统开发文档
 
-> 文档状态：开发基线与完整实施计划  
+> 文档状态：已实施  
 > 目标读者：负责 DexCode 后端 Agent Runtime、Context Engine、Session 持久化与 Web 设置页的开发者或 Coding Agent  
 > 核心目标：为每个 DexCode Workspace 提供一套由 LLM 自主维护、跨会话持久化、按需召回、可审计、可关闭的文件记忆系统。
+
+> `packages/managed-memory`、Runtime 生命周期、Memory 工具和 Web 设置页已经落地。正文保留计划编写时的目标、缺口和验收设计；当前运行链路以 [`../architecture.md`](../architecture.md) 为准。
 
 ---
 

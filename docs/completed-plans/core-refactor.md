@@ -1,6 +1,7 @@
 # DexCode Core 重构计划
 
-> 实施状态：本计划已在 `core-update` 分支执行。实际完成内容、验证结果和明确保留的限制见 [`core-refactor-implementation-report.md`](core-refactor-implementation-report.md)。
+> 文档状态：已实施  
+> 本计划完成了 canonical model stream、单一 Executor、Run 终态、Session ledger、安全边界和 SSE backpressure。它描述的是后续 Agent Runtime、JSONL、Context Engine 和 Multi-Agent 之前的基础重构；现状以 [`../architecture.md`](../architecture.md) 为准，阶段实施记录见 [`../records/core-refactor-implementation.md`](../records/core-refactor-implementation.md)。
 
 ## 1. 目标
 
@@ -430,7 +431,7 @@ npm test
 1. 本重构计划。
 2. 分阶段 Git commits，全部位于 `core-update`，不 push。
 3. 更新后的 README、系统设计和 API/event 说明。
-4. `docs/core-refactor-implementation-report.md`，记录实际改动、设计偏差、测试命令、结果、已知限制和后续工作。
+4. `docs/records/core-refactor-implementation.md`，记录实际改动、设计偏差、测试命令、结果、已知限制和后续工作。
 5. 干净 worktree 和最终 commit 列表。
 
 若实施中发现计划与真实代码冲突，以不变量和公共 seam 为准；任何范围削减、兼容性破坏或无法在 Windows 验证的行为都必须记录在最终说明中，不能用通过 happy-path 测试代替。

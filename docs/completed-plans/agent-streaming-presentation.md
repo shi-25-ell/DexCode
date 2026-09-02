@@ -2,11 +2,13 @@
 
 ## 1. 文档状态
 
-- 状态：待实施
+- 状态：已实施
 - 目标：建立可恢复、可校准、可观测的 Agent 流式输出体验
 - 实施范围：模型事件归一、Run 生命周期、SSE 协议、会话投影、Web 运行态与测试
 - 兼容要求：保留现有 `/api/conversation-runs` 路径、Session ledger、工具批准流程和终止语义
 - 页面约束：不进行整体视觉重设计，只增加运行态、思考区和必要的交互结构
+
+> 实际实现位于 `packages/run-protocol`、`packages/conversation-view` 和 `apps/web/src/conversation`。本文中的问题描述是实施前基线；现状以 [`../architecture.md`](../architecture.md) 为准。
 
 ## 2. 背景与问题
 

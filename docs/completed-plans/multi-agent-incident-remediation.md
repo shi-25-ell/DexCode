@@ -1,5 +1,8 @@
 # Multi-Agent 失控事件修复计划
 
+> 文档状态：已实施  
+> 实施结果：终态交付去重、后台通知 Run、预算、无进展熔断、会话级停止和前端权威状态已经落地。完整复跑证据见 [`../records/multi-agent-incident-remediation.md`](../records/multi-agent-incident-remediation.md)。
+
 ## 1. 事件结论
 
 目标会话 `session-e4661603-47a9-4271-8aed-04da5522ed61` 暴露的不是单一轮询错误，而是终态语义、后台通知、运行预算、停止语义和前端状态投影共同形成的失控链路。

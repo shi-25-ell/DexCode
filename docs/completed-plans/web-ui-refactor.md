@@ -1,13 +1,13 @@
 # DexCode Web UI 重构开发设计
 
-> 状态：已实施并完成桌面、窄屏与流式链路验收
+> 状态：已实施并完成桌面、窄屏与流式链路验收  
 > 日期：2026-08-30  
 > 适用范围：`apps/web`、`apps/runtime` 中的 Web 适配层，以及为 UI 提供稳定投影所需的共享模块  
-> 参考：OpenCode Web App 的信息层级与交互方式。只能参考产品设计，不复制其代码、包结构、命名或视觉资产。
+> 后续演进：独立快照和工具设置入口已经移除，Managed Memory 与子 Agent 设置入口已经加入。正文中的“当前问题”指重构前基线；现状以 [`../architecture.md`](../architecture.md) 为准。
 
 ## 1. 背景与结论
 
-DexCode 当前主页面同时放置对话、编辑器、工作区文件树和 Agent 执行摘要。前端由一个大型原生 TypeScript 文件直接操作 DOM，并直接消费接近底层执行格式的 SSE 事件。这种实现能够验证基本闭环，但无法稳定承载以下产品能力：
+计划编写时，DexCode 主页面同时放置对话、编辑器、工作区文件树和 Agent 执行摘要。前端由一个大型原生 TypeScript 文件直接操作 DOM，并直接消费接近底层执行格式的 SSE 事件。这种实现能够验证基本闭环，但无法稳定承载以下产品能力：
 
 - 以对话时间线为唯一主题的主页面；
 - 工作区和无工作区两种会话范围；
@@ -49,7 +49,7 @@ DexCode 当前主页面同时放置对话、编辑器、工作区文件树和 Ag
 - 不在本轮重新实现 Agent ReAct loop、Tool Gateway 或 Session durability。
 - 不恢复被删除的编辑器和文件树主面板。
 - 不删除或以“新版暂不支持”为由停用 `MCP`、`工具`、`Skill`、`白名单`、`快照`、`项目知识`；入口可以重新设计，但必须保持可发现和可访问。
-- 不照搬 OpenCode 的 SolidJS 模块、`@opencode-ai/ui`、CSS token、图标或页面源码。
+- 不引入无关的 UI 框架、组件包、CSS token、图标或页面源码。
 - 不为了“隐藏”而删除可审计的 canonical facts；底层事实继续持久化，只是不直接成为产品文案。
 - 不把调试控制台伪装成普通用户界面。需要保留的诊断信息进入显式“开发者详情”或导出文件。
 
@@ -887,10 +887,10 @@ activeTaskId
 
 ### 20.2 视觉对照
 
-已确认概念图：[`docs/assets/web-ui-concept-v2.png`](assets/web-ui-concept-v2.png)。实现截图：
+已确认概念图：[`docs/assets/web-ui-concept-v2.png`](../assets/web-ui-concept-v2.png)。实现截图：
 
-- [`docs/assets/web-ui-implementation-desktop.png`](assets/web-ui-implementation-desktop.png)
-- [`docs/assets/web-ui-implementation-mobile.png`](assets/web-ui-implementation-mobile.png)
+- [`docs/assets/web-ui-implementation-desktop.png`](../assets/web-ui-implementation-desktop.png)
+- [`docs/assets/web-ui-implementation-mobile.png`](../assets/web-ui-implementation-mobile.png)
 
 对照结果：
 
@@ -922,7 +922,7 @@ activeTaskId
 ## 20. 实施约束
 
 - 每次开始实现前确认当前工作树和目标文件，保留无关用户改动。
-- 不复制 OpenCode 源码、CSS、图标、测试、命名或目录结构。
+- 不复制无关项目的源码、CSS、图标、测试、命名或目录结构。
 - 不以 hard-coded mock Session、假 Tool Card 或固定 token 百分比替代真实生产接口。
 - 不允许 renderer 直接访问 Session JSON 文件、provider transport、Tool Gateway 内部状态或全局活动工作区。
 - 补充新 contract tests 后，旧浅模块测试若已被新接口覆盖，应替换而不是永久叠加两套测试。

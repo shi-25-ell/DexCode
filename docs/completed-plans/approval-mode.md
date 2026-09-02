@@ -2,13 +2,12 @@
 
 ## 1. 文档状态
 
-- 状态：待实施
-- 目标分支：本地 `permission`
-- 远程操作：禁止 push
+- 状态：已实施
+- 当前实现：`packages/tool-gateway/approval-mode-store.ts`、`approval-policy.ts`、`apps/web/src/settings/approval-mode-panel.tsx`
 - 默认批准模式：`allowlist`
 - 生效策略：全局实时，下一次尚未授权的工具调用使用最新模式
 
-> 用户曾写作 `permmission`，但仓库当前已经存在并检出的是 `permission` 分支。实施时沿用现有 `permission`，避免产生两个仅拼写不同的分支。
+> 本文保留计划编写时的问题分析和实施顺序。文中的“当前”指计划基线；现状以 [`../architecture.md`](../architecture.md) 为准。
 
 ## 2. 背景与目标
 
