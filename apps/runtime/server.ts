@@ -1840,6 +1840,10 @@ export function startRuntimeServer() {
       const name = decodeURIComponent(url.pathname.replace('/api/skills/', ''));
       const { rootPath } = await parseBody<{ rootPath?: string }>(req);
       const result = await skillRegistry.deleteSkill(name, rootPath);
+      if (result.ok) {
+        const registries = new Set([...workspaceRuntimes.values()].map((runtime) => runtime.skillRegistry));
+        await Promise.all([...registries].map((registry) => registry.reload()));
+      }
       sendJson(res, result.ok ? 200 : 400, result.ok ? { ...result, skills: skillRegistry.listSkills() } : result);
       return;
     }

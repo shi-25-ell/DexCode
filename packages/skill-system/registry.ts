@@ -150,7 +150,7 @@ export function createSkillRegistry(options: RegistryOptions) {
   async function deleteSkill(name: string, expectedRootPath?: string): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
     const skill = getSkill(name);
     if (!skill) return { ok: false, error: `Skill not found: ${name}` };
-    if (skill.source === 'builtin' || skill.source === 'user') {
+    if (skill.source === 'builtin') {
       return { ok: false, error: `Skill source cannot be deleted: ${skill.source}` };
     }
 
@@ -159,12 +159,13 @@ export function createSkillRegistry(options: RegistryOptions) {
     }
 
     const allowedRoots = [
+      userSkillsRoot,
       resolve(join(workspaceRoot, '.aicoding', 'skills')),
       resolve(join(workspaceRoot, '.claude', 'skills')),
       resolve(join(workspaceRoot, '.agents', 'skills')),
     ];
     if (!allowedRoots.some((root) => isInside(skill.rootPath, root))) {
-      return { ok: false, error: 'Only project/imported skills inside the current workspace can be deleted' };
+      return { ok: false, error: 'Only managed user or project skills can be deleted' };
     }
 
     await rm(skill.rootPath, { recursive: true, force: true });

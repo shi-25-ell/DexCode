@@ -51,3 +51,32 @@ test('imports a Skill into the global user directory and exposes it to every wor
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test('deletes a managed global user Skill', async () => {
+  const temporary = await mkdtemp(join(tmpdir(), 'dexcode-delete-global-skill-'));
+  const workspaceRoot = join(temporary, 'workspace');
+  const userSkillsRoot = join(temporary, 'user', '.dexcode', 'skills');
+  const skillRoot = join(userSkillsRoot, 'shared-skill');
+
+  try {
+    await Promise.all([
+      mkdir(workspaceRoot, { recursive: true }),
+      mkdir(skillRoot, { recursive: true }),
+    ]);
+    await writeFile(join(skillRoot, 'SKILL.md'), '---\nname: shared-skill\ndescription: Shared skill.\n---\n', 'utf8');
+    const registry = createSkillRegistry({
+      workspaceRoot,
+      userSkillsRoot,
+      configPath: join(temporary, 'skill-config.json'),
+    });
+    await registry.loadAll();
+
+    const result = await registry.deleteSkill('shared-skill', skillRoot);
+
+    assert.deepEqual(result, { ok: true, name: 'shared-skill' });
+    assert.equal(await exists(skillRoot), false);
+    assert.equal(registry.getSkill('shared-skill'), null);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});

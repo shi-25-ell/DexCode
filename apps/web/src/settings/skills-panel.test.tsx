@@ -28,4 +28,37 @@ describe('Skill settings actions', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/skills/reload', expect.objectContaining({ method: 'POST' })));
     expect(await screen.findByRole('status')).toHaveTextContent('扫描完成');
   });
+
+  it('lets users delete a globally imported Skill', async () => {
+    const skill = {
+      name: 'shared-skill',
+      description: 'Shared by every workspace.',
+      source: 'user' as const,
+      rootPath: 'C:\\Users\\tester\\.dexcode\\skills\\shared-skill',
+      enabled: true,
+      allowImplicitInvocation: false,
+      userInvocable: true,
+      tags: [],
+      filePatterns: [],
+      requiredCapabilities: [],
+      missingCapabilities: [],
+      shadowed: false,
+      usage: { readCount: 0, activationCount: 0, lastUsedAt: null },
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = init?.method === 'DELETE' ? { ok: true } : { skills: [skill] };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+
+    render(<QueryClientProvider client={client}><SkillsPanel workspaceRef="workspace-1" /></QueryClientProvider>);
+
+    fireEvent.click(await screen.findByRole('button', { name: '删除 shared-skill' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/skills/shared-skill', expect.objectContaining({
+      method: 'DELETE',
+      body: JSON.stringify({ rootPath: skill.rootPath }),
+    })));
+  });
 });
