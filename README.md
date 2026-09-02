@@ -52,7 +52,7 @@ npm run dev:web
 | 变量 | 说明 |
 |---|---|
 | `LLM_API_KEY` | OpenAI-compatible API 密钥 |
-| `LLM_MODEL` | 模型标识 |
+| `LLM_MODEL` | 默认模型标识；新会话打开时默认选择它 |
 | `LLM_BASE_URL` | API base URL；不填时使用 OpenAI-compatible 默认地址 |
 | `LLM_PROVIDER` | 可选 provider 标识，用于适配 provider 参数 |
 | `LLM_MAX_OUTPUT_TOKENS` | 模型真实支持的单次输出上限 |
@@ -64,6 +64,8 @@ npm run dev:web
 | `DEX_DISABLED_CAPABILITIES` | 从产品外壳移除指定能力入口 |
 | `MULTI_AGENT_ENABLED` | Multi-Agent 开关；缺省开启，设为 `false` 或 `off` 可关闭 |
 | `DEXCODE_MANAGED_MEMORY_MODE` | Managed Memory 运行模式 |
+
+Runtime 会使用同一组 `LLM_API_KEY` 和 `LLM_BASE_URL` 请求 OpenAI-compatible 的 `GET /models`，供会话在该厂商返回的模型之间切换。切换不改变 `.env`，只影响当前会话的下一次 Run；已有上下文继续继承。若模型目录读取失败，只提供 `LLM_MODEL`，并在界面显示警告。
 
 Runtime 会根据模型请求动态组装工具集合。工具是否可见还取决于工作区、批准模式、Skill、Managed Memory、Multi-Agent 和 Agent ToolPolicy。
 

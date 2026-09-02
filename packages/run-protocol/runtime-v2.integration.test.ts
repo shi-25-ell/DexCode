@@ -74,6 +74,10 @@ test('runtime V2 streams a terminal snapshot and replays it idempotently after s
   }
   if (runtime.exitCode !== null) assert.fail(`runtime exited early (${runtime.exitCode})\n${output}`);
 
+  const modelCatalog = await (await fetch(`${baseUrl}/api/models`)).json() as { defaultModel: string; models: Array<{ id: string }> };
+  assert.equal(modelCatalog.defaultModel, 'mock');
+  assert.deepEqual(modelCatalog.models.map((model) => model.id), ['mock']);
+
   const request = {
     prompt: 'stream contract smoke',
     clientRequestId: 'request-v2-smoke',
@@ -92,6 +96,7 @@ test('runtime V2 streams a terminal snapshot and replays it idempotently after s
   const terminal = first.at(-1);
   assert.equal(terminal?.event.type, 'run_finished');
   if (terminal?.event.type !== 'run_finished') return;
+  assert.equal(terminal.event.conversation.model, 'mock');
   assert.equal(terminal.event.conversationRevision, terminal.event.conversation.revision);
   assert.equal(terminal.event.conversation.items.some((item) => item.kind === 'assistant' && item.final), true);
 
@@ -162,4 +167,18 @@ test('runtime V2 streams a terminal snapshot and replays it idempotently after s
   assert.equal(legacyEvents.some((item) => item.type === 'session'), true);
   assert.equal(legacyEvents.some((item) => item.type === 'chunk'), true);
   assert.equal(legacyEvents.at(-1)?.type, 'result');
+
+  const queuedForSwitch = await fetch(`${baseUrl}/api/conversations/${encodeURIComponent(started.sessionId)}/queued-messages?scope=general`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content: 'keep queued', delivery: 'next_run', operationId: 'queue-switch-block' }),
+  });
+  assert.equal(queuedForSwitch.status, 200);
+  const blockedSwitch = await fetch(`${baseUrl}/api/conversations/${encodeURIComponent(started.sessionId)}?scope=general`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'another-model' }),
+  });
+  assert.equal(blockedSwitch.status, 409);
+  assert.match(await blockedSwitch.text(), /排队消息|暂不能切换模型/);
 });

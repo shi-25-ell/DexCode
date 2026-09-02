@@ -55,6 +55,7 @@ export type ConversationItem =
 export type ConversationViewSnapshot = {
   ref: string;
   title: string;
+  model?: string;
   state: ConversationState;
   activeRun?: { runId: string; phase: 'running' | 'waiting_confirm' | 'closing' | 'stopping' };
   queuedItems: QueueItemView[];

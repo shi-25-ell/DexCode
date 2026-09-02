@@ -29,11 +29,12 @@ type AgentRunner = {
       lifecycle?: AgentLifecycleHooks;
       origin?: AgentOrigin;
       budget?: AgentRunBudget;
+      model?: string;
     },
   ): Promise<TaskSummary>;
 };
 
-type RunEnvironment = { agent: AgentRunner; context: RunContext };
+type RunEnvironment = { agent: AgentRunner; context: RunContext; model?: string };
 type EventSink = (event: AgentEvent) => void;
 type AgentInboxNotification = {
   notificationId: string;
@@ -94,6 +95,7 @@ export type QueueCommand =
 
 export type ConversationRuntimeSnapshot = {
   activeRun?: { runId: string; phase: ActiveRunPhase };
+  activeChain?: boolean;
   queuedItems: QueueItemView[];
   queuePaused: boolean;
   sessionRevision: number;
@@ -188,7 +190,7 @@ export function createConversationRunCoordinator(dependencies: {
     return { notifications, message: { role: 'user', content }, origin: `agent_notification:${ids.join(',')}` };
   }
 
-  async function beginAgentNotificationRun(sessionId: string, context: RunContext): Promise<{ runId: string; prompt: string; notificationDelivery: true } | null> {
+  async function beginAgentNotificationRun(sessionId: string, context: RunContext, model?: string): Promise<{ runId: string; prompt: string; notificationDelivery: true } | null> {
     const batch = await pendingAgentBatch(sessionId);
     if (!batch || !dependencies.agentInbox) return null;
     const session = await repository.loadSession(sessionId);
@@ -201,7 +203,7 @@ export function createConversationRunCoordinator(dependencies: {
       return null;
     }
     const runId = crypto.randomUUID();
-    await repository.beginRun({ sessionId, runId, userMessage: batch.message, context, profile: 'main', origin: batch.origin });
+    await repository.beginRun({ sessionId, runId, userMessage: batch.message, context, profile: 'main', origin: batch.origin, ...(model ? { model } : {}) });
     await dependencies.agentInbox.consume(sessionId, batch.notifications.map((item) => item.notificationId), runId);
     return { runId, prompt: batch.message.content, notificationDelivery: true };
   }
@@ -430,6 +432,7 @@ export function createConversationRunCoordinator(dependencies: {
             ...(current.sourceItemId ? { sourceItemId: current.sourceItemId } : {}),
             ...(current.notificationDelivery ? { origin: 'orchestrated' as const, budget: AGENT_NOTIFICATION_BUDGET } : {}),
             commandSource: commandSource(handle),
+            ...(environment.model ? { model: environment.model } : {}),
             ...(dependencies.createLifecycleHooks ? {
               lifecycle: dependencies.createLifecycleHooks(current.sessionId, current.runId),
             } : {}),
@@ -462,9 +465,10 @@ export function createConversationRunCoordinator(dependencies: {
         runId: nextRunId,
         context: environment.context,
         operationId: `drain:${current.runId}:${nextRunId}`,
+        ...(environment.model ? { model: environment.model } : {}),
       });
       if (!claimed) {
-        const notificationRun = await beginAgentNotificationRun(current.sessionId, environment.context);
+        const notificationRun = await beginAgentNotificationRun(current.sessionId, environment.context, environment.model);
         if (notificationRun) {
           current = { sessionId: current.sessionId, runId: notificationRun.runId, prompt: notificationRun.prompt, prestarted: true, notificationDelivery: true };
           continue;
@@ -502,8 +506,8 @@ export function createConversationRunCoordinator(dependencies: {
         if (!session) throw new Error(`Session not found: ${sessionId}`);
         const environment = await dependencies.resolveEnvironment(session);
         const runId = crypto.randomUUID();
-        const claimed = await repository.beginRunFromQueue({ sessionId, runId, context: environment.context, operationId: `resume:${runId}` });
-        if (!claimed) return beginAgentNotificationRun(sessionId, environment.context);
+        const claimed = await repository.beginRunFromQueue({ sessionId, runId, context: environment.context, operationId: `resume:${runId}`, ...(environment.model ? { model: environment.model } : {}) });
+        if (!claimed) return beginAgentNotificationRun(sessionId, environment.context, environment.model);
         queueUpdated(sink, sessionId, claimed.item, claimed.session.revision ?? 0);
         return { runId, prompt: claimed.message.content, sourceItemId: claimed.item.itemId };
       });
@@ -615,6 +619,7 @@ export function createConversationRunCoordinator(dependencies: {
     const handle = activeBySessionId.get(sessionId);
     return {
       ...(handle ? { activeRun: { runId: handle.runId, phase: handle.phase } } : {}),
+      ...(chainsBySessionId.has(sessionId) ? { activeChain: true } : {}),
       queuedItems: queue.pending,
       queuePaused: queue.paused,
       sessionRevision: queue.sessionRevision,

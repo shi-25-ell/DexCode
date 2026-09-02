@@ -356,11 +356,12 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
 
   function recordsForMutation(before: Session, after: Session): SessionJournalRecord[] {
     const records: SessionJournalRecord[] = [];
-    if (before.title !== after.title || before.archived !== after.archived) {
+    if (before.title !== after.title || before.archived !== after.archived || before.selectedModel !== after.selectedModel) {
       records.push({
         type: 'session_meta_updated',
         ...(before.title !== after.title ? { title: after.title ?? null } : {}),
         ...(before.archived !== after.archived ? { archived: after.archived ?? false } : {}),
+        ...(before.selectedModel !== after.selectedModel ? { selectedModel: after.selectedModel ?? null } : {}),
       });
     }
 
@@ -534,6 +535,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       const report: RunReport = {
         version: 1,
         runId,
+        ...(started?.model ? { model: started.model } : {}),
         ...(started?.context ? { context: started.context } : {}),
         status: 'failed',
         terminationReason: 'recovered_interruption',
@@ -588,6 +590,19 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return withSessionLock(session.sessionId, () => saveUnlocked(session));
   }
 
+  async function setSelectedModel(input: { sessionId: string; model: string }): Promise<Session> {
+    const model = input.model.trim();
+    if (!model) throw new Error('Model ID cannot be empty');
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      if (session.activeTaskId) throw new Error('当前会话仍有 Main Run 在运行');
+      if (projectQueue(input.sessionId, session.ledger ?? []).pending.length > 0) throw new Error('当前会话仍有排队消息');
+      if (session.selectedModel === model) return session;
+      return saveUnlocked({ ...session, selectedModel: model, revision: (session.revision ?? 0) + 1 });
+    });
+  }
+
   async function materializeRun(input: {
     scope: SessionScope;
     clientRequestId: string;
@@ -597,6 +612,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     parentRunId?: string;
     profile?: string;
     origin?: string;
+    model?: string;
   }): Promise<{ session: Session; created: boolean }> {
     const scope = normalizeScope(input.scope);
     if (!input.clientRequestId.trim()) throw new Error('clientRequestId is required');
@@ -620,6 +636,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       const session: Session = {
         sessionId,
         scope,
+        ...(input.model ? { selectedModel: input.model } : {}),
         createdAt: at,
         updatedAt: at,
         title: conversationTitle(content),
@@ -638,6 +655,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
             ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
             profile: input.profile ?? 'main',
             origin: input.origin ?? 'user',
+            ...(input.model ? { model: input.model } : {}),
           },
           { seq: 2, at, runId: input.runId, type: 'message', message: input.userMessage },
         ],
@@ -725,6 +743,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     parentRunId?: string;
     profile?: string;
     origin?: string;
+    model?: string;
   }): Promise<Session> {
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
@@ -747,6 +766,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         : session.clientRequestIds;
       const next = await saveUnlocked({
         ...session,
+        ...(input.model ? { selectedModel: input.model } : {}),
         title,
         clientRequestIds,
         activeTaskId: input.runId,
@@ -764,6 +784,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
             ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
             profile: input.profile ?? 'main',
             origin: input.origin ?? 'user',
+            ...(input.model ? { model: input.model } : {}),
           },
           { seq: seq + 1, at, runId: input.runId, type: 'message', message: input.userMessage, ...(input.origin ? { origin: input.origin } : {}) },
         ],
@@ -1311,7 +1332,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     });
   }
 
-  async function beginRunFromQueue(input: { sessionId: string; runId: string; context: RunContext; operationId: string }) {
+  async function beginRunFromQueue(input: { sessionId: string; runId: string; context: RunContext; operationId: string; model?: string }) {
     requireOperationId(input.operationId);
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
@@ -1332,12 +1353,13 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       const at = new Date().toISOString();
       const saved = await saveUnlocked({
         ...session,
+        ...(input.model ? { selectedModel: input.model } : {}),
         activeTaskId: input.runId,
         revision,
         messages: [...session.messages, message],
         ledger: [
           ...(session.ledger ?? []),
-          { seq, at, runId: input.runId, type: 'run_started', context: input.context, profile: 'main', origin: 'user' },
+          { seq, at, runId: input.runId, type: 'run_started', context: input.context, profile: 'main', origin: 'user', ...(input.model ? { model: input.model } : {}) },
           { seq: seq + 1, at, runId: input.runId, type: 'message', message },
           { seq: seq + 2, at, type: 'queue_consumed', operationId: input.operationId, itemId: item.itemId, delivery: 'next_run', runId: input.runId, sessionRevision: revision },
           { seq: seq + 3, at, type: 'queue_chain_resumed', operationId: `${input.operationId}:resume`, sessionRevision: revision },
@@ -1575,6 +1597,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     getCurrentSession,
     loadSession,
     saveSession,
+    setSelectedModel,
     appendMessages,
     appendTaskSummary,
     beginRun,

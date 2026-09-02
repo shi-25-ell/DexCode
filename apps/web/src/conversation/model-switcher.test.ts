@@ -1,21 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { previewModelOptions } from './model-switcher';
+import { selectableModelOptions } from './model-switcher';
 
-describe('model switcher preview options', () => {
-  it('keeps the actual backend model first without duplicating a preview model', () => {
-    expect(previewModelOptions('DeepSeek V4 Pro')).toEqual([
-      'DeepSeek V4 Pro',
-      'DeepSeek V4 Flash',
-      'DeepSeek V4 Flash Vision',
-    ]);
+describe('model switcher options', () => {
+  it('shows only models returned by the provider catalog', () => {
+    expect(selectableModelOptions([
+      { id: 'deepseek-chat', displayName: 'deepseek-chat' },
+      { id: 'deepseek-reasoner', displayName: 'deepseek-reasoner' },
+    ], 'deepseek-chat').map((model) => model.id)).toEqual(['deepseek-chat', 'deepseek-reasoner']);
   });
 
-  it('includes an unknown backend model alongside the preview choices', () => {
-    expect(previewModelOptions('Private Model')).toEqual([
-      'Private Model',
-      'DeepSeek V4 Flash',
-      'DeepSeek V4 Pro',
-      'DeepSeek V4 Flash Vision',
+  it('keeps a persisted model visible when it is missing from the current catalog', () => {
+    expect(selectableModelOptions([
+      { id: 'glm-4.5', displayName: 'glm-4.5' },
+    ], 'retired-model')).toEqual([
+      { id: 'retired-model', displayName: 'retired-model', available: false },
+      { id: 'glm-4.5', displayName: 'glm-4.5', available: true },
     ]);
   });
 });

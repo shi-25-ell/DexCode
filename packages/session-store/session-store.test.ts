@@ -417,6 +417,37 @@ test('a follow-up Run persists its client request key for retry replay', async (
   }
 });
 
+test('selected model persists and cannot change while a Main Run or Queue item is active', async () => {
+  const repository = createSessionRepository({ projectId: `test-selected-model-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    const selected = await repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.5' });
+    assert.equal(selected.selectedModel, 'glm-4.5');
+    await repository.beginRun({
+      sessionId: session.sessionId,
+      runId: 'run-model',
+      userMessage: { role: 'user', content: 'use selected model' },
+      context: generalContext,
+      model: 'glm-4.5',
+    });
+    await assert.rejects(
+      () => repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.6' }),
+      /Main Run/,
+    );
+    const started = (await repository.loadSession(session.sessionId))?.ledger?.find((record) => record.type === 'run_started');
+    assert.equal(started?.type === 'run_started' ? started.model : undefined, 'glm-4.5');
+    await repository.finishRun({ sessionId: session.sessionId, ...terminal('run-model') });
+    await repository.enqueueQueueItem({ sessionId: session.sessionId, content: 'queued', delivery: 'next_run', operationId: 'queue-model' });
+    await assert.rejects(
+      () => repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.6' }),
+      /排队消息/,
+    );
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('context artifacts are Session scoped, digest idempotent and readable after restart', async () => {
   const projectId = `test-context-artifact-${crypto.randomUUID()}`;
   const repository = createSessionRepository({ projectId });

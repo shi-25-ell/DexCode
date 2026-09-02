@@ -1,8 +1,8 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Square } from 'lucide-react';
 import { Fragment, type FormEvent, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getAgentTree, getConversation, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopChildAgent, stopConversationRun, stopConversationSession, streamAgentActivity, streamConversation, streamExistingConversationRun, streamQueueResume } from '../api';
+import { apiJson, cancelQueuedMessage, enqueueQueuedMessage, getAgentTree, getConversation, getModelCatalog, promoteQueuedMessage, reorderQueuedMessages, scopeWorkspaceRef, stopChildAgent, stopConversationRun, stopConversationSession, streamAgentActivity, streamConversation, streamExistingConversationRun, streamQueueResume, updateConversation } from '../api';
 import type { RunEventEnvelope } from '../../../../packages/run-protocol/contracts';
 import { AppShell } from '../shell/app-shell';
 import type { AgentTreeSnapshot, ContextUsage, ConversationItem, ConversationScope, ConversationSnapshot, FollowUpBehavior, QueueItem, QueueMutationOutcome } from '../types';
@@ -179,6 +179,8 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueueItem[]>([]);
   const [presentedSteerIds, setPresentedSteerIds] = useState<Set<string>>(() => new Set());
   const [queueNotice, setQueueNotice] = useState('');
+  const [modelNotice, setModelNotice] = useState('');
+  const [draftModel, setDraftModel] = useState<string>();
   const [stopping, setStopping] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef<string | null>(null);
@@ -211,6 +213,11 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     queryFn: () => apiJson<{ model: { displayName: string; contextWindow?: number }; multiAgentEnabled?: boolean }>('/api/meta', { workspaceRef }),
     staleTime: 60_000,
   });
+  const models = useQuery({
+    queryKey: ['models'],
+    queryFn: () => getModelCatalog(),
+    staleTime: 5 * 60_000,
+  });
   const agents = useQuery({
     queryKey: ['agents', scope, conversationRef],
     queryFn: () => getAgentTree(scope, conversationRef!),
@@ -223,6 +230,25 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     localStreamActive: streamingRef.current,
   });
   const sessionHasActiveWork = mainHasActiveWork || hasActiveConversationWork({ agents: agentTree });
+  const modelSwitchBusy = sessionHasActiveWork
+    || queueState.items.length > 0
+    || optimisticQueueItems.length > 0
+    || Boolean(snapshot.data?.queuedItems.length);
+  const selectedModel = snapshot.data?.model ?? draftModel ?? models.data?.defaultModel ?? '';
+  const switchModel = useMutation({
+    mutationFn: async (model: string) => {
+      if (!conversationRef) {
+        setDraftModel(model);
+        return;
+      }
+      await updateConversation(scope, conversationRef, { model });
+    },
+    onSuccess: async () => {
+      setModelNotice('');
+      if (conversationRef) await queryClient.invalidateQueries({ queryKey: ['conversation', scope, conversationRef] });
+    },
+    onError: (error) => setModelNotice(error instanceof Error ? error.message : '模型切换失败'),
+  });
   const loadingConversation = shouldShowConversationLoading({
     hasConversationRef: Boolean(conversationRef),
     hasSnapshot: Boolean(snapshot.data),
@@ -255,6 +281,8 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
       transcriptStableRef.current = false;
       setOptimisticQueueItems([]);
       setPresentedSteerIds(new Set());
+      setDraftModel(undefined);
+      setModelNotice('');
       agentDispatch({ type: 'reset' });
       setAgentDrawerOpen(false);
       setSelectedAgentId(undefined);
@@ -502,7 +530,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const content = prompt.trim();
-    if (!content || (mainHasActiveWork && queueBusyRef.current.has('enqueue'))) return;
+    if (!content || !selectedModel || (mainHasActiveWork && queueBusyRef.current.has('enqueue'))) return;
     if (mainHasActiveWork && conversationRef) {
       const optimisticId = `optimistic-${crypto.randomUUID()}`;
       const delivery = deliveryForFollowUp(followUpBehavior);
@@ -557,6 +585,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
         scope,
         conversationRef,
         clientRequestId,
+        model: selectedModel,
         prompt: content,
         signal: controller.signal,
         onEvent: (envelope) => handleStreamEvent(envelope, streamToken),
@@ -835,6 +864,7 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
             </div>
           </section>
         ) : queueNotice ? <p className="queue-notice standalone" role="status">{queueNotice}</p> : null}
+        {modelNotice ? <p className="queue-notice standalone" role="alert">{modelNotice}</p> : null}
         <form className="composer-wrap" onSubmit={(event) => void submit(event)}>
           <div className="composer">
           <textarea
@@ -862,10 +892,26 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
                     aria-label={mainHasActiveWork ? '发送后续消息' : '发送'}
                   ><ArrowUp size={18} /></button>
                 </>
-              : <button type="submit" className="send-button" disabled={!prompt.trim()} aria-label="发送"><ArrowUp size={18} /></button>}
+              : <button type="submit" className="send-button" disabled={!prompt.trim() || !selectedModel} aria-label="发送"><ArrowUp size={18} /></button>}
           </div>
           <div className="composer-footer">
-            <ModelSwitcher actualModel={meta.data?.model.displayName} />
+            <ModelSwitcher
+              models={models.data?.models ?? []}
+              value={selectedModel}
+              busy={modelSwitchBusy}
+              loading={models.isPending}
+              changing={switchModel.isPending}
+              warning={models.data?.warning}
+              onChange={(model) => {
+                if (model === selectedModel) return;
+                if (modelSwitchBusy) {
+                  setModelNotice('当前会话仍有主 Agent、子 Agent 或排队任务，全部空闲后才能切换模型。');
+                  return;
+                }
+                setModelNotice('');
+                switchModel.mutate(model);
+              }}
+            />
             {mainHasActiveWork ? <label className="follow-up-setting">
               后续消息
               <select

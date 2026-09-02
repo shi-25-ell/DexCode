@@ -161,7 +161,7 @@ export function createCodingAgent(
   skillRegistry?: SkillRegistry,
   environment?: { scope: SessionScope; rootPath?: string },
   managedMemory?: ManagedMemoryCoordinator,
-  extensions?: { orchestration?: AgentOrchestrationPort },
+  extensions?: { orchestration?: AgentOrchestrationPort; resolveModel?: (model?: string) => ModelClient },
 ) {
   if (!environment) throw new Error('CodingAgent environment is required');
   const agentEnvironment = environment;
@@ -177,6 +177,31 @@ export function createCodingAgent(
     orchestration: extensions?.orchestration,
   });
   const childSkillRegistries = new Map<string, ReturnType<typeof createAgentScopedSkillRegistry>>();
+  const contextRuntimes = new Map<ModelClient, {
+    policy?: ReturnType<typeof defaultContextPolicy>;
+    engine?: ReturnType<typeof createContextEngine>;
+  }>();
+  const resolveModel = (model?: string) => extensions?.resolveModel?.(model) ?? modelClient;
+  const contextRuntimeFor = (runModel: ModelClient) => {
+    const existing = contextRuntimes.get(runModel);
+    if (existing) return existing;
+    const contextStrategy = contextCompactionStrategy();
+    const runtimeContext = contextStrategy === 'four_layer' && sessionRepository ? {
+      policy: defaultContextPolicy(runModel),
+      engine: createContextEngine({
+        modelClient: runModel,
+        artifactRepository: sessionRepository,
+        lifecycle: {
+          loadSession: (sessionId: string) => sessionRepository.loadSession(sessionId),
+          beginContextCompaction: (input) => sessionRepository.beginContextCompaction(input),
+          failContextCompaction: (input) => sessionRepository.failContextCompaction(input),
+          recordContextProviderUsage: (input) => sessionRepository.recordContextProviderUsage(input),
+        },
+      }),
+    } : {};
+    contextRuntimes.set(runModel, runtimeContext);
+    return runtimeContext;
+  };
   function withManagedMemoryTools(base: CodingToolHost, generation: number, actor: ManagedMemoryActor): CodingToolHost {
     if (!managedMemory) return base;
     return {
@@ -214,17 +239,6 @@ export function createCodingAgent(
     });
   }
   const contextStrategy = contextCompactionStrategy();
-  const contextPolicy = contextStrategy === 'four_layer' ? defaultContextPolicy(modelClient) : undefined;
-  const contextEngine = contextStrategy === 'four_layer' && sessionRepository ? createContextEngine({
-    modelClient,
-    artifactRepository: sessionRepository,
-    lifecycle: {
-      loadSession: (sessionId) => sessionRepository.loadSession(sessionId),
-      beginContextCompaction: (input) => sessionRepository.beginContextCompaction(input),
-      failContextCompaction: (input) => sessionRepository.failContextCompaction(input),
-      recordContextProviderUsage: (input) => sessionRepository.recordContextProviderUsage(input),
-    },
-  }) : undefined;
 
   async function runTask(
     sessionId: string,
@@ -247,11 +261,14 @@ export function createCodingAgent(
       lifecycle?: AgentLifecycleHooks;
       origin?: AgentOrigin;
       budget?: AgentRunBudget;
+      model?: string;
     } = {},
   ): Promise<TaskSummary> {
     if (!sessionRepository) throw new Error('sessionRepository is required for runTask');
     const session = await sessionRepository.loadSession(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
+    const runModel = resolveModel(options.model ?? session.selectedModel);
+    const { policy: contextPolicy, engine: contextEngine } = contextRuntimeFor(runModel);
     const expectedScope = JSON.stringify(agentEnvironment.scope);
     if (JSON.stringify(session.scope) !== expectedScope) {
       throw new Error('Session scope does not match the Agent environment');
@@ -298,6 +315,7 @@ export function createCodingAgent(
         context: runContext,
         profile: 'main',
         origin: 'user',
+        model: runModel.model,
         ...(options.clientRequestId ? { clientRequestId: options.clientRequestId } : {}),
       });
     }
@@ -438,6 +456,7 @@ export function createCodingAgent(
         metadata: { sessionId },
         toolPolicy: preparedMemory.enabled ? undefined : { deny: [...MEMORY_TOOL_NAMES] },
         toolHost: withManagedMemoryTools(effectiveToolHost, preparedMemory.generation, 'main-agent'),
+        modelClient: runModel,
         contextPolicy: contextEngine && contextPolicy ? {
           mode: 'managed',
           engine: contextEngine,
@@ -489,6 +508,7 @@ export function createCodingAgent(
     const report: RunReport = {
       version: 1,
       runId,
+      model: runModel.model,
       context: runContext,
       status: result.status,
       terminationReason: result.terminationReason,
@@ -512,7 +532,7 @@ export function createCodingAgent(
     };
     publish({ type: 'run_phase_changed', phase: 'finalizing' });
     const finished = await sessionRepository.finishRun({ sessionId, report, summary: taskSummary });
-    const conversation = projectConversation(finished.session, { contextWindow: modelClient.contextWindow });
+    const conversation = projectConversation(finished.session, { contextWindow: runModel.contextWindow });
     publish({
       type: 'run_finished',
       terminal: {
@@ -591,6 +611,8 @@ export function createCodingAgent(
     const context = await contextManager.buildForPrompt(input.run.input, null, { projectKnowledge });
     const session = await sessionRepository.loadSession(input.sessionId);
     if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+    const childModel = resolveModel(input.run.modelId ?? input.agent.modelId ?? session.selectedModel);
+    const { policy: contextPolicy, engine: contextEngine } = contextRuntimeFor(childModel);
     const sections: ContextSection[] = [
       { source: 'systemPrompt', content: `You are a DexCode child Agent named ${input.agent.name}.\n${input.agent.definitionSnapshot.systemPrompt}\nDo not ask for interactive approval. If an operation is blocked, report it and continue safely.` },
       ...buildSystemSections(context, projectKnowledge, [], '', agentEnvironment.scope).slice(1),
@@ -630,6 +652,7 @@ export function createCodingAgent(
       toolPolicy: { ...input.agent.definitionSnapshot.toolPolicy, allowOrchestration: false },
       toolHost: childToolHost,
       skillRegistry: childSkillRegistry,
+      modelClient: childModel,
       contextPolicy: contextEngine && contextPolicy ? {
         mode: 'managed',
         engine: contextEngine,

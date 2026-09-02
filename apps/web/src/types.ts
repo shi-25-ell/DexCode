@@ -98,6 +98,7 @@ export type ContextPresentation = {
 export type ConversationSnapshot = {
   ref: string;
   title: string;
+  model?: string;
   state: 'idle' | 'running' | 'waiting' | 'failed';
   activeRun?: { runId: string; phase: 'running' | 'waiting_confirm' | 'closing' | 'stopping' };
   queuedItems: QueueItem[];
@@ -166,7 +167,15 @@ export type QueueMutationOutcome =
   | { outcome: 'already_consumed'; itemId: string; runId: string; sessionRevision: number };
 
 export type ModelDescriptor = {
+  id: string;
   displayName: string;
   contextWindow?: number;
+  maxOutputTokens?: number;
   providerDisplayName?: string;
+};
+
+export type ModelCatalog = {
+  defaultModel: string;
+  models: ModelDescriptor[];
+  warning?: string;
 };

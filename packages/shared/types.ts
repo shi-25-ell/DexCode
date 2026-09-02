@@ -153,6 +153,7 @@ export type ContextOwner =
 export type RunReport = {
   version: 1;
   runId: string;
+  model?: string;
   context?: RunContext;
   status: RunStatus;
   terminationReason: string;
@@ -336,6 +337,7 @@ export type SessionLedgerRecord =
       parentRunId?: string;
       profile?: string;
       origin?: string;
+      model?: string;
     }
   | { seq: number; at: string; runId: string; type: 'message'; message: ChatMessage; messageId?: string; turn?: number; origin?: string }
   | { seq: number; at: string; runId: string; type: 'tool_started'; callId: string; tool: string; input?: Record<string, unknown> }
@@ -376,6 +378,7 @@ export type RunContext = {
 export type Session = {
   sessionId: string;
   scope: SessionScope;
+  selectedModel?: string;
   createdAt: string;
   updatedAt: string;
   title?: string;

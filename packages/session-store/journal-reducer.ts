@@ -61,6 +61,10 @@ function applyRecord(session: Session, record: SessionJournalRecord): void {
         else session.title = record.title;
       }
       if (record.archived !== undefined) session.archived = record.archived;
+      if ('selectedModel' in record) {
+        if (record.selectedModel === null) delete session.selectedModel;
+        else session.selectedModel = record.selectedModel;
+      }
       return;
     case 'session_message_committed':
       session.messages.push(structuredClone(record.message));

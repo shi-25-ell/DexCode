@@ -282,6 +282,7 @@ export function createAgentManager(options: {
     const agent: AgentRecord = {
       agentId, sessionId: caller.sessionId, rootAgentId, parentAgentId: caller.callerAgentId ?? rootAgentId,
       createdByRunId: caller.callerRunId, name: input.name?.trim() || resolved.definition.name, task: input.task,
+      ...(caller.modelId ? { modelId: caller.modelId } : {}),
       contextMode, isolation, definitionName: resolved.definition.name, definitionDigest: resolved.digest,
       definitionSnapshot: resolved.definition, contextSeed: contextMode === 'fork' ? structuredClone(caller.forkSnapshot) : [],
       status: 'running', currentRunId: agentRunId, lastRunId: agentRunId, createdAt: now, updatedAt: now,
@@ -292,6 +293,7 @@ export function createAgentManager(options: {
     }).length >= limits.maxConcurrentSharedWriters) throw new AgentManagerError('write_capacity_exceeded', 'A shared-workspace writer is already running');
     const run: AgentRunRecord = {
       agentRunId, agentId, invokedByRunId: caller.callerRunId, invokedByTurn: caller.callerTurn,
+      ...(caller.modelId ? { modelId: caller.modelId } : {}),
       invokedByToolCallId: caller.toolCallId, delegationGroupId: caller.delegationGroupId,
       trigger: 'spawn', status: 'running', input: input.task, startedAt: now,
     };
@@ -314,9 +316,11 @@ export function createAgentManager(options: {
       const replay = tree.operations[operationId];
       if (replay?.agentRunId) return { agent_id: replay.agentId, agent_run_id: replay.agentRunId, status: 'running', replayed: true };
       const now = new Date().toISOString();
+      const modelId = agent.modelId ?? caller.modelId;
       const run: AgentRunRecord = {
         agentRunId: `agent-run-${crypto.randomUUID()}`, agentId: agent.agentId,
         invokedByRunId: caller.callerRunId, invokedByTurn: caller.callerTurn,
+        ...(modelId ? { modelId } : {}),
         invokedByToolCallId: caller.toolCallId, delegationGroupId: caller.delegationGroupId,
         trigger: 'followup', status: 'running', input: input.task, startedAt: now,
       };

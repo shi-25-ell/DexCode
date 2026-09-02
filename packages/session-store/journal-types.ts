@@ -12,7 +12,7 @@ export type SessionJournalHeader = {
 
 export type SessionJournalRecord =
   | SessionLedgerRecord
-  | { type: 'session_meta_updated'; title?: string | null; archived?: boolean }
+  | { type: 'session_meta_updated'; title?: string | null; archived?: boolean; selectedModel?: string | null }
   | { type: 'session_message_committed'; message: ChatMessage }
   | { type: 'task_summary_committed'; summary: TaskSummary }
   | { type: 'client_request_registered'; clientRequestId: string }

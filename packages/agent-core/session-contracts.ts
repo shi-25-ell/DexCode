@@ -51,6 +51,7 @@ export type BeginRunInput = {
   parentRunId?: string;
   profile?: string;
   origin?: string;
+  model?: string;
 };
 
 export type AppendRunMessageInput = {
@@ -98,6 +99,7 @@ export interface SessionRepository {
     parentRunId?: string;
     profile?: string;
     origin?: string;
+    model?: string;
   }): Promise<{ session: Session; created: boolean }>;
   commitContext(input: {
     sessionId: string;
@@ -145,7 +147,7 @@ export interface SessionRepository {
   cancelQueueItem(input: { sessionId: string; itemId: string; operationId: string; expectedSessionRevision?: number }): Promise<Extract<QueueMutationOutcome, { outcome: 'cancelled' | 'already_cancelled' | 'already_consumed' }>>;
   reorderQueueItems(input: { sessionId: string; orderedItemIds: string[]; operationId: string; expectedSessionRevision: number }): Promise<{ orderedItemIds: string[]; sessionRevision: number; replayed?: boolean }>;
   consumeSteer(input: { sessionId: string; runId: string; operationId: string }): Promise<{ item: QueueItemView; message: UserMessage; sessionRevision: number } | null>;
-  beginRunFromQueue(input: { sessionId: string; runId: string; context: RunContext; operationId: string }): Promise<{ session: Session; item: QueueItemView; message: UserMessage } | null>;
+  beginRunFromQueue(input: { sessionId: string; runId: string; context: RunContext; operationId: string; model?: string }): Promise<{ session: Session; item: QueueItemView; message: UserMessage } | null>;
   requeueSteers(input: { sessionId: string; runId: string; reason: QueueRequeueReason; operationId: string }): Promise<{ items: QueueItemView[]; sessionRevision: number }>;
   setQueuePaused(input: { sessionId: string; paused: boolean; operationId: string; reason?: QueuePauseReason }): Promise<{ paused: boolean; sessionRevision: number }>;
   readProjectKnowledge(workspaceId?: string): Promise<string>;

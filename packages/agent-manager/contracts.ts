@@ -36,6 +36,7 @@ export type AgentRecord = {
   rootAgentId: string;
   parentAgentId: string | null;
   createdByRunId: string;
+  modelId?: string;
   name: string;
   task: string;
   contextMode: AgentContextMode;
@@ -66,6 +67,7 @@ export type AgentRunRecord = {
   agentRunId: string;
   agentId: string;
   invokedByRunId: string;
+  modelId?: string;
   invokedByTurn?: number;
   invokedByToolCallId?: string;
   delegationGroupId?: string;
@@ -169,6 +171,7 @@ export type AgentCallerContext = {
   sessionId: string;
   callerAgentId?: string;
   callerRunId: string;
+  modelId?: string;
   callerTurn: number;
   toolCallId: string;
   delegationGroupId: string;

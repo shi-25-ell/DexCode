@@ -202,7 +202,7 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     };
   };
   const manager = createAgentManager({ enabled: true, store, definitions, runChild });
-  const caller = (toolCallId: string) => ({ sessionId, callerRunId: 'main-run', callerTurn: 1, toolCallId, delegationGroupId: 'group-1', forkSnapshot: [] });
+  const caller = (toolCallId: string) => ({ sessionId, callerRunId: 'main-run', callerTurn: 1, toolCallId, delegationGroupId: 'group-1', forkSnapshot: [], modelId: 'selected-model' });
   try {
     assert.equal(definitions.resolve('assistant')?.definition.name, 'assistant');
     assert.deepEqual(manager.definitions!().map(({ name }) => name), ['general-writer', 'general-reader', 'researcher', 'reviewer']);
@@ -217,11 +217,13 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     assert.match(first.message, /foreground wait_agent\(block=true\).*background completion/i);
     const firstDetail = await manager.detail(sessionId, first.agent_id);
     assert.equal(firstDetail?.agent.definitionName, 'general-reader');
+    assert.equal(firstDetail?.agent.modelId, 'selected-model');
     assert.deepEqual(firstDetail?.tools, []);
     const firstRun = (await manager.detail(sessionId, first.agent_id))?.runs[0];
     assert.equal(firstRun?.invokedByTurn, 1);
     assert.equal(firstRun?.invokedByToolCallId, 'spawn-1');
     assert.equal(firstRun?.delegationGroupId, 'group-1');
+    assert.equal(firstRun?.modelId, 'selected-model');
     const second = await manager.spawn({ task: 'two', agent: 'reviewer' }, caller('spawn-2')) as { agent_id: string };
     const writer = await manager.spawn({ task: 'write', agent: 'general-writer' }, caller('spawn-writer')) as { agent_id: string };
     const blockedWriter = await manager.spawn({ task: 'blocked-write', agent: 'general-writer' }, caller('spawn-blocked-writer')) as { code: string };
@@ -245,6 +247,7 @@ test('AgentManager runs parallel children, waits, follows up and stops without d
     assert.equal(followupRun?.invokedByTurn, 1);
     assert.equal(followupRun?.invokedByToolCallId, 'followup-1');
     assert.equal(followupRun?.delegationGroupId, 'group-1');
+    assert.equal(followupRun?.modelId, 'selected-model');
     await manager.wait({ agentIds: [first.agent_id], block: true, timeoutMs: 1_000 }, caller('wait-2'));
     const afterFollowupDelivery = (await store.load(sessionId, false))!;
     const firstAgentNotifications = afterFollowupDelivery.inbox.filter((item) => item.agentId === first.agent_id);

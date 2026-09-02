@@ -306,7 +306,7 @@ function withAgentActivities(items: ConversationItem[], agents: AgentTreeSnapsho
   return result;
 }
 
-export function projectConversation(session: Session, options: { contextWindow?: number; activePhase?: 'running' | 'waiting_confirm' | 'closing' | 'stopping'; agents?: AgentTreeSnapshotView | null } = {}): ConversationViewSnapshot {
+export function projectConversation(session: Session, options: { model?: string; contextWindow?: number; activePhase?: 'running' | 'waiting_confirm' | 'closing' | 'stopping'; agents?: AgentTreeSnapshotView | null } = {}): ConversationViewSnapshot {
   const item = projectConversationListItem(session);
   const queue = projectQueue(session.sessionId, session.ledger ?? []);
   const items = projectLedger(session.ledger ?? [], options.agents ?? null).map((entry) => (
@@ -317,6 +317,7 @@ export function projectConversation(session: Session, options: { contextWindow?:
   return {
     ref: item.ref,
     title: item.title,
+    ...((session.selectedModel ?? options.model) ? { model: session.selectedModel ?? options.model } : {}),
     state: options.activePhase === 'waiting_confirm' ? 'waiting' : item.state,
     ...(session.activeTaskId ? { activeRun: { runId: session.activeTaskId, phase: options.activePhase ?? (item.state === 'waiting' ? 'waiting_confirm' : 'running') } } : {}),
     queuedItems: queue.pending,

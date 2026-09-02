@@ -48,6 +48,7 @@ describe('streamConversation', () => {
       scope: { kind: 'general' },
       clientRequestId: 'request-1',
       prompt: '继续',
+      model: 'test-model',
       signal: new AbortController().signal,
       onEvent: (envelope) => delivered.push(envelope.seq),
     });
@@ -58,8 +59,8 @@ describe('streamConversation', () => {
     const first = fetchMock.mock.calls[0]![1] as RequestInit;
     const second = fetchMock.mock.calls[1]![1] as RequestInit;
     expect(new Headers(first.headers).get('X-DexCode-Stream-Version')).toBe('2');
-    expect(JSON.parse(String(first.body))).toMatchObject({ clientRequestId: 'request-1', afterSeq: 0 });
-    expect(JSON.parse(String(second.body))).toMatchObject({ clientRequestId: 'request-1', afterSeq: 2 });
+    expect(JSON.parse(String(first.body))).toMatchObject({ clientRequestId: 'request-1', model: 'test-model', afterSeq: 0 });
+    expect(JSON.parse(String(second.body))).toMatchObject({ clientRequestId: 'request-1', model: 'test-model', afterSeq: 2 });
     const third = fetchMock.mock.calls[2]![1] as RequestInit;
     expect(JSON.parse(String(third.body))).toMatchObject({ clientRequestId: 'request-1', afterSeq: 3 });
   });
@@ -91,6 +92,7 @@ describe('streamConversation', () => {
       conversationRef: conversation.ref,
       clientRequestId: 'request-chain',
       prompt: 'start chain',
+      model: 'test-model',
       signal: new AbortController().signal,
       onEvent: (envelope) => delivered.push(`${envelope.runId}:${envelope.seq}`),
     });

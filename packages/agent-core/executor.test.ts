@@ -263,6 +263,7 @@ test('orchestration tools receive immutable caller context and stay out of ordin
   assert.equal(calls.length, 2);
   assert.deepEqual((calls[0] as { input: unknown }).input, { task: 'inspect', contextMode: 'fork' });
   assert.equal((calls[0] as { caller: { forkSnapshot: ChatMessage[] } }).caller.forkSnapshot.at(-1)?.role, 'user');
+  assert.equal((calls[0] as { caller: { modelId?: string } }).caller.modelId, model.model);
   assert.deepEqual((calls[1] as { input: unknown }).input, { agentIds: ['agent-a'], mode: 'all', timeoutMs: 30_000 });
   assert.equal(events.some((event) => event.type === 'tool' || event.type === 'tool_view' || event.type === 'tool_status'), false);
   const spawn = requestedTools[0]?.find((tool) => (tool as { function?: { name?: string } }).function?.name === 'spawn_agent') as { function: { description?: string; parameters: { required: string[]; properties: { agent: { enum?: string[]; default?: string; description?: string }; context_mode: { description?: string } } } } };

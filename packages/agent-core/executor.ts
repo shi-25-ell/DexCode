@@ -805,6 +805,7 @@ export function createExecutor(
                 sessionId,
                 ...(options.callerAgentId ? { callerAgentId: options.callerAgentId } : {}),
                 callerRunId: runId,
+                modelId: modelClient.model,
                 callerTurn: modelTurnCount,
                 toolCallId: call.id,
                 delegationGroupId: `delegation-${runId}-${modelTurnCount}`,

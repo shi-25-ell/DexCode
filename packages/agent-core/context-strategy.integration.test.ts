@@ -228,6 +228,7 @@ test('main Agent keeps the durable tool loop while lifecycle extension failures 
     process.env.CONTEXT_COMPACTION_STRATEGY = 'legacy';
     const scope = { kind: 'workspace' as const, workspaceId: projectId };
     const session = await repository.createSession(scope);
+    await repository.setSelectedModel({ sessionId: session.sessionId, model: 'runtime-main-test' });
     let modelTurn = 0;
     const model: ModelClient = {
       model: 'runtime-main-test',
@@ -263,14 +264,23 @@ test('main Agent keeps the durable tool loop while lifecycle extension failures 
         yield { version: 1, type: 'turn_completed', response };
       },
     };
+    const defaultModel: ModelClient = {
+      ...model,
+      model: 'default-memory-model',
+      async *streamMessage(): AsyncIterable<ModelEvent> {
+        throw new Error('default model must not handle the selected conversation Run');
+      },
+    };
     const agent = createCodingAgent(
       { buildForPrompt: async (prompt) => ({ prompt, selectedFile: null, selectedFileContent: null, workspaceSummary: 'README.md', contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0 } }) },
       toolHost(),
-      model,
+      defaultModel,
       repository,
       undefined,
       undefined,
       { scope, rootPath: projectDir },
+      undefined,
+      { resolveModel: (modelId) => modelId === model.model ? model : defaultModel },
     );
     const lifecycle: string[] = [];
 
@@ -291,6 +301,7 @@ test('main Agent keeps the durable tool loop while lifecycle extension failures 
 
     const loaded = await repository.loadSession(session.sessionId);
     assert.equal(summary.status, 'completed', JSON.stringify(loaded?.runReports?.at(-1)));
+    assert.equal(loaded?.runReports?.at(-1)?.model, 'runtime-main-test');
     assert.deepEqual(lifecycle, ['start', 'turn-1', 'turn-2', 'end']);
     assert.deepEqual(loaded?.messages.map((message) => message.role), ['user', 'assistant', 'tool', 'assistant']);
     assert.deepEqual(loaded?.runReports?.at(-1)?.runtimeWarnings, [

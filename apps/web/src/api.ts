@@ -1,7 +1,7 @@
 import { createParser } from 'eventsource-parser';
 import type { RunEventEnvelope } from '../../../packages/run-protocol/contracts';
 import { isDroppableRunEvent, parseRunEventEnvelope } from '../../../packages/run-protocol/validation';
-import type { AgentActivityEnvelope, AgentDetail, AgentTreeSnapshot, Capability, ConversationListItem, ConversationScope, ConversationSnapshot, QueueDelivery, QueueMutationOutcome } from './types';
+import type { AgentActivityEnvelope, AgentDetail, AgentTreeSnapshot, Capability, ConversationListItem, ConversationScope, ConversationSnapshot, ModelCatalog, QueueDelivery, QueueMutationOutcome } from './types';
 
 function workspaceHeaders(workspaceRef?: string): HeadersInit {
   return workspaceRef ? { 'X-Workspace-Ref': workspaceRef } : {};
@@ -61,12 +61,16 @@ export async function getConversation(scope: ConversationScope, ref: string): Pr
   })).conversation;
 }
 
-export async function updateConversation(scope: ConversationScope, ref: string, meta: { title?: string; archived?: boolean }): Promise<void> {
+export async function updateConversation(scope: ConversationScope, ref: string, meta: { title?: string; archived?: boolean; model?: string }): Promise<void> {
   await apiJson(`/api/conversations/${encodeURIComponent(ref)}?${scopeQuery(scope)}`, {
     method: 'PATCH',
     workspaceRef: scopeWorkspaceRef(scope),
     body: JSON.stringify(meta),
   });
+}
+
+export async function getModelCatalog(refresh = false): Promise<ModelCatalog> {
+  return apiJson<ModelCatalog>(`/api/models${refresh ? '?refresh=true' : ''}`);
 }
 
 export async function deleteConversation(scope: ConversationScope, ref: string): Promise<void> {
@@ -85,6 +89,7 @@ export async function streamConversation(input: {
   conversationRef?: string;
   clientRequestId: string;
   prompt: string;
+  model: string;
   signal: AbortSignal;
   afterSeq?: number;
   onEvent: (event: RunEventEnvelope) => void;
@@ -139,6 +144,7 @@ export async function streamConversation(input: {
           prompt: input.prompt,
           conversationRef: input.conversationRef,
           clientRequestId: input.clientRequestId,
+          model: input.model,
           afterSeq: rootRunId ? (lastSeqByRun.get(rootRunId) ?? 0) : (input.afterSeq ?? 0),
           scope: input.scope.kind === 'general'
             ? { kind: 'general' }

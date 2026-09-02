@@ -5,7 +5,7 @@ import { createCodingAgent } from '../../packages/agent-core/index.ts';
 import { createConversationRunCoordinator } from '../../packages/agent-core/conversation-run-coordinator.ts';
 import { QueueMutationError } from '../../packages/agent-core/session-contracts.ts';
 import { createContextManager } from '../../packages/context-builder/index.ts';
-import { createModelClient } from '../../packages/llm-client/index.ts';
+import { createModelRegistry } from '../../packages/llm-client/index.ts';
 import { createApprovalModeStore, createCodingToolHost, isApprovalMode } from '../../packages/tool-gateway/index.ts';
 import { createWorkspaceRegistry, createWorkspaceService, type WorkspaceRecord } from '../../packages/workspace-manager/index.ts';
 import { createSessionRepository } from '../../packages/session-store/index.ts';
@@ -371,8 +371,14 @@ function cancelPendingRun(runId: string, reason: string) {
 }
 
 // ── 模块级初始化 ──
-const modelClient = createModelClient();
+const modelRegistry = createModelRegistry();
+const modelClient = modelRegistry.defaultClient;
 const sessionRepository: SessionRepository = createSessionRepository();
+
+function projectSessionConversation(session: Session, options: NonNullable<Parameters<typeof projectConversation>[1]> = {}) {
+  const selected = modelRegistry.clientFor(session.selectedModel);
+  return projectConversation(session, { ...options, model: selected.model, contextWindow: selected.contextWindow });
+}
 const multiAgentFeatureEnabled = multiAgentEnabled();
 const configuredCommandShell = process.env.DEX_COMMAND_SHELL?.trim().toLowerCase();
 if (configuredCommandShell && configuredCommandShell !== 'powershell' && configuredCommandShell !== 'bash') {
@@ -448,6 +454,7 @@ type ConversationRunPayload = {
   prompt?: string;
   conversationRef?: string;
   clientRequestId?: string;
+  model?: string;
   afterSeq?: number;
   scope?: { kind?: 'general' | 'workspace'; workspaceRef?: string };
 };
@@ -515,7 +522,7 @@ async function loadWorkspaceRuntime(rootDir?: string, options: { allowCreate?: b
     nextSkillRegistry,
     { scope: { kind: 'workspace', workspaceId: workspace.workspaceId }, rootPath: workspace.canonicalRootPath },
     nextManagedMemory,
-    { orchestration: multiAgentFeatureEnabled ? nextAgentManager : undefined },
+    { orchestration: multiAgentFeatureEnabled ? nextAgentManager : undefined, resolveModel: (model) => modelRegistry.clientFor(model) },
   );
   const runtime = {
     workspace,
@@ -552,12 +559,15 @@ const generalAgent = createCodingAgent(
   externalMcpRegistry,
   undefined,
   { scope: { kind: 'general' } },
+  undefined,
+  { resolveModel: (model) => modelRegistry.clientFor(model) },
 );
 
 const conversationRunCoordinator = createConversationRunCoordinator({
   repository: sessionRepository,
   async resolveEnvironment(session) {
-    if (session.scope.kind === 'general') return { agent: generalAgent, context: { scope: session.scope } };
+    const model = session.selectedModel ?? modelRegistry.defaultModel;
+    if (session.scope.kind === 'general') return { agent: generalAgent, context: { scope: session.scope }, model };
     const runtime = await runtimeForSession(session);
     return {
       agent: runtime.codingAgent,
@@ -565,6 +575,7 @@ const conversationRunCoordinator = createConversationRunCoordinator({
         scope: session.scope,
         workspace: { workspaceId: session.scope.workspaceId, rootPath: runtime.workspace.canonicalRootPath },
       },
+      model,
     };
   },
   createHooks: (sessionId, runId, sink, emit) => ({
@@ -963,7 +974,7 @@ async function writeCompletedV2Replay(res: ServerResponse, session: Session, run
     for (const event of replay.events) writer.write(event);
   } else {
     const report = session.runReports?.find((candidate) => candidate.runId === runId);
-    const conversation = projectConversation(session, { contextWindow: modelClient.contextWindow });
+    const conversation = projectSessionConversation(session);
     const reconstructed: RunEventEnvelope[] = [
       ...(afterSeq === 0 ? [{
         version: 2,
@@ -1148,7 +1159,7 @@ export function startRuntimeServer() {
       const agents = multiAgentFeatureEnabled && latestSession.scope.kind === 'workspace'
         ? await (await runtimeForSession(latestSession)).agentManager.list(latestSession.sessionId)
         : null;
-      sendJson(res, 200, { conversation: projectConversation(latestSession, { contextWindow: modelClient.contextWindow, ...(activePhase ? { activePhase } : {}), agents }) });
+      sendJson(res, 200, { conversation: projectSessionConversation(latestSession, { ...(activePhase ? { activePhase } : {}), agents }) });
       return;
     }
 
@@ -1323,13 +1334,38 @@ export function startRuntimeServer() {
         sendJson(res, 200, { ok: true });
         return;
       }
-      const meta = await parseBody<{ title?: string; archived?: boolean }>(req);
+      const meta = await parseBody<{ title?: string; archived?: boolean; model?: string }>(req);
       if (meta.title !== undefined && !meta.title.trim()) throw new HttpError(400, '会话标题不能为空');
+      if (meta.model !== undefined) {
+        const nextModel = meta.model.trim();
+        if (!nextModel) throw new HttpError(400, '模型不能为空');
+        const currentModel = session.selectedModel ?? modelRegistry.defaultModel;
+        if (nextModel !== currentModel) {
+          const assertIdle = async () => {
+            const runtimeSnapshot = await conversationRunCoordinator.snapshot(session.sessionId);
+            const tree = session.scope.kind === 'workspace'
+              ? await (await runtimeForSession(session)).agentManager.list(session.sessionId)
+              : null;
+            const childBusy = Boolean(tree?.agents.some((agent) => agent.status !== 'idle') || tree?.runs.some((run) => run.status === 'running'));
+            if (runtimeSnapshot.activeRun || runtimeSnapshot.activeChain || runtimeSnapshot.queuedItems.length > 0 || childBusy) {
+              throw new HttpError(409, '当前会话仍有运行、子 Agent 或排队消息，暂不能切换模型');
+            }
+          };
+          await assertIdle();
+          await modelRegistry.assertSelectable(nextModel).catch((error) => {
+            throw new HttpError(400, error instanceof Error ? error.message : '模型不可用');
+          });
+          await assertIdle();
+          await sessionRepository.setSelectedModel({ sessionId: session.sessionId, model: nextModel }).catch((error) => {
+            throw new HttpError(409, error instanceof Error ? error.message : '当前会话暂不能切换模型');
+          });
+        }
+      }
       await sessionRepository.updateSessionMeta(conversationRef, {
         ...(meta.title !== undefined ? { title: meta.title.trim() } : {}),
         ...(meta.archived !== undefined ? { archived: meta.archived } : {}),
       });
-      sendJson(res, 200, { ok: true });
+      sendJson(res, 200, { ok: true, model: meta.model?.trim() ?? session.selectedModel ?? modelRegistry.defaultModel });
       return;
     }
 
@@ -1362,10 +1398,12 @@ export function startRuntimeServer() {
       const payload = await parseBody<ConversationRunPayload>(req);
       const prompt = payload.prompt?.trim() ?? '';
       const clientRequestId = payload.clientRequestId?.trim() ?? '';
+      const requestedModel = payload.model?.trim();
       const streamVersion = req.headers['x-dexcode-stream-version'] === '2' ? 2 : 1;
       const afterSeq = Number.isSafeInteger(payload.afterSeq) && Number(payload.afterSeq) >= 0 ? Number(payload.afterSeq) : 0;
       if (!prompt) throw new HttpError(400, '消息不能为空');
       if (!clientRequestId) throw new HttpError(400, 'clientRequestId required');
+      if (payload.model !== undefined && !requestedModel) throw new HttpError(400, '模型不能为空');
 
       let scope: SessionScope;
       if (payload.scope?.kind === 'workspace') {
@@ -1393,6 +1431,10 @@ export function startRuntimeServer() {
       let prestarted = false;
       if (payload.conversationRef) {
         session = await loadScopedSession(payload.conversationRef, scope);
+        const selectedModel = session.selectedModel ?? modelRegistry.defaultModel;
+        if (requestedModel && requestedModel !== selectedModel) {
+          throw new HttpError(409, '会话模型已变化，请刷新后重试');
+        }
         if (session.clientRequestIds?.includes(clientRequestId)) {
           if (streamVersion === 2) {
             const existingRunId = runIdForClientRequest(session, clientRequestId);
@@ -1404,17 +1446,22 @@ export function startRuntimeServer() {
           }
           res.writeHead(200, sseHeaders());
           res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.sessionId, isNew: false })}\n\n`);
-          res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }), idempotentReplay: true } })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectSessionConversation(session), idempotentReplay: true } })}\n\n`);
           res.end();
           return;
         }
       } else {
+        const initialModel = requestedModel ?? modelRegistry.defaultModel;
+        await modelRegistry.assertSelectable(initialModel).catch((error) => {
+          throw new HttpError(400, error instanceof Error ? error.message : '模型不可用');
+        });
         const materialized = await sessionRepository.materializeRun({
           scope,
           clientRequestId,
           runId,
           userMessage: { role: 'user', content: prompt },
           context: runContext,
+          model: initialModel,
         });
         session = materialized.session;
         isNew = materialized.created;
@@ -1430,7 +1477,7 @@ export function startRuntimeServer() {
           }
           res.writeHead(200, sseHeaders());
           res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.sessionId, isNew: false })}\n\n`);
-          res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectConversation(session, { contextWindow: modelClient.contextWindow }), idempotentReplay: true } })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'result', result: { conversation: projectSessionConversation(session), idempotentReplay: true } })}\n\n`);
           res.end();
           return;
         }
@@ -1566,6 +1613,12 @@ export function startRuntimeServer() {
         return;
       }
       sendJson(res, 200, response);
+      return;
+    }
+
+    // ── GET /api/models ──
+    if (url.pathname === '/api/models' && req.method === 'GET') {
+      sendJson(res, 200, await modelRegistry.listModels({ refresh: url.searchParams.get('refresh') === 'true' }));
       return;
     }
 
