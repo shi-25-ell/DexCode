@@ -14,7 +14,9 @@ cd DexCode
 npm install
 Copy-Item .env.example .env
 
-编辑 .env，将 LLM_API_KEY 和 LLM_MODEL 的占位内容替换为真实配置，并根据所使用的模型服务修改 LLM_BASE_URL。请勿将真实密钥提交到仓库。
+编辑 .env，将 LLM_API_KEY 和 LLM_MODEL 的占位内容替换为真实配置，并根据所使用的模型服务修改 LLM_BASE_URL。
+
+当前支持提供 OpenAI-compatible Chat Completions 流式接口的模型服务；其他协议可通过兼容网关接入。
 
 继续执行：
 
