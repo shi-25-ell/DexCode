@@ -605,7 +605,7 @@ Child 的 manifest、summary、artifact 按 `agentId` 隔离。fork seed 建议�
 - actor 增加 `child-agent`，并记录 agentId。
 - researcher/reviewer 默认禁止 memory mutation tools。
 - P0 不为每个 Child 自动触发 extraction。
-- consolidation 和 extraction 继续使用现有 Internal Agent 路径。
+- consolidation 和 extraction 继续使用现有 Internal Agent 路径。(Consolidation 目前仍是实验性功能,默认关闭。)
 - Memory 不承担 Agent 通信、结果传输或 mailbox 职责。
 
 ### Skill

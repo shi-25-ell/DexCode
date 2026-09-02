@@ -845,6 +845,8 @@ manifest 为空时明确写“当前没有 topic 文件”。
 
 ## 12. Consolidation 完整链路
 
+Consolidation 目前仍是实验性功能，因此默认关闭。
+
 Extraction 解决“刚刚学到了什么”，Consolidation 解决“长期积累后是否重复、冲突或过时”。两者都必须存在，但调度不同。
 
 ### 12.1 Gate

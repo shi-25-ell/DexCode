@@ -112,7 +112,7 @@ Session journal 保存消息、context manifest、tool lifecycle、Queue/Steer�
 
 - recall 在用户回合开始时注入索引，同时后台选择最多 5 个未展示的 topic；首个模型请求不等待选择器，后续模型边界只消费已经就绪的结果。回合结束、取消或关闭记忆时释放预取；
 - extraction 在主 Run 正常结束后异步启动，继承该 Run 的模型客户端、实际请求上下文和最终回答，再追加 user 提取任务。只从近期对话提取长期信息，已有记忆可用于查重和更新；
-- consolidation 合并、纠错和清理已有记忆；
+- consolidation 合并、纠错和清理已有记忆，目前仍是实验性功能，因此默认关闭；
 - Memory Agent 只能使用 `memory_*` 工具；
 - 用户可以关闭、查看、重建索引或清空记忆；
 - Managed Memory 不修改 `DEXCODE.md`。
