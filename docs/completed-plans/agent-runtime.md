@@ -1,6 +1,6 @@
 # DexCode Backend Agent Runtime Development Plan
 
-> 文档状态：已实施  
+> 文档状态：已实施
 > 实施结果：`packages/agent-core/agent-runtime.ts` 已成为 Main、Child 和内部 Agent 共用的运行原语，后续 Multi-Agent 与 Managed Memory 均建立在该 seam 上。正文中的“当前”指计划编写时；现状以 [`../architecture.md`](../architecture.md) 为准。
 
 > 目标：在开发 Memory System 之前，先补齐 DexCode 的后端 Agent Runtime 中间层，使当前单 Agent ReAct Loop 能被不同类型的 Agent 复用，并为后续 Memory Extraction Agent、Research Agent、Reviewer Agent、并行 Coding Agent 等真正的 Multi-Agent 能力提供稳定基础。

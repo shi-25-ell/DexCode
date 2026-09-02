@@ -1,6 +1,6 @@
 # Multi-Agent 失控事件修复计划
 
-> 文档状态：已实施  
+> 文档状态：已实施
 > 实施结果：终态交付去重、后台通知 Run、预算、无进展熔断、会话级停止和前端权威状态已经落地。完整复跑证据见 [`../records/multi-agent-incident-remediation.md`](../records/multi-agent-incident-remediation.md)。
 
 ## 1. 事件结论

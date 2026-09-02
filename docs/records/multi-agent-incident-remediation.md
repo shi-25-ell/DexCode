@@ -1,6 +1,6 @@
 # Multi-Agent 失控事件修复记录
 
-> 记录状态：修复与受控复跑已完成  
+> 记录状态：修复与受控复跑已完成
 > 本记录保存事件、修复和验证证据；当前 Multi-Agent 架构见 [`../architecture.md`](../architecture.md)。
 
 ## 1. 修复结论

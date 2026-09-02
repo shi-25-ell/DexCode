@@ -1,8 +1,8 @@
 # DexCode Queue 与 Steer 开发计划
 
-> 文档状态：已实施  
+> 文档状态：已实施
 > 设计基线：`main@30bf245`  
-> 适用范围：DexCode 本地单进程 Runtime、Web 客户端、Agent Core 与 Session Repository  
+> 适用范围：DexCode 本地单进程 Runtime、Web 客户端、Agent Core 与 Session Repository
 > 默认产品语义：运行期间提交的新消息默认进入 Queue；用户可将某条 Queue 消息转换为当前 Run 的 Steer
 
 > Queue/Steer、幂等 operation、Session revision、自动 next Run 和安全边界消费均已实现。计划完成后 Session 又迁移为 JSONL journal；现状以 [`../architecture.md`](../architecture.md) 为准。

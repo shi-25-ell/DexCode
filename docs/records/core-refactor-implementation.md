@@ -1,6 +1,6 @@
 # DexCode Core 重构实施说明
 
-> 记录状态：已完成的阶段实施记录  
+> 记录状态：已完成的阶段实施记录
 > 本文只描述 Core 重构当时的交付结果，不代表当前完整能力。JSONL、Context Engine、Managed Memory、Queue/Steer 和 Multi-Agent 均在此后加入；现状以 [`../architecture.md`](../architecture.md) 为准。
 
 ## 1. 交付结论
@@ -207,4 +207,4 @@ npm run build:web
 5. **Preview 不持久化。** `/api/agent/preview` 复用生产 Executor 和 model stream，但作为兼容接口不建立 Session Run，因此不提供 ledger/recovery。
 6. **SSE 慢消费者没有独立集成测试。** bounded writer 已实现并通过类型检查，当前测试集中在 model fragmentation、Session 顺序和 Windows 路径高风险行为。
 
-这些限制均不重新引入 Orchestrator、Anthropic 或 Linux 适配，也不影响本轮目标中的主聊天流式链路。下一阶段最值得优先处理的是 SQLite Session repository、正式 `CodingRunHandle` 和统一 typed ToolOutcome，而不是恢复多 Agent 编排。
+这些限制均不重新引入 Orchestrator、另一套 provider-specific protocol 或 Linux 适配，也不影响本轮目标中的主聊天流式链路。该段只记录当时的后续判断；当前项目后来已经实现 Agent Runtime、JSONL Session、Context Engine 和 Multi-Agent。

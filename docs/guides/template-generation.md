@@ -57,7 +57,7 @@ Invoke-WebRequest `
   -Body $body
 ```
 
-Runtime 会把模板中的文件逐个写入当前请求对应的工作区，并发送：
+当前端点不接收 workspace reference，而是把模板文件逐个写入 Runtime 启动时配置的工具工作区。调用前应确认 `WORKSPACE_DIR` 指向预期目标；这个端点不适合作为多工作区 Web 会话的隐式生成入口。响应会发送：
 
 - 每个文件一条 `tool` 事件；
 - 成功时一条包含 `scaffoldInfo` 和文件列表的 `result`；
@@ -75,4 +75,4 @@ Runtime 会把模板中的文件逐个写入当前请求对应的工作区，并
 4. 为查询、占位符替换和文件列表增加测试；
 5. 更新本页的模板表。
 
-模板 API 会直接调用 template service，不经过 Main Agent 或 AgentManager。
+模板 API 会直接调用 template service 和 `CodingToolHost.writeFile`，不经过 Main Agent、AgentManager 或批准交互；工作区路径校验仍由工具层执行。

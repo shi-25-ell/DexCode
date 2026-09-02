@@ -1,6 +1,6 @@
 # DexCode Web UI 重构开发设计
 
-> 状态：已实施并完成桌面、窄屏与流式链路验收  
+> 状态：已实施并完成桌面、窄屏与流式链路验收
 > 日期：2026-08-30  
 > 适用范围：`apps/web`、`apps/runtime` 中的 Web 适配层，以及为 UI 提供稳定投影所需的共享模块  
 > 后续演进：独立快照和工具设置入口已经移除，Managed Memory 与子 Agent 设置入口已经加入。正文中的“当前问题”指重构前基线；现状以 [`../architecture.md`](../architecture.md) 为准。
@@ -49,7 +49,7 @@
 - 不在本轮重新实现 Agent ReAct loop、Tool Gateway 或 Session durability。
 - 不恢复被删除的编辑器和文件树主面板。
 - 不删除或以“新版暂不支持”为由停用 `MCP`、`工具`、`Skill`、`白名单`、`快照`、`项目知识`；入口可以重新设计，但必须保持可发现和可访问。
-- 不引入无关的 UI 框架、组件包、CSS token、图标或页面源码。
+- 新增界面继续使用本仓库选定的 React、组件和 CSS 体系。
 - 不为了“隐藏”而删除可审计的 canonical facts；底层事实继续持久化，只是不直接成为产品文案。
 - 不把调试控制台伪装成普通用户界面。需要保留的诊断信息进入显式“开发者详情”或导出文件。
 
@@ -883,26 +883,11 @@ activeTaskId
 - 首次发送通过 `materializeRun` 原子写入 Session、首问标题、user message 和 `run_started`；普通后续消息也持久化 `clientRequestId`，重试返回现有结果而不是重复提交。
 - Context、provider 或执行基础设施在 Run 开始后失败时仍提交失败终态，保留用户已发生的真实交互和可恢复 ledger。
 - Skill、MCP、文件、命令等语义事件在实时流与历史恢复中都投影为同一种 Tool Card；原始 tool message 不进入默认时间线。
-- 设置能力已全部迁移到 React 路由，保留 MCP、工具、Skill、白名单、快照和项目知识的真实后端操作。
+- 设置能力已全部迁移到 React 路由；能力注册表随后继续演进，当前入口以运行时实现和[架构说明](../architecture.md)为准。
 
-### 20.2 视觉对照
+### 20.2 实施结果
 
-已确认概念图：[`docs/assets/web-ui-concept-v2.png`](../assets/web-ui-concept-v2.png)。实现截图：
-
-- [`docs/assets/web-ui-implementation-desktop.png`](../assets/web-ui-implementation-desktop.png)
-- [`docs/assets/web-ui-implementation-mobile.png`](../assets/web-ui-implementation-mobile.png)
-
-对照结果：
-
-1. 白色主画布、浅灰侧栏、黑色正文和蓝/绿/紫状态层级与概念一致。
-2. 桌面侧栏默认 280px，可在 248-360px 间拖动并折叠；390px 视口切换为 Drawer。
-3. 会话历史使用首问标题，未显示 Session ID；新会话入口位于历史列表下方。
-4. 六项能力保持两列入口布局，来自注册表，并在移动 Drawer 中完整可达。
-5. Tool Card 使用小尺寸 16px 图标，中文名称、相对目标、成功状态和简短结果；Skill 与 MCP 具有独立提示。
-6. 文件修改卡显示 `src/auth/login.ts +18 −6`，原始输出默认折叠且可交互展开。
-7. Composer 固定显示真实模型名与可信上下文状态；本次环境未配置 context window，因此实现截图显示“上下文未知”，没有沿用概念图中的演示百分比。
-
-允许的实现差异：概念图使用 1600×1000 的展示画布并含演示时间戳、头像和模型数据；浏览器验收使用原生 1280×720 桌面视口与 390×844 移动视口，未伪造时间戳、头像或上下文窗口。桌面截图因原生视口高度只同时露出部分卡片，其余内容可在真实时间线滚动查看。首屏没有增加营销文案。
+最终交付采用 React 单页壳层、按工作区隔离的会话历史、统一的 Run 活动投影和可展开的 Tool Card。早期概念图与验收截图已经移除：它们包含环境相关信息，且不能代表后续持续演进的能力入口。产品现状以运行中的 Web UI 和当前架构文档为准。
 
 ### 20.3 验证证据
 
@@ -922,7 +907,7 @@ activeTaskId
 ## 20. 实施约束
 
 - 每次开始实现前确认当前工作树和目标文件，保留无关用户改动。
-- 不复制无关项目的源码、CSS、图标、测试、命名或目录结构。
+- 新增源码、CSS、图标、测试和命名遵守本仓库自身约束。
 - 不以 hard-coded mock Session、假 Tool Card 或固定 token 百分比替代真实生产接口。
 - 不允许 renderer 直接访问 Session JSON 文件、provider transport、Tool Gateway 内部状态或全局活动工作区。
 - 补充新 contract tests 后，旧浅模块测试若已被新接口覆盖，应替换而不是永久叠加两套测试。

@@ -1,6 +1,6 @@
 # DexCode Core 重构计划
 
-> 文档状态：已实施  
+> 文档状态：已实施
 > 本计划完成了 canonical model stream、单一 Executor、Run 终态、Session ledger、安全边界和 SSE backpressure。它描述的是后续 Agent Runtime、JSONL、Context Engine 和 Multi-Agent 之前的基础重构；现状以 [`../architecture.md`](../architecture.md) 为准，阶段实施记录见 [`../records/core-refactor-implementation.md`](../records/core-refactor-implementation.md)。
 
 ## 1. 目标
@@ -47,7 +47,7 @@ Web/API
 
 ### 2.2 明确不做
 
-- Anthropic provider 或 Anthropic Messages protocol。
+- 另一套 provider-specific protocol。
 - Linux/WSL/macOS filesystem、process 或 shell 适配。
 - 自动 task classification、Orchestrator、多 Agent、subagent 或 worker pool。
 - 模型驱动的强制 code review gate。

@@ -20,9 +20,9 @@ Skill 不能只依赖关键词自动执行。显式调用由用户给出 Skill �
 ---
 name: test-writing
 description: 为行为变更补充测试
-allowImplicitInvocation: true
-userInvocable: true
-allowedTools:
+allow-implicit-invocation: true
+user-invocable: true
+allowed-tools:
   - read_file
   - grep
   - patch_file
@@ -31,7 +31,7 @@ tags:
 ---
 ```
 
-还支持 `disableModelInvocation`、`disallowedTools`、`paths` 等字段。工具约束必须同时影响模型可见 schema 和实际执行，不能只依赖提示词。
+还支持 `disable-model-invocation`、`disallowed-tools`、`paths` 等字段。Frontmatter 使用 kebab-case；解析后的 TypeScript 对象才使用 camelCase。工具约束必须同时影响模型可见 schema 和实际执行，不能只依赖提示词。
 
 ## 管理界面与 API
 
@@ -56,7 +56,7 @@ tags:
 | POST | `/api/skills/import/preview` | 预检查导入 |
 | POST | `/api/skills/import` | 确认导入 |
 
-不存在独立的 `/test` 或 `/assets` HTTP 端点。Skill 资源由 `read_skill` 返回的根目录信息和受控文件工具按需访问。
+不存在独立的 `/test` 或 `/assets` HTTP 端点。`read_skill` 返回正文、Skill 根目录和 `SKILL.md` 路径；附带资源能否继续读取，取决于该 Agent 的文件工具权限和受信任读取边界。
 
 ## 安全边界
 

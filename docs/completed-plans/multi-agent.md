@@ -1,6 +1,6 @@
 # DexCode Multi-Agent V1 开发计划
 
-> 文档状态：已实施  
+> 文档状态：已实施
 > 实施结果：`packages/agent-manager`、Child journal、Agent Inbox、四个 orchestration tools、Agent activity stream、Web Agent Drawer、预算和停止语义均已落地。实际实现默认开启 Multi-Agent，并在后续事故修复中加入后台通知、无进展熔断和会话级停止。正文中的“当前基线”指计划编写时；现状以 [`../architecture.md`](../architecture.md) 为准。
 
 ## 结论

@@ -1,6 +1,6 @@
 # DexCode 四层上下文压缩开发计划
 
-> 文档状态：已实施  
+> 文档状态：已实施
 > 实施结果：`packages/context-engine` 已接入每次模型调用，支持 Artifact、历史中段归档、旧工具结果压缩、结构化摘要、主动压缩和按需恢复。正文中的“当前基线”指实施前状态；现状以 [`../architecture.md`](../architecture.md) 为准。
 
 ## 1. 目标
