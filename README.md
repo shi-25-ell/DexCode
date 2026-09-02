@@ -18,7 +18,7 @@ DexCode 当前只维护 Windows 本地文件系统和进程执行语义。
 
 ## 快速开始
 
-环境要求：Windows 10/11、Node.js 22 或更高版本。
+环境要求：Windows 10/11、Node.js 22 或更高版本。完整的必需环境与条件依赖见 [`docs/guides/runtime-requirements.md`](docs/guides/runtime-requirements.md)。
 
 ```powershell
 npm install

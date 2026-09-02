@@ -5,6 +5,7 @@
 ## 当前文档
 
 - [`architecture.md`](architecture.md)：当前 Runtime、Session、Context、工具、Multi-Agent 和 Web 架构。
+- [`guides/runtime-requirements.md`](guides/runtime-requirements.md)：最终用户运行 DexCode 所需的环境与条件依赖。
 - [`guides/template-generation.md`](guides/template-generation.md)：当前项目模板 API 和使用边界。
 - [`guides/skills.md`](guides/skills.md)：当前 Skill 生命周期、加载范围和 API。
 - [仓库 README](../README.md)：安装、配置、主要能力与 API 概览。
