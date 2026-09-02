@@ -228,7 +228,7 @@ test('main Agent keeps the durable tool loop while lifecycle extension failures 
     process.env.CONTEXT_COMPACTION_STRATEGY = 'legacy';
     const scope = { kind: 'workspace' as const, workspaceId: projectId };
     const session = await repository.createSession(scope);
-    await repository.setSelectedModel({ sessionId: session.sessionId, model: 'runtime-main-test' });
+    await repository.setSelectedModel({ sessionId: session.sessionId, model: 'runtime-main-test', connectionFingerprint: 'test-connection' });
     let modelTurn = 0;
     const model: ModelClient = {
       model: 'runtime-main-test',

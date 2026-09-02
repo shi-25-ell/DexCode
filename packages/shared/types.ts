@@ -379,6 +379,7 @@ export type Session = {
   sessionId: string;
   scope: SessionScope;
   selectedModel?: string;
+  selectedModelConnectionFingerprint?: string;
   createdAt: string;
   updatedAt: string;
   title?: string;

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createOpenAiCompatibleModelClient } from './openai.ts';
 import { createMockModelClient } from './mock.ts';
 import type { ModelClient } from './types.ts';
@@ -17,6 +18,7 @@ export type ModelCatalog = {
 };
 
 export type ModelRegistry = {
+  readonly connectionFingerprint: string;
   readonly defaultModel: string;
   readonly defaultClient: ModelClient;
   listModels(options?: { refresh?: boolean }): Promise<ModelCatalog>;
@@ -156,6 +158,12 @@ function publicDescriptor(client: ModelClient): PublicModelDescriptor {
 
 export function createModelRegistry(options: { fetch?: typeof fetch; now?: () => number } = {}): ModelRegistry {
   const environment = modelEnvironment();
+  const connectionFingerprint = createHash('sha256').update(JSON.stringify({
+    version: 1,
+    provider: environment?.provider ?? 'mock',
+    baseUrl: environment?.baseUrl ?? 'mock',
+    apiKey: environment?.apiKey ?? 'mock',
+  })).digest('hex');
   const defaultClient = environment ? configuredClient(environment, environment.defaultModel) : createMockModelClient();
   const defaultModel = defaultClient.model;
   const clients = new Map<string, ModelClient>([[defaultModel, defaultClient]]);
@@ -213,6 +221,7 @@ export function createModelRegistry(options: { fetch?: typeof fetch; now?: () =>
   };
 
   return {
+    connectionFingerprint,
     defaultModel,
     defaultClient,
     listModels,

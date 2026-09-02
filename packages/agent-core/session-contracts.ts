@@ -100,6 +100,7 @@ export interface SessionRepository {
     profile?: string;
     origin?: string;
     model?: string;
+    modelConnectionFingerprint?: string;
   }): Promise<{ session: Session; created: boolean }>;
   commitContext(input: {
     sessionId: string;

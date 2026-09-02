@@ -375,8 +375,30 @@ const modelRegistry = createModelRegistry();
 const modelClient = modelRegistry.defaultClient;
 const sessionRepository: SessionRepository = createSessionRepository();
 
+function effectiveSessionModel(session: Session): string {
+  return session.selectedModelConnectionFingerprint === modelRegistry.connectionFingerprint
+    ? session.selectedModel ?? modelRegistry.defaultModel
+    : modelRegistry.defaultModel;
+}
+
+async function reconcileSessionModel(session: Session): Promise<{ session: Session; notice?: string }> {
+  const result = await sessionRepository.reconcileSelectedModel({
+    sessionId: session.sessionId,
+    defaultModel: modelRegistry.defaultModel,
+    connectionFingerprint: modelRegistry.connectionFingerprint,
+  });
+  if (!result.changed || !result.previousModel) return { session: result.session };
+  const action = result.previousModel === modelRegistry.defaultModel
+    ? `已重新绑定到默认模型 ${modelRegistry.defaultModel}`
+    : `已从 ${result.previousModel} 切换到默认模型 ${modelRegistry.defaultModel}`;
+  return {
+    session: result.session,
+    notice: `模型服务配置已变更，当前会话${action}。历史运行记录不受影响。`,
+  };
+}
+
 function projectSessionConversation(session: Session, options: NonNullable<Parameters<typeof projectConversation>[1]> = {}) {
-  const selected = modelRegistry.clientFor(session.selectedModel);
+  const selected = modelRegistry.clientFor(effectiveSessionModel(session));
   return projectConversation(session, { ...options, model: selected.model, contextWindow: selected.contextWindow });
 }
 const multiAgentFeatureEnabled = multiAgentEnabled();
@@ -566,14 +588,16 @@ const generalAgent = createCodingAgent(
 const conversationRunCoordinator = createConversationRunCoordinator({
   repository: sessionRepository,
   async resolveEnvironment(session) {
-    const model = session.selectedModel ?? modelRegistry.defaultModel;
-    if (session.scope.kind === 'general') return { agent: generalAgent, context: { scope: session.scope }, model };
-    const runtime = await runtimeForSession(session);
+    const reconciled = await reconcileSessionModel(session);
+    const currentSession = reconciled.session;
+    const model = effectiveSessionModel(currentSession);
+    if (currentSession.scope.kind === 'general') return { agent: generalAgent, context: { scope: currentSession.scope }, model };
+    const runtime = await runtimeForSession(currentSession);
     return {
       agent: runtime.codingAgent,
       context: {
-        scope: session.scope,
-        workspace: { workspaceId: session.scope.workspaceId, rootPath: runtime.workspace.canonicalRootPath },
+        scope: currentSession.scope,
+        workspace: { workspaceId: currentSession.scope.workspaceId, rootPath: runtime.workspace.canonicalRootPath },
       },
       model,
     };
@@ -1148,7 +1172,9 @@ export function startRuntimeServer() {
     if (conversationViewMatch && req.method === 'GET') {
       const conversationRef = decodeURIComponent(conversationViewMatch[1]);
       const scope = conversationScope(url, requestWorkspaceScope);
-      const session = await loadScopedSession(conversationRef, scope);
+      const loadedSession = await loadScopedSession(conversationRef, scope);
+      const reconciliation = await reconcileSessionModel(loadedSession);
+      const session = reconciliation.session;
       const runtimeSnapshot = await conversationRunCoordinator.snapshot(session.sessionId);
       const latestSession = await sessionRepository.loadSession(session.sessionId) ?? session;
       const activePhase = runtimeSnapshot.activeRun?.phase === 'accepting_commands'
@@ -1159,7 +1185,11 @@ export function startRuntimeServer() {
       const agents = multiAgentFeatureEnabled && latestSession.scope.kind === 'workspace'
         ? await (await runtimeForSession(latestSession)).agentManager.list(latestSession.sessionId)
         : null;
-      sendJson(res, 200, { conversation: projectSessionConversation(latestSession, { ...(activePhase ? { activePhase } : {}), agents }) });
+      sendJson(res, 200, { conversation: projectSessionConversation(latestSession, {
+        ...(reconciliation.notice ? { modelNotice: reconciliation.notice } : {}),
+        ...(activePhase ? { activePhase } : {}),
+        agents,
+      }) });
       return;
     }
 
@@ -1326,7 +1356,7 @@ export function startRuntimeServer() {
     const conversationMutationMatch = /^\/api\/conversations\/([^/]+)$/.exec(url.pathname);
     if (conversationMutationMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
       const conversationRef = decodeURIComponent(conversationMutationMatch[1]);
-      const session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
+      let session = await loadScopedSession(conversationRef, conversationScope(url, requestWorkspaceScope));
       if (req.method === 'DELETE') {
         if (session.activeTaskId) throw new HttpError(409, '正在运行的会话不能删除，请先停止运行');
         if (session.scope.kind === 'workspace') await (await runtimeForSession(session)).agentManager.stopSession(conversationRef, 'Session deleted');
@@ -1334,12 +1364,14 @@ export function startRuntimeServer() {
         sendJson(res, 200, { ok: true });
         return;
       }
+      session = (await reconcileSessionModel(session)).session;
       const meta = await parseBody<{ title?: string; archived?: boolean; model?: string }>(req);
       if (meta.title !== undefined && !meta.title.trim()) throw new HttpError(400, '会话标题不能为空');
+      let responseModel = effectiveSessionModel(session);
       if (meta.model !== undefined) {
         const nextModel = meta.model.trim();
         if (!nextModel) throw new HttpError(400, '模型不能为空');
-        const currentModel = session.selectedModel ?? modelRegistry.defaultModel;
+        const currentModel = effectiveSessionModel(session);
         if (nextModel !== currentModel) {
           const assertIdle = async () => {
             const runtimeSnapshot = await conversationRunCoordinator.snapshot(session.sessionId);
@@ -1356,16 +1388,21 @@ export function startRuntimeServer() {
             throw new HttpError(400, error instanceof Error ? error.message : '模型不可用');
           });
           await assertIdle();
-          await sessionRepository.setSelectedModel({ sessionId: session.sessionId, model: nextModel }).catch((error) => {
+          session = await sessionRepository.setSelectedModel({
+            sessionId: session.sessionId,
+            model: nextModel,
+            connectionFingerprint: modelRegistry.connectionFingerprint,
+          }).catch((error) => {
             throw new HttpError(409, error instanceof Error ? error.message : '当前会话暂不能切换模型');
           });
+          responseModel = effectiveSessionModel(session);
         }
       }
       await sessionRepository.updateSessionMeta(conversationRef, {
         ...(meta.title !== undefined ? { title: meta.title.trim() } : {}),
         ...(meta.archived !== undefined ? { archived: meta.archived } : {}),
       });
-      sendJson(res, 200, { ok: true, model: meta.model?.trim() ?? session.selectedModel ?? modelRegistry.defaultModel });
+      sendJson(res, 200, { ok: true, model: responseModel });
       return;
     }
 
@@ -1430,8 +1467,8 @@ export function startRuntimeServer() {
       let isNew = false;
       let prestarted = false;
       if (payload.conversationRef) {
-        session = await loadScopedSession(payload.conversationRef, scope);
-        const selectedModel = session.selectedModel ?? modelRegistry.defaultModel;
+        session = (await reconcileSessionModel(await loadScopedSession(payload.conversationRef, scope))).session;
+        const selectedModel = effectiveSessionModel(session);
         if (requestedModel && requestedModel !== selectedModel) {
           throw new HttpError(409, '会话模型已变化，请刷新后重试');
         }
@@ -1462,6 +1499,7 @@ export function startRuntimeServer() {
           userMessage: { role: 'user', content: prompt },
           context: runContext,
           model: initialModel,
+          modelConnectionFingerprint: modelRegistry.connectionFingerprint,
         });
         session = materialized.session;
         isNew = materialized.created;

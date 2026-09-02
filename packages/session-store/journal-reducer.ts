@@ -65,6 +65,10 @@ function applyRecord(session: Session, record: SessionJournalRecord): void {
         if (record.selectedModel === null) delete session.selectedModel;
         else session.selectedModel = record.selectedModel;
       }
+      if ('selectedModelConnectionFingerprint' in record) {
+        if (record.selectedModelConnectionFingerprint === null) delete session.selectedModelConnectionFingerprint;
+        else session.selectedModelConnectionFingerprint = record.selectedModelConnectionFingerprint;
+      }
       return;
     case 'session_message_committed':
       session.messages.push(structuredClone(record.message));

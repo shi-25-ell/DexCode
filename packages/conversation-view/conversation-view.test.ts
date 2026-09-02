@@ -463,6 +463,27 @@ test('projection marks a consumed Steer user message without hiding it', () => {
     { id: 'message-5', kind: 'user', content: '调整方向', delivery: 'steer' },
   ]);
 });
+
+test('resolved model and connection-change notice override a stale Session selection', () => {
+  const now = new Date().toISOString();
+  const projected = projectConversation({
+    sessionId: 'session-stale-model',
+    scope: { kind: 'general' },
+    selectedModel: 'deepseek-pro',
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    taskSummaries: [],
+    activeTaskId: null,
+    ledger: [],
+  }, {
+    model: 'glm-5.3',
+    modelNotice: '模型服务配置已变更',
+  });
+
+  assert.equal(projected.model, 'glm-5.3');
+  assert.equal(projected.modelNotice, '模型服务配置已变更');
+});
 test('presents background command lifecycle distinctly', () => {
   const started = presentTool({ callRef: 'command-1', tool: 'run_command', args: { command: 'npm test' }, result: { status: 'background', taskId: 'task-1' } });
   const running = presentTool({ callRef: 'command-2', tool: 'read_command_output', args: { task_id: 'task-1' }, result: { status: 'background' } });

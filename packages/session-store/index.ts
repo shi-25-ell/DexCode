@@ -356,12 +356,18 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
 
   function recordsForMutation(before: Session, after: Session): SessionJournalRecord[] {
     const records: SessionJournalRecord[] = [];
-    if (before.title !== after.title || before.archived !== after.archived || before.selectedModel !== after.selectedModel) {
+    if (before.title !== after.title
+      || before.archived !== after.archived
+      || before.selectedModel !== after.selectedModel
+      || before.selectedModelConnectionFingerprint !== after.selectedModelConnectionFingerprint) {
       records.push({
         type: 'session_meta_updated',
         ...(before.title !== after.title ? { title: after.title ?? null } : {}),
         ...(before.archived !== after.archived ? { archived: after.archived ?? false } : {}),
         ...(before.selectedModel !== after.selectedModel ? { selectedModel: after.selectedModel ?? null } : {}),
+        ...(before.selectedModelConnectionFingerprint !== after.selectedModelConnectionFingerprint
+          ? { selectedModelConnectionFingerprint: after.selectedModelConnectionFingerprint ?? null }
+          : {}),
       });
     }
 
@@ -590,16 +596,49 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return withSessionLock(session.sessionId, () => saveUnlocked(session));
   }
 
-  async function setSelectedModel(input: { sessionId: string; model: string }): Promise<Session> {
+  async function setSelectedModel(input: { sessionId: string; model: string; connectionFingerprint: string }): Promise<Session> {
     const model = input.model.trim();
+    const connectionFingerprint = input.connectionFingerprint.trim();
     if (!model) throw new Error('Model ID cannot be empty');
+    if (!connectionFingerprint) throw new Error('Model connection fingerprint cannot be empty');
     return withSessionLock(input.sessionId, async () => {
       const session = await loadRaw(input.sessionId);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
       if (session.activeTaskId) throw new Error('当前会话仍有 Main Run 在运行');
       if (projectQueue(input.sessionId, session.ledger ?? []).pending.length > 0) throw new Error('当前会话仍有排队消息');
-      if (session.selectedModel === model) return session;
-      return saveUnlocked({ ...session, selectedModel: model, revision: (session.revision ?? 0) + 1 });
+      if (session.selectedModel === model && session.selectedModelConnectionFingerprint === connectionFingerprint) return session;
+      return saveUnlocked({
+        ...session,
+        selectedModel: model,
+        selectedModelConnectionFingerprint: connectionFingerprint,
+        revision: (session.revision ?? 0) + 1,
+      });
+    });
+  }
+
+  async function reconcileSelectedModel(input: { sessionId: string; defaultModel: string; connectionFingerprint: string }): Promise<{
+    session: Session;
+    changed: boolean;
+    previousModel?: string;
+  }> {
+    const defaultModel = input.defaultModel.trim();
+    const connectionFingerprint = input.connectionFingerprint.trim();
+    if (!defaultModel) throw new Error('Default model ID cannot be empty');
+    if (!connectionFingerprint) throw new Error('Model connection fingerprint cannot be empty');
+    return withSessionLock(input.sessionId, async () => {
+      const session = await loadRaw(input.sessionId);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      if (session.selectedModelConnectionFingerprint === connectionFingerprint) {
+        return { session, changed: false };
+      }
+      const previousModel = session.selectedModel;
+      const saved = await saveUnlocked({
+        ...session,
+        selectedModel: defaultModel,
+        selectedModelConnectionFingerprint: connectionFingerprint,
+        revision: (session.revision ?? 0) + 1,
+      });
+      return { session: saved, changed: true, ...(previousModel ? { previousModel } : {}) };
     });
   }
 
@@ -613,6 +652,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     profile?: string;
     origin?: string;
     model?: string;
+    modelConnectionFingerprint?: string;
   }): Promise<{ session: Session; created: boolean }> {
     const scope = normalizeScope(input.scope);
     if (!input.clientRequestId.trim()) throw new Error('clientRequestId is required');
@@ -637,6 +677,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
         sessionId,
         scope,
         ...(input.model ? { selectedModel: input.model } : {}),
+        ...(input.modelConnectionFingerprint ? { selectedModelConnectionFingerprint: input.modelConnectionFingerprint } : {}),
         createdAt: at,
         updatedAt: at,
         title: conversationTitle(content),
@@ -1598,6 +1639,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     loadSession,
     saveSession,
     setSelectedModel,
+    reconcileSelectedModel,
     appendMessages,
     appendTaskSummary,
     beginRun,

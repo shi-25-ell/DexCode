@@ -62,3 +62,17 @@ test('model registry degrades to the configured default when discovery fails', a
     await assert.rejects(() => registry.assertSelectable('vendor-flash'), /模型不可用/);
   });
 });
+
+test('model connection fingerprint changes with credentials but not with the default model', async () => {
+  await withModelEnvironment(async () => {
+    const first = createModelRegistry();
+    process.env.LLM_MODEL = 'vendor-flash';
+    const sameConnection = createModelRegistry();
+    process.env.LLM_API_KEY = 'other-secret';
+    const otherConnection = createModelRegistry();
+
+    assert.equal(sameConnection.connectionFingerprint, first.connectionFingerprint);
+    assert.notEqual(otherConnection.connectionFingerprint, first.connectionFingerprint);
+    assert.doesNotMatch(first.connectionFingerprint, /secret/);
+  });
+});

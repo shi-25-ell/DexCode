@@ -99,6 +99,7 @@ export type ConversationSnapshot = {
   ref: string;
   title: string;
   model?: string;
+  modelNotice?: string;
   state: 'idle' | 'running' | 'waiting' | 'failed';
   activeRun?: { runId: string; phase: 'running' | 'waiting_confirm' | 'closing' | 'stopping' };
   queuedItems: QueueItem[];

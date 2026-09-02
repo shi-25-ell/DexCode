@@ -422,8 +422,9 @@ test('selected model persists and cannot change while a Main Run or Queue item i
   const projectDir = dirname(repository.sessionsDir);
   try {
     const session = await repository.createSession();
-    const selected = await repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.5' });
+    const selected = await repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.5', connectionFingerprint: 'connection-a' });
     assert.equal(selected.selectedModel, 'glm-4.5');
+    assert.equal(selected.selectedModelConnectionFingerprint, 'connection-a');
     await repository.beginRun({
       sessionId: session.sessionId,
       runId: 'run-model',
@@ -432,7 +433,7 @@ test('selected model persists and cannot change while a Main Run or Queue item i
       model: 'glm-4.5',
     });
     await assert.rejects(
-      () => repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.6' }),
+      () => repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.6', connectionFingerprint: 'connection-a' }),
       /Main Run/,
     );
     const started = (await repository.loadSession(session.sessionId))?.ledger?.find((record) => record.type === 'run_started');
@@ -440,9 +441,38 @@ test('selected model persists and cannot change while a Main Run or Queue item i
     await repository.finishRun({ sessionId: session.sessionId, ...terminal('run-model') });
     await repository.enqueueQueueItem({ sessionId: session.sessionId, content: 'queued', delivery: 'next_run', operationId: 'queue-model' });
     await assert.rejects(
-      () => repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.6' }),
+      () => repository.setSelectedModel({ sessionId: session.sessionId, model: 'glm-4.6', connectionFingerprint: 'connection-a' }),
       /排队消息/,
     );
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('selected model is rebound to the default when the model connection changes', async () => {
+  const repository = createSessionRepository({ projectId: `test-model-rebind-${crypto.randomUUID()}` });
+  const projectDir = dirname(repository.sessionsDir);
+  try {
+    const session = await repository.createSession();
+    await repository.setSelectedModel({ sessionId: session.sessionId, model: 'deepseek-pro', connectionFingerprint: 'connection-a' });
+
+    const rebound = await repository.reconcileSelectedModel({
+      sessionId: session.sessionId,
+      defaultModel: 'glm-5.3',
+      connectionFingerprint: 'connection-b',
+    });
+    assert.equal(rebound.changed, true);
+    assert.equal(rebound.previousModel, 'deepseek-pro');
+    assert.equal(rebound.session.selectedModel, 'glm-5.3');
+    assert.equal(rebound.session.selectedModelConnectionFingerprint, 'connection-b');
+
+    const unchanged = await repository.reconcileSelectedModel({
+      sessionId: session.sessionId,
+      defaultModel: 'glm-5.3',
+      connectionFingerprint: 'connection-b',
+    });
+    assert.equal(unchanged.changed, false);
+    assert.equal(unchanged.session.revision, rebound.session.revision);
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }

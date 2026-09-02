@@ -305,6 +305,10 @@ export function ConversationPage({ scope, conversationRef }: { scope: Conversati
     }
   }, [conversationIdentity, conversationRef, scopeIdentity]);
 
+  useEffect(() => {
+    if (snapshot.data?.modelNotice) setModelNotice(snapshot.data.modelNotice);
+  }, [snapshot.data?.modelNotice]);
+
   useEffect(() => () => controllerRef.current?.abort(), []);
 
   useEffect(() => {
