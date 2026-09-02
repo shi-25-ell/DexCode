@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { messageIdentity } from '../shared/message-identity.ts';
 import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -654,6 +655,9 @@ test('a completed Session projection is deterministic after repository restart',
     const reopened = createSessionRepository({ projectId });
     const after = await reopened.loadSession(session.sessionId);
     assert.deepEqual(after, before);
+    assert.equal(messageIdentity(before!.messages.at(-1)!), 'answer-1');
+    assert.equal(messageIdentity(after!.messages.at(-1)!), 'answer-1');
+    assert.deepEqual(Object.keys(after!.messages.at(-1)!).sort(), ['content', 'role']);
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }

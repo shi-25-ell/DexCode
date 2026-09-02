@@ -8,6 +8,7 @@ import type {
   SessionJournalHeader,
   SessionJournalRecord,
 } from './journal-types.ts';
+import { identifyMessage } from '../shared/message-identity.ts';
 
 export class SessionJournalInvariantError extends Error {
   constructor(message: string) {
@@ -90,7 +91,7 @@ function applyRecord(session: Session, record: SessionJournalRecord): void {
       appendLedger(session, record);
       return;
     case 'message':
-      session.messages.push(structuredClone(record.message));
+      session.messages.push(identifyMessage(structuredClone(record.message), record.messageId ?? `${session.sessionId}:ledger:${record.seq}`));
       appendLedger(session, record);
       return;
     case 'run_terminal': {

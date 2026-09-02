@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { ModelClient, ModelEvent } from '../llm-client/index.ts';
 import type { ContextArtifactRef, ContextManifestV2, ContextPolicy, Session } from '../shared/types.ts';
 import { createContextEngine, projectAgentFork, type PutContextArtifact } from './index.ts';
+import { identifyMessage, messageIdentity } from '../shared/message-identity.ts';
 
 const now = new Date().toISOString();
 
@@ -143,6 +144,23 @@ test('prepare builds a fresh full-envelope view without mutating canonical messa
   assert.equal(prepared.messages[0]?.role, 'system');
   assert.equal(Object.values(prepared.manifest.breakdown).reduce((sum, value) => sum + value, 0), prepared.usage.usedTokens);
   assert.equal(prepared.manifest.layers.length, 0);
+});
+
+test('archiving duplicate assistant text preserves exact message IDs without serializing identity metadata', async () => {
+  const { engine, artifacts } = harness();
+  const prepared = await engine.prepare({ ...input([
+    { role: 'user', content: 'first' },
+    identifyMessage({ role: 'assistant', content: 'same answer' }, 'retained-first-id'),
+    { role: 'user', content: 'middle' },
+    identifyMessage({ role: 'assistant', content: 'same answer' }, 'archived-cursor-id'),
+    { role: 'user', content: 'current' },
+    identifyMessage({ role: 'assistant', content: 'last answer' }, 'retained-last-id'),
+  ], policy({ maxConversationMessages: 5 })), activeRequest: 'current' });
+  assert.equal(prepared.activity?.archivedMessages, 2);
+  assert.deepEqual(prepared.messages.filter((message) => message.role === 'assistant').map(messageIdentity), ['retained-first-id', 'retained-last-id']);
+  assert.equal(prepared.messages.map(messageIdentity).includes('archived-cursor-id'), false);
+  assert.doesNotMatch(JSON.stringify(prepared.messages), /retained-first-id|retained-last-id|archived-cursor-id/);
+  assert.doesNotMatch([...artifacts.values()].join('\n'), /archived-cursor-id/);
 });
 
 test('latest oversized tool output is persisted before the request view is shortened', async () => {

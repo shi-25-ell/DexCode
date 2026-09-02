@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { DEFAULT_PROJECT_ID } from '../shared/index.ts';
+import { copyMessageIdentities } from '../shared/message-identity.ts';
 import { conversationTitle } from '../conversation-view/title.ts';
 import type {
   ChatMessage,
@@ -333,16 +334,22 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     return materializedMeta(session, bytes);
   }
 
+  function cloneSession(session: Session): Session {
+    const copy = structuredClone(session);
+    copyMessageIdentities(session.messages, copy.messages);
+    return copy;
+  }
+
   async function loadRaw(sessionId: string): Promise<Session | null> {
     const cached = projections.get(sessionId);
-    if (cached) return structuredClone(cached);
+    if (cached) return cloneSession(cached);
     const loaded = await filesystem.load(sessionId);
     if (!loaded) return null;
     const session = normalized(loaded.session);
     projections.set(sessionId, session);
     journalBytes.set(sessionId, loaded.journalBytes);
     await refreshMeta(session, loaded.journalBytes);
-    return structuredClone(session);
+    return cloneSession(session);
   }
 
   function added<T>(before: T[] | undefined, after: T[] | undefined, label: string): T[] {
@@ -434,9 +441,9 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
       projections.set(session.sessionId, before);
       journalBytes.set(session.sessionId, bytes!);
       await refreshMeta(before, bytes!);
-      return structuredClone(before);
+      return cloneSession(before);
     }
-    if (records.length === 0) return structuredClone(before);
+    if (records.length === 0) return cloneSession(before);
     if (revision !== (before.revision ?? 0) + 1) {
       throw new Error(`Session revision must advance from ${before.revision ?? 0} to ${(before.revision ?? 0) + 1}`);
     }
@@ -456,7 +463,7 @@ export function createSessionRepository(options: { projectId?: string } = {}) {
     projections.set(session.sessionId, next);
     journalBytes.set(session.sessionId, bytes);
     await refreshMeta(next, bytes);
-    return structuredClone(next);
+    return cloneSession(next);
   }
 
   async function readCurrentSessions(): Promise<Record<string, string>> {

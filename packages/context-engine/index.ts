@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { cloneMessagesWithIdentity } from '../shared/message-identity.ts';
 import { collectModelTurn, type ModelClient, type ModelUsage } from '../llm-client/index.ts';
 import type {
   ChatMessage,
@@ -146,7 +147,7 @@ function sha256(value: string): string {
 }
 
 function cloneMessages(messages: ChatMessage[]): ChatMessage[] {
-  return JSON.parse(JSON.stringify(messages)) as ChatMessage[];
+  return cloneMessagesWithIdentity(messages);
 }
 
 function sumBreakdown(value: ContextBreakdown): number {
