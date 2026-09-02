@@ -28,6 +28,7 @@ import type {
 import { captureFileDiff } from './file-diff.ts';
 import { presentTool } from '../conversation-view/tool-presentation.ts';
 import type { ContextEngine, ContextSection, PreparedContext } from '../context-engine/index.ts';
+import { cloneMessagesWithIdentity, identifyMessage, messageIdentity } from '../shared/message-identity.ts';
 import { projectAgentFork } from '../context-engine/index.ts';
 import type { ContextPolicy, ContextUsageSnapshot } from '../shared/types.ts';
 import type { CommittedAssistantMessage, RunEventPayload, RunPhase } from '../run-protocol/index.ts';
@@ -141,6 +142,9 @@ export type ReActLoopOptions = {
   nonInteractive?: boolean;
   semantic?: ExecutorSemanticHooks;
   commandSource?: RunCommandSource;
+  /** Snapshot of the actual prepared request plus its committed assistant response. */
+  onContextSnapshot?: (snapshot: { messages: ChatMessage[]; messageIds: Array<string | undefined> }) => void;
+  pollContext?: () => { systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] } | undefined;
   refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
   presentation?: { emit(event: RunEventPayload): void };
   context?: {
@@ -430,6 +434,17 @@ export function createExecutor(
         ?? (Number.isFinite(maxTurns) ? maxTurns * (MAX_CONTINUATIONS + 3) : Number.POSITIVE_INFINITY);
       const maxRetries = options.maxRetriesPerTurn ?? 1;
       const sessionId = options.sessionId ?? options.context?.sessionId ?? '';
+      const applyContext = (refreshed: { systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }) => {
+        if (options.context) {
+          options.context.systemSections = refreshed.systemSections;
+          options.context.managedMemoryRefs = refreshed.managedMemoryRefs;
+        } else {
+          const system = { role: 'system' as const, content: refreshed.systemSections.map((section) => section.content).join('\n\n') };
+          const existing = workingMessages.findIndex((message) => message.role === 'system');
+          if (existing >= 0) workingMessages[existing] = system;
+          else workingMessages.unshift(system);
+        }
+      };
 
       const applySteer = async (decision: Extract<Awaited<ReturnType<RunCommandSource['atSafeBoundary']>>, { action: 'continue' }>) => {
         workingMessages.push(decision.steer);
@@ -439,16 +454,7 @@ export function createExecutor(
         onEvent({ type: 'context_refresh_started', sessionId, runId, itemId: decision.itemId });
         try {
           const refreshed = await options.refreshDirective(decision.directive);
-          if (options.context) {
-            options.context.systemSections = refreshed.systemSections;
-            options.context.managedMemoryRefs = refreshed.managedMemoryRefs;
-          }
-          else {
-            const system = refreshed.systemSections.map((section) => section.content).join('\n\n');
-            const existing = workingMessages.findIndex((message) => message.role === 'system');
-            if (existing >= 0) workingMessages[existing] = { role: 'system', content: system };
-            else workingMessages.unshift({ role: 'system', content: system });
-          }
+          applyContext(refreshed);
           onEvent({ type: 'context_refresh_completed', sessionId, runId, itemId: decision.itemId });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -489,6 +495,10 @@ export function createExecutor(
             return { ...base(), status: 'limited', terminationReason: 'model_attempt_limit' };
           }
           modelAttemptCount += 1;
+          if (modelTurnCount > 1) {
+            const ready = options.pollContext?.();
+            if (ready) applyContext(ready);
+          }
           if (!options.presentation) onEvent({ type: 'task_status', taskId: runId, status: 'executing', note: `model attempt ${modelAttemptCount}` });
           const definitions = await buildToolDefinitions(Boolean(options.context), options.toolPolicy);
           currentDefinitions = definitions;
@@ -563,7 +573,7 @@ export function createExecutor(
             messageStarted = true;
             emitPresentation({ type: 'assistant_message_started', turn: modelTurnCount, messageId });
           }
-          forkSnapshot = structuredClone(requestMessages);
+          forkSnapshot = cloneMessagesWithIdentity(requestMessages);
           const turn = await collectModelTurn(observeModelEvents(modelClient.streamMessage(requestMessages, {
             tools: definitions,
             tool_choice: 'auto',
@@ -686,8 +696,12 @@ export function createExecutor(
           return { ...base(), status: 'limited', terminationReason: 'output_token_limit' };
         }
         finalContent = response.content || finalContent;
-        const assistant = assistantMessage(response);
+        const assistant = identifyMessage(assistantMessage(response), messageId);
         await options.semantic?.assistantCommitted(assistant, { messageId, turn: modelTurnCount });
+        if (options.onContextSnapshot) {
+          const snapshot = [...forkSnapshot, ...cloneMessagesWithIdentity([assistant])];
+          options.onContextSnapshot({ messages: snapshot, messageIds: snapshot.map(messageIdentity) });
+        }
         emitPresentation({ type: 'assistant_message_committed', turn: modelTurnCount, message: committedAssistantMessage(response, modelTurnCount, messageId) });
         workingMessages.push(assistant);
         loopMessages.push(assistant);

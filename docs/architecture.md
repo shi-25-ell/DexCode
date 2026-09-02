@@ -110,12 +110,18 @@ Session journal 保存消息、context manifest、tool lifecycle、Queue/Steer�
 
 `packages/managed-memory` 是独立的项目级自动记忆：
 
-- recall 在 Main Run 开始时选择相关 topic；
-- extraction 在 Run 结束后异步提取跨会话仍有价值的信息；
+- recall 在用户回合开始时注入索引，同时后台选择最多 5 个未展示的 topic；首个模型请求不等待选择器，后续模型边界只消费已经就绪的结果。回合结束、取消或关闭记忆时释放预取；
+- extraction 在主 Run 正常结束后异步启动，继承该 Run 的模型客户端、实际请求上下文和最终回答，再追加 user 提取任务。只从近期对话提取长期信息，已有记忆可用于查重和更新；
 - consolidation 合并、纠错和清理已有记忆；
 - Memory Agent 只能使用 `memory_*` 工具；
 - 用户可以关闭、查看、重建索引或清空记忆；
 - Managed Memory 不修改 `DEXCODE.md`。
+
+每个 Workspace 的提取器不重入；同一 Session 的后续请求合并为最新快照，当前提取结束后补跑，下一轮主对话无需等待。Session 各自持有内存中的消息 ID 游标；默认每个合格回合提取一次，`extractionEveryCompletedRuns` 控制频率。后台最多 5 个模型回合，全进程最多 2 个记忆任务并行，正常退出最多等待 60 秒收尾。
+
+主模型已提交记忆写入时跳过相应范围；提取器正常结束且没有未解决的写入失败时推进游标，无值得保存的信息也算正常结束。同一目标、同一种写操作的后续成功可以解决此前失败。失败保留游标，压缩导致游标消息不可见时重新分析当前可见历史。
+
+提取游标不写入磁盘，不读取旧的 `extraction-checkpoints.json`，重启后从当前可见上下文重新考虑。记忆文件、摘要校验、generation 隔离和写操作日志继续由 Store 维护。后台提取不保存独立 Run 或完整 transcript，也不进入 Agent Drawer；开始、完成、失败、耗时和用量写入现有进程日志。设置 `DEXCODE_DEBUG=1` 可在同一日志中记录脱敏错误详情。
 
 ### 6.3 Per-call Context Engine
 

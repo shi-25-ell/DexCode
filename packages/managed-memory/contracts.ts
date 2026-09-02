@@ -1,6 +1,7 @@
 import type { ContextSection } from '../context-engine/index.ts';
 import type { AgentRunResult } from '../agent-core/agent-runtime.ts';
 import type { ChatMessage } from '../shared/types.ts';
+import type { ModelClient } from '../llm-client/index.ts';
 
 export const MANAGED_MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const;
 export type ManagedMemoryType = typeof MANAGED_MEMORY_TYPES[number];
@@ -89,6 +90,7 @@ export type PreparedManagedMemory = {
   generation: number;
   sections: ContextSection[];
   refs: ManagedMemoryContextRef[];
+  prefetch?: MemoryPrefetch;
   recall: {
     candidateCount: number;
     selectedCount: number;
@@ -96,6 +98,12 @@ export type PreparedManagedMemory = {
     durationMs: number;
     warning?: string;
   };
+};
+
+/** Only consume settled results at a model boundary; never await background selection. */
+export type MemoryPrefetch = {
+  takeReady(): Pick<PreparedManagedMemory, 'sections' | 'refs' | 'recall'> | undefined;
+  dispose(): void;
 };
 
 export type PrepareManagedMemoryInput = {
@@ -114,6 +122,9 @@ export type EnqueueMemoryExtractionInput = {
   completedAt: string;
   status: 'completed' | 'aborted' | 'failed' | 'limited';
   messages: ChatMessage[];
+  /** Stable IDs of retained messages; synthetic context entries have no ID. */
+  messageIds: Array<string | undefined>;
+  modelClient: ModelClient;
   systemSections: ContextSection[];
   toolCalls: Array<{ name: string; input: unknown; outcome?: unknown }>;
 };
@@ -215,6 +226,7 @@ export type InternalMemoryRunInput = {
   parentRunId?: string;
   sessionId?: string;
   generation: number;
+  modelClient?: ModelClient;
   messages: ChatMessage[];
   systemSections: ContextSection[];
   signal?: AbortSignal;

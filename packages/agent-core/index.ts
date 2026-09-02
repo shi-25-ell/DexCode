@@ -35,7 +35,7 @@ import {
 import type { RunCommandSource } from './run-commands.ts';
 import type { ManagedMemoryCoordinator } from '../managed-memory/coordinator.ts';
 import { MEMORY_TOOL_NAMES, isMemoryTool } from '../managed-memory/tools.ts';
-import type { ManagedMemoryActor } from '../managed-memory/contracts.ts';
+import type { ManagedMemoryActor, MemoryPrefetch, PreparedManagedMemory } from '../managed-memory/contracts.ts';
 import type { AgentOrchestrationPort, AgentRecord, AgentRunRecord } from '../agent-manager/contracts.ts';
 import type { AgentPersistenceHooks } from './agent-runtime.ts';
 
@@ -228,6 +228,7 @@ export function createCodingAgent(
         ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
         profile: 'memory',
         messages: input.messages,
+        modelClient: input.modelClient,
         systemSections: input.systemSections,
         toolPolicy: { allow: [...MEMORY_TOOL_NAMES], allowExternalMcp: false, allowSkills: false },
         toolHost: withManagedMemoryTools(effectiveToolHost, input.generation, input.kind === 'extraction' ? 'memory-extractor' : 'memory-consolidator'),
@@ -323,6 +324,9 @@ export function createCodingAgent(
     publish({ type: 'run_phase_changed', phase: 'preparing_context' });
     let result: AgentRunResult;
     let managedMemoryRefs: import('../shared/types.ts').ManagedMemoryContextRef[] = [];
+    let memoryPrefetch: MemoryPrefetch | undefined;
+    const memoryController = new AbortController();
+    const memorySignal = options.signal ? AbortSignal.any([options.signal, memoryController.signal]) : memoryController.signal;
     try {
       const projectKnowledge = await sessionRepository.readProjectKnowledge(
         agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : undefined,
@@ -339,10 +343,10 @@ export function createCodingAgent(
             contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
           }),
         agentEnvironment.scope.kind === 'workspace' && managedMemory
-          ? managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId, runId, query: userPrompt, signal: options.signal })
-          : Promise.resolve({ enabled: false, generation: 0, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none' as const, durationMs: 0 } }),
+          ? managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId, runId, query: userPrompt, signal: memorySignal })
+          : Promise.resolve<PreparedManagedMemory>({ enabled: false, generation: 0, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none', durationMs: 0 } }),
       ]);
-      const systemSections = [...buildSystemSections(
+      let systemSections = [...buildSystemSections(
         context,
         projectKnowledge,
         session.taskSummaries,
@@ -350,6 +354,15 @@ export function createCodingAgent(
         agentEnvironment.scope,
       ), ...preparedMemory.sections];
       managedMemoryRefs = preparedMemory.refs;
+      memoryPrefetch = preparedMemory.prefetch;
+      let memorySnapshot: { messages: ChatMessage[]; messageIds: Array<string | undefined> } | undefined;
+      const pollContext = () => {
+        const ready = memoryPrefetch?.takeReady();
+        if (!ready) return undefined;
+        systemSections = [...systemSections, ...ready.sections];
+        managedMemoryRefs = [...managedMemoryRefs, ...ready.refs];
+        return { systemSections, managedMemoryRefs };
+      };
       const historyMessages = options.prestarted
         && session.messages.at(-1)?.role === 'user'
         && session.messages.at(-1)?.content === userPrompt
@@ -383,19 +396,24 @@ export function createCodingAgent(
           observedToolCalls.set(event.message.tool_call_id, current);
         },
         onAgentEnd(event) {
+          const snapshot = memorySnapshot;
+          if (!snapshot) return;
           managedMemory.enqueueExtraction({
             workspaceId: agentEnvironment.scope.kind === 'workspace' ? agentEnvironment.scope.workspaceId : '',
             sessionId,
             runId,
             completedAt: event.result.completedAt,
             status: event.result.status,
-            messages: [...executionMessages, ...event.result.messages],
-            systemSections,
+            ...snapshot,
+            modelClient: runModel,
+            // The prepared system message is already in the snapshot, exactly as sent.
+            systemSections: [],
             toolCalls: [...observedToolCalls.values()],
           });
         },
       } : undefined;
       const refreshDirective = async (directive: string) => {
+        memoryPrefetch?.dispose();
         const [refreshedContext, refreshedMemory] = await Promise.all([
           agentEnvironment.scope.kind === 'workspace'
             ? contextManager.buildForPrompt(directive, null, { projectKnowledge })
@@ -408,20 +426,19 @@ export function createCodingAgent(
                 contextBudget: { includedFiles: [], maxChars: 0, maxFiles: 0, strategy: 'none' },
               }),
           agentEnvironment.scope.kind === 'workspace' && managedMemory
-            ? managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId, runId, query: directive, signal: options.signal })
-            : Promise.resolve({ sections: [], refs: [] }),
+            ? managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId, runId, query: directive, signal: memorySignal })
+            : Promise.resolve<PreparedManagedMemory>({ enabled: false, generation: 0, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none', durationMs: 0 } }),
         ]);
         managedMemoryRefs = refreshedMemory.refs;
-        return {
-          systemSections: [...buildSystemSections(
+        memoryPrefetch = refreshedMemory.prefetch;
+        systemSections = [...buildSystemSections(
             refreshedContext,
             projectKnowledge,
             session.taskSummaries,
             skillsBlock(effectiveSkillRegistry, directive),
             agentEnvironment.scope,
-          ), ...refreshedMemory.sections],
-          managedMemoryRefs: refreshedMemory.refs,
-        };
+          ), ...refreshedMemory.sections];
+        return { systemSections, managedMemoryRefs };
       };
       result = await runtime.runAgent({
         identity: { runId, profile: 'main', origin: options.origin ?? 'user' },
@@ -449,6 +466,8 @@ export function createCodingAgent(
         productSessionId: sessionId,
         executorHooks: resolvedHooks,
         commandSource: options.commandSource,
+        onContextSnapshot: managedMemory ? (snapshot) => { memorySnapshot = snapshot; } : undefined,
+        pollContext,
         ...(contextStrategy === 'legacy' ? { refreshDirective } : {}),
         presentation: { emit: publish },
         onExecutorEvent: onEvent,
@@ -492,6 +511,9 @@ export function createCodingAgent(
         durationMs: 0,
         error: { code: 'RUN_INFRASTRUCTURE_FAILURE', message: error instanceof Error ? error.message : String(error) },
       };
+    } finally {
+      memoryController.abort();
+      memoryPrefetch?.dispose();
     }
     await options.beforeFinish?.({ status: result.status });
     const taskSummary: TaskSummary = {
@@ -617,7 +639,7 @@ export function createCodingAgent(
       { source: 'systemPrompt', content: `You are a DexCode child Agent named ${input.agent.name}.\n${input.agent.definitionSnapshot.systemPrompt}\nDo not ask for interactive approval. If an operation is blocked, report it and continue safely.` },
       ...buildSystemSections(context, projectKnowledge, [], '', agentEnvironment.scope).slice(1),
     ];
-    const preparedMemory = managedMemory && input.agent.definitionSnapshot.memoryPolicy.read
+    const preparedMemory: PreparedManagedMemory = managedMemory && input.agent.definitionSnapshot.memoryPolicy.read
       ? await managedMemory.prepareRun({ workspaceId: agentEnvironment.scope.workspaceId, sessionId: input.sessionId, contextOwnerId: `agent:${input.agent.agentId}`, runId: input.run.agentRunId, query: input.run.input, signal: input.signal })
       : { enabled: false, generation: 0, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none' as const, durationMs: 0 } };
     sections.push(...preparedMemory.sections);
@@ -653,6 +675,13 @@ export function createCodingAgent(
       toolHost: childToolHost,
       skillRegistry: childSkillRegistry,
       modelClient: childModel,
+      pollContext: () => {
+        const ready = preparedMemory.prefetch?.takeReady();
+        if (!ready) return undefined;
+        sections.push(...ready.sections);
+        preparedMemory.refs.push(...ready.refs);
+        return { systemSections: sections, managedMemoryRefs: preparedMemory.refs };
+      },
       contextPolicy: contextEngine && contextPolicy ? {
         mode: 'managed',
         engine: contextEngine,
@@ -664,7 +693,7 @@ export function createCodingAgent(
         managedMemoryRefs: preparedMemory.refs,
       } : { mode: 'isolated' },
       metadata: { sessionId: input.sessionId, agentId: input.agent.agentId },
-    });
+    }).finally(() => preparedMemory.prefetch?.dispose());
   }
 
   return {

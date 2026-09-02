@@ -132,6 +132,8 @@ export interface AgentRunSpec {
   skillRegistry?: SkillRegistry;
   executorHooks?: ConfirmHook | ExecutorHooks;
   commandSource?: RunCommandSource;
+  onContextSnapshot?: (snapshot: { messages: ChatMessage[]; messageIds: Array<string | undefined> }) => void;
+  pollContext?: () => { systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] } | undefined;
   refreshDirective?: (directive: string) => Promise<{ systemSections: ContextSection[]; managedMemoryRefs?: import('../shared/types.ts').ManagedMemoryContextRef[] }>;
   presentation?: { emit(event: RunEventPayload): void };
   onExecutorEvent?: (event: AgentEvent) => void;
@@ -339,6 +341,8 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies) {
           nonInteractive: identity.origin === 'orchestrated',
           semantic,
           commandSource: spec.commandSource,
+          onContextSnapshot: spec.onContextSnapshot,
+          pollContext: spec.pollContext,
           presentation: spec.presentation,
           refreshDirective: contextPolicy.mode === 'managed' ? contextPolicy.refreshDirective : spec.refreshDirective,
           ...(contextPolicy.mode === 'managed' ? {

@@ -44,7 +44,7 @@ export function buildExtractionPrompt(input: {
 }): string {
   return `# Memory Extraction
 
-你是记忆提取 Agent。只分析提供的最近消息，更新当前 Workspace 的自动记忆。当前轮完成时间：${input.completedAt}。
+现在开始一个新的记忆提取任务。你是记忆提取 Agent。只分析提供的最近对话消息，更新当前 Workspace 的自动记忆。系统提示和工作区上下文不属于本轮的新记忆来源；不要主动读取或调查项目文件。memory_read 仅用于已有记忆的查重和更新。当前轮完成时间：${input.completedAt}。
 增量范围：${input.checkpointDescription}
 
 你只能使用 memory_list、memory_read、memory_search、memory_upsert、memory_remove。现有 manifest 已提供，先判断是否真的需要保存；没有长期价值时不要调用写工具。topic path 只能填写记忆根目录中的裸文件名，例如 coding-agent-project.md，不要添加目录前缀。

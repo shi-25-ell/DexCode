@@ -8,6 +8,7 @@ import type {
   ModelUsage,
   ReasoningCapability,
 } from './types.ts';
+import { debugLog } from '../shared/debug.ts';
 
 type OpenAiCompatibleModelOptions = {
   baseUrl: string;
@@ -189,6 +190,8 @@ export function createOpenAiCompatibleModelClient(options: OpenAiCompatibleModel
       if (!response.ok) {
         let errorBody: unknown;
         try { errorBody = JSON.parse(await response.text()); } catch { errorBody = undefined; }
+        const providerMessage = (errorBody as { error?: { message?: unknown } } | undefined)?.error?.message;
+        if (typeof providerMessage === 'string') debugLog('llm.http_error', providerMessage, [apiKey]);
         yield {
           version: 1,
           type: 'turn_failed',

@@ -8,6 +8,7 @@ import {
   type PreparedManagedMemory,
 } from './contracts.ts';
 import { buildMemoryPolicyPrompt, formatManifest } from './prompt.ts';
+import { debugLog } from '../shared/debug.ts';
 import type { ManagedMemoryStore } from './store.ts';
 
 function ignoreMemory(query: string): boolean {
@@ -37,7 +38,8 @@ export function lexicalSelect(query: string, candidates: MemoryHeader[], already
 export function createModelMemorySelector(modelClient: ModelClient, timeoutMs = 5_000): MemorySelector {
   return {
     async select(input) {
-      if (input.candidates.length === 0) return [];
+      const candidates = input.candidates.filter((item) => !input.alreadySurfaced.has(`${item.path}:${item.digest}`));
+      if (candidates.length === 0 || input.signal?.aborted) return [];
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       const forwardAbort = () => controller.abort();
@@ -45,7 +47,7 @@ export function createModelMemorySelector(modelClient: ModelClient, timeoutMs = 
       try {
         const response = await collectModelTurn(modelClient.streamMessage([
           { role: 'system', content: 'Select up to five memory filenames that are clearly useful for the query. Return strict JSON only: {"selected":["file.md"]}. Do not invent filenames.' },
-          { role: 'user', content: `Query: ${input.query}\n\nAvailable memories:\n${formatManifest(input.candidates.filter((item) => !input.alreadySurfaced.has(`${item.path}:${item.digest}`)))}` },
+          { role: 'user', content: `Query: ${input.query}\n\nAvailable memories:\n${formatManifest(candidates)}` },
         ], { max_tokens: 256, temperature: 0, signal: controller.signal, timeoutMs }));
         if (response.status !== 'completed') throw new Error(response.failure.message);
         const match = /\{[\s\S]*\}/.exec(response.response.content);
@@ -66,12 +68,15 @@ export function createMemoryRecall(options: {
   store: ManagedMemoryStore;
   selector: MemorySelector;
   now?: () => number;
+  observe?: (recall: PreparedManagedMemory['recall']) => void;
 }) {
   const surfacedBySession = new Map<string, Set<string>>();
+  const active = new Map<string, { key: string; promise: Promise<PreparedManagedMemory>; dispose(): void }>();
   const now = options.now ?? Date.now;
 
-  async function prepare(input: {
+  function prepare(input: {
     sessionId: string;
+    runId: string;
     contextOwnerId?: string;
     query: string;
     generation: number;
@@ -79,74 +84,124 @@ export function createMemoryRecall(options: {
     recallEnabled: boolean;
     signal?: AbortSignal;
   }): Promise<PreparedManagedMemory> {
-    const started = now();
-    if (ignoreMemory(input.query)) {
-      return { enabled: true, generation: input.generation, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none', durationMs: Math.max(0, now() - started) } };
-    }
-    const [index, candidates] = await Promise.all([
-      options.store.readIndex(options.workspaceId),
-      input.recallEnabled ? options.store.scan(options.workspaceId, input.signal) : Promise.resolve([]),
-    ]);
     const ownerId = input.contextOwnerId ?? input.sessionId;
-    const surfaced = surfacedBySession.get(ownerId) ?? new Set<string>();
-    let selectedPaths: string[] = [];
-    let selector: PreparedManagedMemory['recall']['selector'] = 'none';
-    let warning: string | undefined;
-    if (input.recallEnabled && candidates.length > 0) {
-      try {
-        const valid = new Set(candidates.map((candidate) => candidate.path));
-        selectedPaths = (await options.selector.select({ query: input.query, candidates, alreadySurfaced: surfaced, signal: input.signal }))
-          .filter((path, indexValue, all) => valid.has(path) && all.indexOf(path) === indexValue)
-          .slice(0, MANAGED_MEMORY_LIMITS.maxSelectedTopics);
-        selector = 'model';
-      } catch (error) {
-        if (input.signal?.aborted) throw error;
-        selectedPaths = lexicalSelect(input.query, candidates, surfaced);
-        selector = 'lexical-fallback';
-        warning = error instanceof Error ? error.message : String(error);
-      }
-    }
-    const selected = await Promise.allSettled(selectedPaths.map((path) => options.store.readTopic(options.workspaceId, path, {
-      maxLines: MANAGED_MEMORY_LIMITS.maxReadLines,
-      maxBytes: MANAGED_MEMORY_LIMITS.maxTopicRecallBytes,
-    })));
-    const refs: ManagedMemoryContextRef[] = [];
-    if (index) refs.push({ path: index.path, digest: index.digest, mtimeMs: index.mtimeMs, bytes: index.bytes, truncated: index.truncated, reason: 'index' });
-    const topicBlocks: string[] = [];
-    for (const item of selected) {
-      if (item.status !== 'fulfilled') continue;
-      const topic = item.value;
-      const ageMs = Math.max(0, now() - topic.mtimeMs);
-      const ageDays = Math.floor(ageMs / 86_400_000);
-      topicBlocks.push([
-        `### ${topic.path} · ${topic.digest.slice(0, 19)} · saved ${ageDays === 0 ? 'today' : `${ageDays}d ago`}`,
-        ageMs > 86_400_000 ? '> This memory is older than one day. Verify referenced files, functions, configuration and current state before acting.' : '',
-        topic.raw,
-        topic.truncated ? '> Topic view truncated; use memory_read for more.' : '',
-      ].filter(Boolean).join('\n'));
-      refs.push({ path: topic.path, digest: topic.digest, mtimeMs: topic.mtimeMs, bytes: topic.bytes, truncated: topic.truncated, reason: 'relevant' });
-      surfaced.add(`${topic.path}:${topic.digest}`);
-    }
-    surfacedBySession.set(ownerId, surfaced);
-    const sections: ContextSection[] = input.inject ? [
-      { source: 'systemPrompt', content: buildMemoryPolicyPrompt(candidates.length === 0) },
-      { source: 'managedMemory', content: `## Managed Memory Index\n${index?.raw.trim() || '(empty)'}` },
-      ...(topicBlocks.length > 0 ? [{ source: 'managedMemory' as const, content: `## Relevant Managed Memory\n${topicBlocks.join('\n\n')}` }] : []),
-    ] : [];
-    return {
-      enabled: true,
-      generation: input.generation,
-      sections,
-      refs: input.inject ? refs : [],
-      recall: {
-        candidateCount: candidates.length,
-        selectedCount: topicBlocks.length,
-        selector,
-        durationMs: Math.max(0, now() - started),
-        ...(warning ? { warning } : {}),
-      },
+    const key = JSON.stringify([input.runId, input.query]);
+    const existing = active.get(ownerId);
+    if (existing?.key === key) return existing.promise;
+    existing?.dispose();
+    const started = now();
+    const controller = new AbortController();
+    let ready: ReturnType<NonNullable<PreparedManagedMemory['prefetch']>['takeReady']>;
+    let disposed = false;
+    const dispose = () => {
+      disposed = true;
+      ready = undefined;
+      controller.abort();
+      input.signal?.removeEventListener('abort', dispose);
+      if (active.get(ownerId)?.dispose === dispose) active.delete(ownerId);
     };
+    input.signal?.addEventListener('abort', dispose, { once: true });
+    if (input.signal?.aborted) dispose();
+    const promise = Promise.resolve().then(async (): Promise<PreparedManagedMemory> => {
+      const empty: PreparedManagedMemory = { enabled: true, generation: input.generation, sections: [], refs: [], recall: { candidateCount: 0, selectedCount: 0, selector: 'none', durationMs: 0 } };
+      if (disposed || ignoreMemory(input.query)) { dispose(); return empty; }
+      const [index, allCandidates] = await Promise.all([
+        options.store.readIndex(options.workspaceId),
+        input.recallEnabled ? options.store.scan(options.workspaceId, controller.signal) : Promise.resolve([]),
+      ]);
+      if (disposed) return empty;
+      const refs: ManagedMemoryContextRef[] = index && input.inject
+        ? [{ path: index.path, digest: index.digest, mtimeMs: index.mtimeMs, bytes: index.bytes, truncated: index.truncated, reason: 'index' }]
+        : [];
+      const sections: ContextSection[] = input.inject ? [
+        { source: 'systemPrompt', content: buildMemoryPolicyPrompt(allCandidates.length === 0) },
+        { source: 'managedMemory', content: `## Managed Memory Index\n${index?.raw.trim() || '(empty)'}` },
+      ] : [];
+      const surfaced = surfacedBySession.get(ownerId) ?? new Set<string>();
+      const candidates = allCandidates.filter((item) => !surfaced.has(`${item.path}:${item.digest}`));
+      const prefetch: NonNullable<PreparedManagedMemory['prefetch']> = {
+        takeReady() {
+          if (disposed || !ready) return undefined;
+          const value = ready;
+          if (input.inject) {
+            const current = surfacedBySession.get(ownerId) ?? new Set<string>();
+            for (const ref of value.refs) current.add(`${ref.path}:${ref.digest}`);
+            surfacedBySession.set(ownerId, current);
+          }
+          dispose();
+          return value;
+        },
+        dispose,
+      };
+      if (candidates.length > 0) {
+        // This promise owns its errors and is never on the main model's critical path.
+        void selectTopics(candidates, surfaced).then((value) => {
+          if (!disposed) { ready = value; options.observe?.(value.recall); }
+        }).catch(() => { if (!disposed) dispose(); });
+      }
+      return { ...empty, sections, refs, prefetch, recall: { ...empty.recall, candidateCount: candidates.length, durationMs: Math.max(0, now() - started) } };
+    }).catch((error: unknown) => { dispose(); throw error; });
+    if (!disposed) active.set(ownerId, { key, promise, dispose });
+    return promise;
+
+    async function selectTopics(candidates: MemoryHeader[], surfaced: ReadonlySet<string>) {
+      let selectedPaths: string[] = [];
+      let selector: PreparedManagedMemory['recall']['selector'] = 'none';
+      let warning: string | undefined;
+      if (input.recallEnabled && candidates.length > 0) {
+        try {
+          const valid = new Set(candidates.map((candidate) => candidate.path));
+          selectedPaths = (await options.selector.select({ query: input.query, candidates, alreadySurfaced: surfaced, signal: controller.signal }))
+            .filter((path, indexValue, all) => valid.has(path) && all.indexOf(path) === indexValue)
+            .slice(0, MANAGED_MEMORY_LIMITS.maxSelectedTopics);
+          selector = 'model';
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          debugLog('managed_memory.selector.error', error);
+          selectedPaths = lexicalSelect(input.query, candidates, surfaced);
+          selector = 'lexical-fallback';
+          warning = 'Memory selection failed; used lexical fallback';
+        }
+      }
+      if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      const selected = await Promise.allSettled(selectedPaths.map((path) => options.store.readTopic(options.workspaceId, path, {
+        maxLines: MANAGED_MEMORY_LIMITS.maxReadLines,
+        maxBytes: MANAGED_MEMORY_LIMITS.maxTopicRecallBytes,
+      })));
+      const refs: ManagedMemoryContextRef[] = [];
+      const topicBlocks: string[] = [];
+      for (const item of selected) {
+        if (item.status !== 'fulfilled') continue;
+        const topic = item.value;
+        const ageMs = Math.max(0, now() - topic.mtimeMs);
+        const ageDays = Math.floor(ageMs / 86_400_000);
+        topicBlocks.push([
+          `### ${topic.path} · ${topic.digest.slice(0, 19)} · saved ${ageDays === 0 ? 'today' : `${ageDays}d ago`}`,
+          ageMs > 86_400_000 ? '> This memory is older than one day. Verify referenced files, functions, configuration and current state before acting.' : '',
+          topic.raw,
+          topic.truncated ? '> Topic view truncated; use memory_read for more.' : '',
+        ].filter(Boolean).join('\n'));
+        refs.push({ path: topic.path, digest: topic.digest, mtimeMs: topic.mtimeMs, bytes: topic.bytes, truncated: topic.truncated, reason: 'relevant' });
+      }
+      const sections: ContextSection[] = input.inject ? [
+        ...(topicBlocks.length > 0 ? [{ source: 'managedMemory' as const, content: `## Relevant Managed Memory\n${topicBlocks.join('\n\n')}` }] : []),
+      ] : [];
+      return {
+        enabled: true,
+        generation: input.generation,
+        sections,
+        refs: input.inject ? refs : [],
+        recall: {
+          candidateCount: candidates.length,
+          selectedCount: topicBlocks.length,
+          selector,
+          durationMs: Math.max(0, now() - started),
+          ...(warning ? { warning } : {}),
+        },
+      };
+    }
   }
 
-  return { prepare, clearSession(sessionId: string) { surfacedBySession.delete(sessionId); }, clearAll() { surfacedBySession.clear(); } };
+  const cancelAll = () => { for (const value of active.values()) value.dispose(); };
+  return { prepare, cancelAll, clearSession(sessionId: string) { active.get(sessionId)?.dispose(); surfacedBySession.delete(sessionId); }, clearAll() { cancelAll(); surfacedBySession.clear(); } };
 }
